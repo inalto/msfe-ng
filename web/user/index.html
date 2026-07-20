@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<style>
+  :root { color-scheme: light dark; --fg:#1a1a1a; --muted:#6b7280; --line:#e5e7eb;
+          --accent:#059669; --bg:#fff; --card:#f9fafb; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg:#e5e7eb; --muted:#9ca3af; --line:#374151; --accent:#34d399;
+            --bg:#0b0f19; --card:#111827; } }
+  * { box-sizing: border-box; }
+  body { font: 15px/1.55 system-ui, sans-serif; margin: 0; color: var(--fg);
+         background: var(--bg); }
+  header { padding: 1.25rem 1.5rem; border-bottom: 1px solid var(--line);
+           display: flex; align-items: center; gap: .75rem; }
+  header .logo { width: 32px; height: 32px; border-radius: 8px;
+                 background: var(--accent); display: grid; place-items: center;
+                 color: #fff; font-weight: 700; }
+  header h1 { font-size: 1.05rem; margin: 0; }
+  main { max-width: 44rem; margin: 0 auto; padding: 2rem 1.5rem; }
+  .banner { background: var(--card); border: 1px solid var(--line);
+            border-radius: 12px; padding: 1.25rem 1.5rem; }
+  .banner h2 { margin: 0 0 .35rem; font-size: 1.05rem; }
+  .banner p { margin: .25rem 0; color: var(--muted); }
+  ul { margin: 1.25rem 0 0; padding: 0; list-style: none; }
+  li { display: flex; justify-content: space-between; padding: .7rem .25rem;
+       border-top: 1px solid var(--line); color: var(--muted); }
+  li:first-child { border-top: 0; }
+  code { background: #8882; padding: .1rem .35rem; border-radius: 4px; }
+  footer { color: var(--muted); font-size: .8rem; text-align: center; padding: 2rem 1rem; }
+</style></head>
+<body>
+  <header>
+    <span class="logo">MS</span>
+    <h1>Mail Settings</h1>
+  </header>
+  <main>
+    <section class="banner">
+      <h2>MailScanner settings — coming soon</h2>
+      <p>Your account is connected to MSFE-NG <code>{{VERSION}}</code> on
+         {{PANEL}}. Self-service controls are being built (M4).</p>
+    </section>
+    <ul>
+      <li><span>Spam sensitivity &amp; actions</span><span>M4</span></li>
+      <li><span>Personal black / white lists</span><span>M4</span></li>
+      <li><span>SpamBox folder</span><span>M4</span></li>
+      <li><span>Quarantine — view &amp; release held mail</span><span>M4</span></li>
+      <li><span>Daily digest</span><span>M5</span></li>
+    </ul>
+  </main>
+  <footer>MSFE-NG — open-source MailScanner Front-End.</footer>
+</body></html>

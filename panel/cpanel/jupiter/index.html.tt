@@ -1,0 +1,15 @@
+[%
+# cPanel Jupiter user-side entry for MSFE-NG.
+# Calls the UAPI module Cpanel::API::MSFE_NG::msDisplay, which forwards the
+# request to the msfe-ngd daemon over its Unix socket and returns rendered HTML.
+USE Uapi;
+SET result = Uapi.execute('MSFE_NG', 'msDisplay', { view => 'user' });
+-%]
+[% WRAPPER '_assets/master.html.tt'
+      app_key = 'msfe_ng'
+      include_legacy_stylesheets = 1
+-%]
+<div class="body-content">
+[% result.data.output %]
+</div>
+[% END %]

@@ -1,0 +1,11 @@
+[
+  {
+    "icon": "msfe-ng.png",
+    "group_id": "email",
+    "order": 250,
+    "name": "MailScanner",
+    "type": "link",
+    "id": "msfe_ng",
+    "uri": "msfe_ng/index.html"
+  }
+]

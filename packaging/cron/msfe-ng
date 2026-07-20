@@ -1,0 +1,7 @@
+# MSFE-NG cron jobs (installed to /etc/cron.d/msfe-ng).
+#
+# M0: the reconciliation job is DISABLED because `msfe-ng sync` is not
+# implemented until M2. Uncomment the line below once M2 lands.
+SHELL=/bin/sh
+PATH=/usr/bin:/bin:/opt/msfe-ng/bin
+# */10 * * * * root /opt/msfe-ng/bin/msfe-ng sync >/dev/null 2>&1

@@ -1,0 +1,31 @@
+#!/usr/bin/perl
+# MSFE-NG DirectAdmin admin entry (clean-room). Proxies to the msfe-ngd daemon.
+# DirectAdmin executes this and serves its stdout. Auth is handled by DA itself.
+use strict;
+use warnings;
+use IO::Socket::UNIX ();
+
+my $SOCKET = $ENV{MSFE_NG_SOCKET} || '/var/run/msfe-ng/msfe-ng.sock';
+
+print "Content-type: text/html; charset=utf-8\n\n";
+print proxy('/whm');
+
+sub proxy {
+    my ($path) = @_;
+    my $sock = IO::Socket::UNIX->new(
+        Type => IO::Socket::UNIX::SOCK_STREAM(),
+        Peer => $SOCKET,
+    ) or return down();
+    print {$sock} "GET $path HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    local $/;
+    my $raw = <$sock>;
+    close $sock;
+    return down() unless defined $raw;
+    my ( undef, $body ) = split /\r\n\r\n/, $raw, 2;
+    return defined $body ? $body : down();
+}
+
+sub down {
+    return "<h2>MSFE-NG daemon is not responding</h2>"
+      . "<p>Try <code>systemctl restart msfe-ng</code>.</p>";
+}

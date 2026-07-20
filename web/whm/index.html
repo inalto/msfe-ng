@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<style>
+  :root { color-scheme: light dark; --fg:#1a1a1a; --muted:#6b7280; --line:#e5e7eb;
+          --accent:#2563eb; --bg:#fff; --card:#f9fafb; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg:#e5e7eb; --muted:#9ca3af; --line:#374151; --accent:#60a5fa;
+            --bg:#0b0f19; --card:#111827; } }
+  * { box-sizing: border-box; }
+  body { font: 15px/1.55 system-ui, sans-serif; margin: 0; color: var(--fg);
+         background: var(--bg); }
+  header { padding: 1.5rem; border-bottom: 1px solid var(--line);
+           display: flex; align-items: center; gap: .75rem; }
+  header .logo { width: 34px; height: 34px; border-radius: 8px;
+                 background: var(--accent); display: grid; place-items: center;
+                 color: #fff; font-weight: 700; }
+  header h1 { font-size: 1.15rem; margin: 0; }
+  header .role { margin-left: auto; font-size: .8rem; color: var(--muted); }
+  main { max-width: 60rem; margin: 0 auto; padding: 2rem 1.5rem; }
+  .banner { background: var(--card); border: 1px solid var(--line);
+            border-radius: 12px; padding: 1.25rem 1.5rem; }
+  .banner h2 { margin: 0 0 .35rem; font-size: 1.05rem; }
+  .banner p { margin: .25rem 0; color: var(--muted); }
+  .nav { display: grid; grid-template-columns: repeat(auto-fill,minmax(15rem,1fr));
+         gap: 1rem; margin-top: 1.5rem; }
+  .nav a { display: block; padding: 1rem 1.15rem; border: 1px solid var(--line);
+           border-radius: 12px; text-decoration: none; color: inherit;
+           background: var(--card); }
+  .nav a[aria-disabled] { opacity: .55; pointer-events: none; }
+  .nav b { display: block; margin-bottom: .2rem; }
+  .nav span { color: var(--muted); font-size: .85rem; }
+  footer { color: var(--muted); font-size: .8rem; text-align: center;
+           padding: 2rem 1rem; }
+  code { background: #8882; padding: .1rem .35rem; border-radius: 4px; }
+</style></head>
+<body>
+  <header>
+    <span class="logo">MS</span>
+    <h1>MSFE-NG · MailScanner Front-End</h1>
+    <span class="role">{{VIEW}} · {{PANEL}}</span>
+  </header>
+  <main>
+    <section class="banner">
+      <h2>Installable skeleton (M0)</h2>
+      <p>The plugin is registered and the daemon is answering. Management
+         features are stubbed until milestones M1–M5 land.</p>
+      <p>Daemon <code>{{VERSION}}</code> · panel <code>{{PANEL}}</code></p>
+    </section>
+    <nav class="nav">
+      <a aria-disabled><b>Global settings</b><span>Score thresholds, actions — M3</span></a>
+      <a aria-disabled><b>Black / white lists</b><span>System &amp; per-domain — M2</span></a>
+      <a aria-disabled><b>Reports &amp; graphs</b><span>Mail log dashboards — M3</span></a>
+      <a aria-disabled><b>Quarantine</b><span>Browse / release — M4</span></a>
+      <a aria-disabled><b>Digests</b><span>Scheduled summaries — M5</span></a>
+      <a href="/health"><b>Health check</b><span>Live daemon status JSON</span></a>
+    </nav>
+  </main>
+  <footer>MSFE-NG — open-source, GPLv3. Clean-room reimplementation; not affiliated with ConfigServer / Way to the Web.</footer>
+</body></html>

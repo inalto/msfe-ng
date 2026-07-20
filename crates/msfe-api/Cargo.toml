@@ -1,0 +1,9 @@
+[package]
+name = "msfe-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Shared request/response types and constants for MSFE-NG."
+
+[dependencies]

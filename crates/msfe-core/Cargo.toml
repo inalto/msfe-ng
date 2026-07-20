@@ -1,0 +1,10 @@
+[package]
+name = "msfe-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "MSFE-NG core: panel abstraction, config model, rule engine, MailScanner/Exim ops."
+
+[dependencies]
+msfe-api = { workspace = true }
