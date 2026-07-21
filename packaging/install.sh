@@ -87,9 +87,11 @@ cpanel_install() {
     install -m 0644 "$REPO/panel/cpanel/msfe-ng.png"           "$CP_JUP_DIR/msfe-ng.png"
     install -m 0644 "$REPO/panel/cpanel/jupiter/dynamicui_msfe_ng.conf" "$CP_DYNUI"
     install -m 0644 "$REPO/panel/hooks/UpcpHook.pm"      "$CP_HOOK_DIR/UpcpHook.pm"
+    install -m 0644 "$REPO/panel/hooks/EximHook.pm"      "$CP_HOOK_DIR/EximHook.pm"
 
     /usr/local/cpanel/bin/register_appconfig "$CP_APPCONF" || warn "register_appconfig failed"
-    /usr/local/cpanel/bin/manage_hooks add module MSFE_NG::UpcpHook || warn "manage_hooks add failed"
+    /usr/local/cpanel/bin/manage_hooks add module MSFE_NG::UpcpHook || warn "manage_hooks add MSFE_NG::UpcpHook failed"
+    /usr/local/cpanel/bin/manage_hooks add module MSFE_NG::EximHook || warn "manage_hooks add MSFE_NG::EximHook failed"
     [ -x /usr/local/cpanel/scripts/rebuild_sprites ] && /usr/local/cpanel/scripts/rebuild_sprites jupiter || true
     [ -x /usr/local/cpanel/bin/build_locale_databases ] && /usr/local/cpanel/bin/build_locale_databases || true
     warn "enable the 'msfe_ng' feature in the accounts' Feature List to show the user icon"
@@ -150,8 +152,11 @@ case "$panel" in
     directadmin) info "Open DirectAdmin > Admin/User level > MSFE-NG." ;;
 esac
 echo
-info "Next steps (M1):"
+info "Next steps:"
 info "  1. Create the MySQL DB + user, set creds in $CONFDIR/config.toml"
 info "  2. Apply the schema:        msfe-ng db-migrate"
-info "  3. Enable message logging:  msfe-ng mailscanner enable-logging   (then restart MailScanner)"
+info "  3. Import existing policy:  msfe-ng import /usr/msfe --save   (optional, from a legacy MSFE)"
+info "  4. Generate rules:          msfe-ng sync        (also runs every 10 min via cron)"
+info "  5. Enable message logging:  msfe-ng mailscanner enable-logging   (then restart MailScanner)"
+info "  6. Enable SpamBox:          msfe-ng spambox enable   (then include it in Exim)"
 info "Remove everything with: $HERE/uninstall.sh"

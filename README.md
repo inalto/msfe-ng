@@ -5,11 +5,11 @@ A modern, free (GPLv3) reimplementation of a MailScanner management front-end fo
 replaces the now-defunct, proprietary ConfigServer MailScanner Front-End (MSFE)
 with a clean-room codebase — **no licensing phone-home, no obfuscation**.
 
-> **Status: milestone M1 — data + logging backbone.** On top of the M0 skeleton
-> (installs, registers, serves placeholder pages, cleanly uninstalls) there is now
-> a MySQL schema + migration runner (`msfe-ng db-migrate`), a clean-room
-> MailScanner logging plugin (`msfe-ng mailscanner enable-logging`), and a legacy
-> config importer (`msfe-ng import /usr/msfe`). UI + rules arrive in M2–M5.
+> **Status: milestone M2 — rule engine.** On top of M0/M1, MSFE-NG now generates
+> the MailScanner ruleset from policy + local domains (`msfe-ng sync`, also on a
+> 10-min cron), manages the system white/black lists and the SpamBox Exim
+> fragment (`msfe-ng spambox`), and can send GTUBE/EICAR/clean test mail
+> (`msfe-ng selftest`). Admin/user UIs arrive in M3–M4.
 
 ## Why
 
@@ -58,7 +58,7 @@ sudo packaging/uninstall.sh            # add --purge to also remove /etc/msfe-ng
 |-----------|----------|
 | **M0** ✅ | Installable skeleton: daemon, panel wiring, install/uninstall |
 | **M1** ✅ | MySQL schema + migrations, MailScanner logging plugin, config model + legacy importer |
-| M2 | Rule engine (`sync`), lists, SpamBox, Exim hooks, `selftest` |
+| **M2** ✅ | Rule engine (`sync` + cron), white/black lists, SpamBox fragment, Exim rebuild hook, `selftest` |
 | M3 | Admin UI: settings, lists, reports/graphs |
 | M4 | User UI + quarantine browse/release |
 | M5 | Digests, housekeeping, mailflow management, i18n |

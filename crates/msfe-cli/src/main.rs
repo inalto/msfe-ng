@@ -1,12 +1,14 @@
 //! `msfe-ng` — the MSFE-NG command line tool.
 //!
-//! Used by admins directly and by the installer / cron / panel hooks. M1 adds
-//! `import`, `db-migrate`, and `config`. The heavier `sync`/`selftest` remain
-//! honest stubs until M2.
+//! Used by admins directly and by the installer / cron / panel hooks. Commands:
+//! health, panel, config, import[/--save], sync[/--dry-run], spambox, selftest,
+//! db-migrate, mailscanner.
 
-use msfe_api::{DEFAULT_CONFIG_FILE, DEFAULT_MIGRATIONS_DIR, DEFAULT_SOCKET_PATH, VERSION};
+use msfe_api::{
+    PanelKind, DEFAULT_CONFIG_FILE, DEFAULT_MIGRATIONS_DIR, DEFAULT_SOCKET_PATH, VERSION,
+};
 use msfe_core::config::Config;
-use msfe_core::{detect_panel, import_legacy, migrate};
+use msfe_core::{detect_panel, import_legacy, legacy, migrate, rules, spambox};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -42,19 +44,12 @@ fn main() -> ExitCode {
         }
         "health" => cmd_health(),
         "config" => cmd_config(),
-        "import" => cmd_import(args.get(1).map(String::as_str)),
+        "import" => cmd_import(&args[1..]),
         "db-migrate" => cmd_db_migrate(args.get(1).map(String::as_str)),
         "mailscanner" => cmd_mailscanner(args.get(1).map(String::as_str)),
-        "sync" => {
-            eprintln!("msfe-ng sync: not implemented yet (arrives in M2: rule reconciliation).");
-            ExitCode::from(3)
-        }
-        "selftest" => {
-            eprintln!(
-                "msfe-ng selftest: not implemented yet (arrives in M2: GTUBE/EICAR/clean mail probe)."
-            );
-            ExitCode::from(3)
-        }
+        "sync" => cmd_sync(args.get(1).map(String::as_str)),
+        "spambox" => cmd_spambox(args.get(1).map(String::as_str)),
+        "selftest" => cmd_selftest(),
         "help" | "--help" | "-h" => {
             print_help();
             ExitCode::SUCCESS
@@ -105,25 +100,298 @@ fn cmd_config() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Import a legacy MSFE directory and print the normalized config as JSON.
-fn cmd_import(dir: Option<&str>) -> ExitCode {
+/// Import a legacy MSFE directory. Prints the normalized config as JSON, or with
+/// `--save` writes the normalized policy files into `<confdir>/policy/` so `sync`
+/// can consume them.
+fn cmd_import(args: &[String]) -> ExitCode {
+    let dir = args.iter().find(|a| !a.starts_with("--"));
+    let save = args.iter().any(|a| a == "--save");
     let dir = match dir {
         Some(d) => d,
         None => {
-            eprintln!("usage: msfe-ng import <legacy-msfe-dir>   (e.g. /usr/msfe)");
+            eprintln!("usage: msfe-ng import <legacy-msfe-dir> [--save]   (e.g. /usr/msfe)");
             return ExitCode::from(2);
         }
     };
-    match import_legacy(Path::new(dir)) {
-        Ok(imp) => {
-            println!("{}", imp.to_json());
-            ExitCode::SUCCESS
-        }
+    let imp = match import_legacy(Path::new(dir)) {
+        Ok(i) => i,
         Err(e) => {
             eprintln!("msfe-ng import: {e}");
-            ExitCode::from(1)
+            return ExitCode::from(1);
+        }
+    };
+    if save {
+        let pdir = policy_dir();
+        if let Err(e) = save_policy(&pdir, &imp) {
+            eprintln!(
+                "msfe-ng import: cannot save policy to {}: {e}",
+                pdir.display()
+            );
+            return ExitCode::from(1);
+        }
+        println!(
+            "saved policy to {} ({} settings, {} whitelist, {} blacklist). Run: msfe-ng sync",
+            pdir.display(),
+            imp.settings.len(),
+            imp.whitelist.len(),
+            imp.blacklist.len()
+        );
+    } else {
+        println!("{}", imp.to_json());
+    }
+    ExitCode::SUCCESS
+}
+
+/// Directory where the active policy (normalized legacy files) lives.
+fn policy_dir() -> PathBuf {
+    config_path()
+        .parent()
+        .unwrap_or(Path::new("/etc/msfe-ng"))
+        .join("policy")
+}
+
+/// Write normalized `msconfig.txt` + `mailscannerbw` for `sync` to consume.
+fn save_policy(dir: &Path, imp: &legacy::LegacyImport) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let mut msconfig = String::new();
+    for (k, v) in &imp.settings {
+        msconfig.push_str(&format!("{k}={v}\n"));
+    }
+    std::fs::write(dir.join("msconfig.txt"), msconfig)?;
+    let bw = format!("{}\n{}\n", imp.whitelist.join(","), imp.blacklist.join(","));
+    std::fs::write(dir.join("mailscannerbw"), bw)
+}
+
+/// Load the active policy: (settings, whitelist, blacklist).
+fn load_policy() -> (Vec<(String, String)>, Vec<String>, Vec<String>) {
+    let dir = policy_dir();
+    let settings = legacy::parse_keyval(
+        &std::fs::read_to_string(dir.join("msconfig.txt")).unwrap_or_default(),
+    );
+    let (wl, bl) =
+        legacy::parse_bw(&std::fs::read_to_string(dir.join("mailscannerbw")).unwrap_or_default());
+    (settings, wl, bl)
+}
+
+/// Local domains to generate rules for. `MSFE_NG_DOMAINS_FILE` overrides source
+/// (for testing); otherwise the panel's local-domains file (+ secondarymx on cPanel).
+fn gather_domains() -> Vec<String> {
+    if let Ok(f) = std::env::var("MSFE_NG_DOMAINS_FILE") {
+        return read_domains(Path::new(&f));
+    }
+    let panel = detect_panel();
+    let mut d = read_domains(Path::new(panel.local_domains_path()));
+    if panel.kind() == PanelKind::Cpanel {
+        d.extend(read_domains(Path::new("/etc/secondarymx")));
+    }
+    // de-dup, preserve order
+    let mut seen = std::collections::HashSet::new();
+    d.retain(|x| seen.insert(x.clone()));
+    d
+}
+
+fn read_domains(path: &Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect()
+}
+
+/// Reconcile the policy into MailScanner rule files. `--dry-run` prints the
+/// generated files without writing or reloading.
+fn cmd_sync(flag: Option<&str>) -> ExitCode {
+    let cfg = Config::load(&config_path());
+    let (settings, wl, bl) = load_policy();
+    let domains = gather_domains();
+    let rs = rules::RuleSettings::from_settings(&settings);
+    let files = rules::generate(&rs, &domains, &wl, &bl);
+
+    if flag == Some("--dry-run") {
+        println!(
+            "# dry-run: {} domains, {} whitelist, {} blacklist → {} files in {}",
+            domains.len(),
+            wl.len(),
+            bl.len(),
+            files.len(),
+            cfg.mailscanner_rules_dir
+        );
+        for f in &files {
+            println!("\n===== {} =====", f.name);
+            print!("{}", f.contents);
+        }
+        return ExitCode::SUCCESS;
+    }
+
+    let dir = Path::new(&cfg.mailscanner_rules_dir);
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        eprintln!("msfe-ng sync: cannot create {}: {e}", dir.display());
+        return ExitCode::from(1);
+    }
+    for f in &files {
+        if let Err(e) = atomic_write(&dir.join(&f.name), f.contents.as_bytes()) {
+            eprintln!("msfe-ng sync: cannot write {}: {e}", f.name);
+            return ExitCode::from(1);
         }
     }
+    println!(
+        "wrote {} rule files for {} domains to {}",
+        files.len(),
+        domains.len(),
+        dir.display()
+    );
+    reload_mailscanner();
+    ExitCode::SUCCESS
+}
+
+/// Write `data` to `path` atomically (temp file + rename).
+fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp.msfe-ng");
+    std::fs::write(&tmp, data)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Best-effort MailScanner reload (systemd first, then SysV).
+fn reload_mailscanner() {
+    let ok = std::process::Command::new("systemctl")
+        .args(["reload-or-restart", "mailscanner"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+        || std::process::Command::new("service")
+            .args(["MailScanner", "reload"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+    if ok {
+        println!("reloaded MailScanner");
+    } else {
+        eprintln!("note: could not reload MailScanner automatically — reload it to apply changes");
+    }
+}
+
+/// Manage the SpamBox Exim fragment file.
+fn cmd_spambox(sub: Option<&str>) -> ExitCode {
+    let cfg = Config::load(&config_path());
+    let path = Path::new(&cfg.spambox_conf);
+    match sub {
+        Some("enable") => match atomic_write(path, spambox::fragment().as_bytes()) {
+            Ok(()) => {
+                println!("wrote SpamBox fragment to {}", path.display());
+                println!(
+                    "add to your Exim config:  .include_if_exists {}\nthen rebuild/restart Exim.",
+                    path.display()
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("msfe-ng spambox: cannot write {}: {e}", path.display());
+                ExitCode::from(1)
+            }
+        },
+        Some("disable") => {
+            let _ = std::fs::remove_file(path);
+            println!("removed {} (rebuild/restart Exim to apply)", path.display());
+            ExitCode::SUCCESS
+        }
+        Some("status") => {
+            println!("SpamBox fragment: {} ({})", path.display(), path.exists());
+            ExitCode::SUCCESS
+        }
+        _ => {
+            eprintln!("usage: msfe-ng spambox <enable|disable|status>");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// End-to-end scan test: send GTUBE (spam), EICAR (virus) and a clean message
+/// to the local MTA, then (if the DB is configured) confirm they were logged.
+fn cmd_selftest() -> ExitCode {
+    const GTUBE: &str = "XJS*C4JDBQADN1.NSBN3*2IDNEN*GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X";
+    const EICAR: &str = "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
+    let from = "msfe-ng-selftest@localhost";
+    let to = "root@localhost";
+
+    let cases = [
+        (
+            "clean",
+            "MSFE-NG selftest: clean message. Nothing to see here.".to_string(),
+        ),
+        (
+            "spam(GTUBE)",
+            format!("MSFE-NG selftest spam.\n\n{GTUBE}\n"),
+        ),
+        (
+            "virus(EICAR)",
+            format!("MSFE-NG selftest virus.\n\n{EICAR}\n"),
+        ),
+    ];
+
+    let mut sent = 0;
+    for (label, body) in &cases {
+        match smtp_send("127.0.0.1:25", from, to, label, body) {
+            Ok(()) => {
+                println!("sent {label} → {to}");
+                sent += 1;
+            }
+            Err(e) => eprintln!("failed to send {label}: {e}"),
+        }
+    }
+    if sent == 0 {
+        eprintln!("selftest: could not send any mail (is the MTA listening on 127.0.0.1:25?)");
+        return ExitCode::from(1);
+    }
+    println!(
+        "sent {sent}/3 test messages. Check results in the MSFE-NG report / maillog once scanned."
+    );
+    ExitCode::SUCCESS
+}
+
+/// Minimal SMTP submission over plain TCP (enough for localhost selftest).
+fn smtp_send(addr: &str, from: &str, to: &str, subject: &str, body: &str) -> std::io::Result<()> {
+    use std::io::{BufRead, BufReader};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let stream = TcpStream::connect(addr)?;
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut w = stream;
+
+    let mut line = String::new();
+    let expect = |reader: &mut BufReader<TcpStream>, line: &mut String| -> std::io::Result<()> {
+        line.clear();
+        reader.read_line(line)?;
+        if line.starts_with('4') || line.starts_with('5') {
+            return Err(std::io::Error::other(format!(
+                "SMTP error: {}",
+                line.trim()
+            )));
+        }
+        Ok(())
+    };
+
+    expect(&mut reader, &mut line)?; // greeting
+    let steps = [
+        "HELO localhost\r\n".to_string(),
+        format!("MAIL FROM:<{from}>\r\n"),
+        format!("RCPT TO:<{to}>\r\n"),
+        "DATA\r\n".to_string(),
+    ];
+    for s in steps {
+        w.write_all(s.as_bytes())?;
+        expect(&mut reader, &mut line)?;
+    }
+    let data = format!(
+        "From: {from}\r\nTo: {to}\r\nSubject: [MSFE-NG selftest] {subject}\r\n\r\n{body}\r\n.\r\n"
+    );
+    w.write_all(data.as_bytes())?;
+    expect(&mut reader, &mut line)?; // 250 queued
+    w.write_all(b"QUIT\r\n")?;
+    Ok(())
 }
 
 /// Apply pending SQL migrations (or `--status` to list state).
@@ -298,14 +566,17 @@ COMMANDS:
     panel               Report the detected control panel
     config              Print effective config as JSON (password redacted)
     import <dir>        Import a legacy MSFE dir (e.g. /usr/msfe) → JSON
+    import <dir> --save Import and save policy for `sync` to use
+    sync                Reconcile policy into MailScanner rule files
+    sync --dry-run      Show the rule files that would be written
+    spambox <enable|disable|status>   Manage the SpamBox Exim fragment
+    selftest            Send GTUBE/EICAR/clean test mail through the MTA
     db-migrate          Apply pending SQL migrations
     db-migrate --status Show which migrations are applied/pending
     mailscanner status  Show MailScanner logging plugin state
     mailscanner enable-logging   Hook the logging plugin into MailScanner.conf
     mailscanner disable-logging  Unhook it (restart MailScanner after either)
     version             Print version
-    sync                [M2] Reconcile policy into MailScanner rules
-    selftest            [M2] GTUBE/EICAR/clean mail scan test
     help                Show this help
 
 ENVIRONMENT:

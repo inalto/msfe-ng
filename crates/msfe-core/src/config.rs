@@ -20,6 +20,10 @@ pub struct Config {
     pub mailscanner_conf: String,
     /// MailScanner custom-functions directory (where the logging plugin installs).
     pub mailscanner_custom_dir: String,
+    /// MailScanner ruleset directory that `sync` writes the managed rules into.
+    pub mailscanner_rules_dir: String,
+    /// Standalone SpamBox Exim fragment file (`.include_if_exists`-ed by Exim).
+    pub spambox_conf: String,
 }
 
 impl Default for Config {
@@ -35,6 +39,8 @@ impl Default for Config {
             db_pass: String::new(),
             mailscanner_conf: "/etc/MailScanner/MailScanner.conf".into(),
             mailscanner_custom_dir: "/etc/MailScanner/custom".into(),
+            mailscanner_rules_dir: "/etc/MailScanner/rules".into(),
+            spambox_conf: "/etc/msfe-ng/spambox.exim".into(),
         }
     }
 }
@@ -64,6 +70,8 @@ impl Config {
                 "db_pass" => c.db_pass = v,
                 "mailscanner_conf" => c.mailscanner_conf = v,
                 "mailscanner_custom_dir" => c.mailscanner_custom_dir = v,
+                "mailscanner_rules_dir" => c.mailscanner_rules_dir = v,
+                "spambox_conf" => c.spambox_conf = v,
                 _ => {} // unknown keys ignored
             }
         }

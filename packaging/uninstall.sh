@@ -27,6 +27,7 @@ fi
 cpanel_uninstall() {
     info "deregistering cPanel plugin"
     /usr/local/cpanel/bin/manage_hooks delete module MSFE_NG::UpcpHook 2>/dev/null || true
+    /usr/local/cpanel/bin/manage_hooks delete module MSFE_NG::EximHook 2>/dev/null || true
     if [ -x /usr/local/cpanel/bin/unregister_appconfig ]; then
         /usr/local/cpanel/bin/unregister_appconfig msfe_ng 2>/dev/null || true
     fi

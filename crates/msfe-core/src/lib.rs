@@ -14,6 +14,8 @@ pub mod legacy;
 pub mod mailscanner;
 pub mod migrate;
 pub mod panel;
+pub mod rules;
+pub mod spambox;
 
 pub use config::Config;
 pub use json::Json;
