@@ -5,12 +5,11 @@ A modern, free (GPLv3) reimplementation of a MailScanner management front-end fo
 replaces the now-defunct, proprietary ConfigServer MailScanner Front-End (MSFE)
 with a clean-room codebase — **no licensing phone-home, no obfuscation**.
 
-> **Status: milestone M5 — digests, housekeeping, mailflow, i18n.** MSFE-NG now
-> emails per-domain quarantine digests (`msfe-ng digest`), prunes the mail log on
-> a retention window (`msfe-ng housekeeping`), toggles MailScanner scanning via
-> the exiscandisable flag (`msfe-ng exim`), and the end-user SPA has an i18n
-> framework (English shipped; drop-in language packs). Daily crons run the digest
-> and housekeeping. Everything from M0–M4 remains.
+> **Status: milestone M6 — hardening & release (feature-complete).** All planned
+> milestones are done. M6 adds: DB credentials passed via a private 0600
+> defaults-file (never on argv), `msfe-ng backup`/`restore`, in-place upgrades,
+> a signed release tarball (`packaging/dist.sh`) + bootstrap (`get.sh`) + release
+> CI, and admin/user/migration guides.
 
 ## Why
 
@@ -39,13 +38,18 @@ Browser ─► panel shim (WHM CGI / cPanel UAPI / DA CGI) ─► msfe-ngd (Rust
 ## Install (on a cPanel or DirectAdmin server, as root)
 
 ```sh
+# bootstrap: download + verify the latest release tarball, then install
+curl -sSfL https://raw.githubusercontent.com/OWNER/msfe-ng/main/packaging/get.sh | sh
+
+# …or from a checkout:
 git clone https://github.com/OWNER/msfe-ng && cd msfe-ng
-cargo build --release --workspace      # or ship a prebuilt dist/
-sudo packaging/install.sh
+cargo build --release --workspace       # or: packaging/dist.sh to build a tarball
+sudo packaging/install.sh               # re-run to upgrade in place
 ```
 
 Then open **WHM → Plugins → MSFE-NG** (or DirectAdmin → MSFE-NG). Verify the
-daemon any time with `msfe-ng health`.
+daemon any time with `msfe-ng health`. Full docs: [`docs/admin-guide.md`](docs/admin-guide.md),
+[`docs/user-guide.md`](docs/user-guide.md), [`docs/migration.md`](docs/migration.md).
 
 ## Uninstall (leaves the system as it was)
 
@@ -63,7 +67,7 @@ sudo packaging/uninstall.sh            # add --purge to also remove /etc/msfe-ng
 | **M3** ✅ | Admin SPA (dashboard/settings/lists) + reporting API over `maillog`, transparent panel proxies |
 | **M4** ✅ | End-user SPA (per-domain prefs, personal lists, quarantine view/release) + scoped `/api/user/*` |
 | **M5** ✅ | Quarantine digests, mail-log housekeeping, scanning toggle (exiscandisable), i18n framework + daily crons |
-| M6 | Hardening, upgrade path, signed releases, migration guide |
+| **M6** ✅ | Hardened DB creds, backup/restore, in-place upgrade, release tarball + `get.sh` + release CI, guides |
 
 ## Legal
 

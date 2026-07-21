@@ -57,8 +57,9 @@ detect_panel() {
 # tarball), the cargo target/release dir (dev checkout), then $PATH. Echoes the
 # directory containing msfe-ngd, or empty if not found.
 find_bindir() {
-    _here="$1"   # directory containing the install script
-    for d in "$_here/dist/bin" "$_here/../dist/bin" "$_here/../target/release" "$_here/target/release"; do
+    _here="$1"   # repo/tarball root
+    # release tarball ships bin/; dev checkout builds target/release
+    for d in "$_here/bin" "$_here/dist/bin" "$_here/../dist/bin" "$_here/target/release" "$_here/../target/release"; do
         if [ -x "$d/msfe-ngd" ] && [ -x "$d/msfe-ng" ]; then
             echo "$d"; return 0
         fi

@@ -32,6 +32,10 @@ info "using binaries from $BINSRC"
 panel="$(detect_panel)"
 info "control panel: $panel"
 
+# Detect an existing install for upgrade handling.
+PREV_VER=""
+[ -f "$PREFIX/VERSION" ] && PREV_VER="$(cat "$PREFIX/VERSION" 2>/dev/null)"
+
 # ---- core install ------------------------------------------------------------
 info "installing core files"
 mkdir -p "$BINDIR" "$WEBROOT" "$CONFDIR" "$SOCKET_DIR" "$PREFIX/db/migrations" "$PREFIX/mailscanner"
@@ -65,6 +69,14 @@ mailscanner_custom_dir = "/etc/MailScanner/custom"
 EOF
     chmod 0640 "$CONFDIR/config.toml"
 fi
+# Record the installed version (for upgrade detection on the next run).
+"$BINDIR/msfe-ng" version 2>/dev/null | awk '{print $2}' > "$PREFIX/VERSION" || echo unknown > "$PREFIX/VERSION"
+NEW_VER="$(cat "$PREFIX/VERSION")"
+if [ -n "$PREV_VER" ] && [ "$PREV_VER" != "$NEW_VER" ]; then
+    info "upgrading MSFE-NG $PREV_VER -> $NEW_VER"
+elif [ -n "$PREV_VER" ]; then
+    info "reinstalling MSFE-NG $NEW_VER"
+fi
 ok "core files installed to $PREFIX"
 
 # ---- service -----------------------------------------------------------------
@@ -72,6 +84,11 @@ info "installing systemd service"
 install -m 0644 "$REPO/packaging/systemd/msfe-ng.service" "$SYSTEMD_UNIT"
 systemctl daemon-reload
 systemctl enable --now msfe-ng.service
+# On upgrade, restart to pick up the new binary and apply any new migrations.
+if [ -n "$PREV_VER" ]; then
+    systemctl restart msfe-ng.service || true
+    "$BINDIR/msfe-ng" db-migrate >/dev/null 2>&1 && info "applied pending DB migrations" || true
+fi
 ok "service enabled and started"
 
 # ---- panel wiring ------------------------------------------------------------

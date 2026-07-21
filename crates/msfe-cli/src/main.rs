@@ -51,6 +51,8 @@ fn main() -> ExitCode {
         "housekeeping" => cmd_housekeeping(),
         "digest" => cmd_digest(args.get(1).map(String::as_str)),
         "exim" => cmd_exim(args.get(1).map(String::as_str)),
+        "backup" => cmd_backup(args.get(1).map(String::as_str)),
+        "restore" => cmd_restore(args.get(1).map(String::as_str)),
         "help" | "--help" | "-h" => {
             print_help();
             ExitCode::SUCCESS
@@ -574,6 +576,86 @@ fn cmd_exim(sub: Option<&str>) -> ExitCode {
     }
 }
 
+/// The MSFE-NG config directory (parent of the config file).
+fn conf_dir() -> PathBuf {
+    config_path()
+        .parent()
+        .unwrap_or(Path::new("/etc/msfe-ng"))
+        .to_path_buf()
+}
+
+/// Back up config + policy (the config dir) to a gzip tarball.
+fn cmd_backup(file: Option<&str>) -> ExitCode {
+    let file = match file {
+        Some(f) => f,
+        None => {
+            eprintln!("usage: msfe-ng backup <file.tar.gz>");
+            return ExitCode::from(2);
+        }
+    };
+    let dir = conf_dir();
+    let parent = dir.parent().unwrap_or(Path::new("/etc"));
+    let name = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("msfe-ng");
+    let status = std::process::Command::new("tar")
+        .arg("czf")
+        .arg(file)
+        .arg("-C")
+        .arg(parent)
+        .arg(name)
+        .status();
+    match status {
+        Ok(s) if s.success() => {
+            println!("backed up {} to {file}", dir.display());
+            ExitCode::SUCCESS
+        }
+        _ => {
+            eprintln!("msfe-ng backup: tar failed");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Restore config + policy from a tarball produced by `backup`.
+fn cmd_restore(file: Option<&str>) -> ExitCode {
+    let file = match file {
+        Some(f) => f,
+        None => {
+            eprintln!("usage: msfe-ng restore <file.tar.gz>");
+            return ExitCode::from(2);
+        }
+    };
+    if !Path::new(file).exists() {
+        eprintln!("msfe-ng restore: {file} not found");
+        return ExitCode::from(1);
+    }
+    let parent = conf_dir()
+        .parent()
+        .unwrap_or(Path::new("/etc"))
+        .to_path_buf();
+    let status = std::process::Command::new("tar")
+        .arg("xzf")
+        .arg(file)
+        .arg("-C")
+        .arg(&parent)
+        .status();
+    match status {
+        Ok(s) if s.success() => {
+            println!(
+                "restored config into {}. Run: msfe-ng sync",
+                parent.display()
+            );
+            ExitCode::SUCCESS
+        }
+        _ => {
+            eprintln!("msfe-ng restore: tar failed");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn print_help() {
     println!(
         "msfe-ng {VERSION} — MailScanner Front-End (open-source)
@@ -594,6 +676,8 @@ COMMANDS:
     digest [--dry-run]  Email quarantine digests to digest-enabled domains
     housekeeping        Prune old mail-log rows (cleanmysql retention)
     exim <status|enable-scanning|disable-scanning>   Toggle MailScanner scanning
+    backup <file.tgz>   Back up config + policy to a tarball
+    restore <file.tgz>  Restore config + policy from a tarball
     db-migrate          Apply pending SQL migrations
     db-migrate --status Show which migrations are applied/pending
     mailscanner status  Show MailScanner logging plugin state
