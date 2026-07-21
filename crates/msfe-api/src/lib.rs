@@ -14,6 +14,17 @@ pub const DEFAULT_SOCKET_PATH: &str = "/var/run/msfe-ng/msfe-ng.sock";
 /// Default configuration directory (our own namespace, never `/usr/msfe`).
 pub const DEFAULT_CONFIG_DIR: &str = "/etc/msfe-ng";
 
+/// Default configuration file.
+pub const DEFAULT_CONFIG_FILE: &str = "/etc/msfe-ng/config.toml";
+
+/// Default directory holding `NNNN_name.sql` migrations after install.
+pub const DEFAULT_MIGRATIONS_DIR: &str = "/opt/msfe-ng/db/migrations";
+
+/// Installed MailScanner logging plugin source (copied into the custom-fns dir).
+pub const DEFAULT_MS_PLUGIN_SRC: &str = "/opt/msfe-ng/mailscanner/MSFENG.pm";
+/// Filename the plugin takes inside the MailScanner custom-functions directory.
+pub const MS_PLUGIN_FILENAME: &str = "MSFENG.pm";
+
 /// Default install prefix for binaries and web assets.
 pub const DEFAULT_PREFIX: &str = "/opt/msfe-ng";
 

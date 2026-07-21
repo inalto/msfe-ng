@@ -59,6 +59,12 @@ case "$panel" in
         ;;
 esac
 
+# ---- unhook MailScanner logging (best effort, restores MailScanner.conf) -----
+if [ -x "$BINDIR/msfe-ng" ]; then
+    info "disabling MailScanner logging (if enabled)"
+    "$BINDIR/msfe-ng" mailscanner disable-logging >/dev/null 2>&1 || true
+fi
+
 # ---- core files --------------------------------------------------------------
 info "removing core files"
 rm -f  /usr/local/bin/msfe-ng
@@ -68,16 +74,18 @@ rm -f  "$SYSTEMD_UNIT"
 rm -rf "$SOCKET_DIR"
 
 # ---- config (prompt-free: keep unless --purge) -------------------------------
+# The MySQL database holds the mail log (user data) and is NEVER dropped
+# automatically. Surface the manual command instead.
+db_name="$(sed -n 's/^[[:space:]]*db_name[[:space:]]*=[[:space:]]*"\{0,1\}\([^"#]*\)"\{0,1\}.*/\1/p' "$CONFDIR/config.toml" 2>/dev/null | head -1)"
+[ -n "$db_name" ] && info "to also drop the mail-log database:  mysql -e 'DROP DATABASE \`$db_name\`;'"
+
 if [ "${1:-}" = "--purge" ]; then
     rm -rf "$CONFDIR" "$LOGFILE"
-    ok "config and logs purged"
+    ok "config and logs purged (database left intact — drop it manually if desired)"
 else
     info "keeping config in $CONFDIR (use --purge to remove)"
     rm -f "$MANIFEST"
 fi
-
-# NOTE: M0 creates no database, so there is nothing to drop. The M1+ uninstaller
-# will offer to drop the `msfe_ng` MySQL database here.
 
 echo
 ok "MSFE-NG uninstalled."

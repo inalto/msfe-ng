@@ -5,9 +5,11 @@ A modern, free (GPLv3) reimplementation of a MailScanner management front-end fo
 replaces the now-defunct, proprietary ConfigServer MailScanner Front-End (MSFE)
 with a clean-room codebase — **no licensing phone-home, no obfuscation**.
 
-> **Status: milestone M0 — installable skeleton.** The plugin installs, registers
-> with the panel, serves placeholder admin/user pages from a Rust daemon, and
-> cleanly uninstalls. Management features arrive in M1–M5 (see the roadmap).
+> **Status: milestone M1 — data + logging backbone.** On top of the M0 skeleton
+> (installs, registers, serves placeholder pages, cleanly uninstalls) there is now
+> a MySQL schema + migration runner (`msfe-ng db-migrate`), a clean-room
+> MailScanner logging plugin (`msfe-ng mailscanner enable-logging`), and a legacy
+> config importer (`msfe-ng import /usr/msfe`). UI + rules arrive in M2–M5.
 
 ## Why
 
@@ -55,7 +57,7 @@ sudo packaging/uninstall.sh            # add --purge to also remove /etc/msfe-ng
 | Milestone | Delivers |
 |-----------|----------|
 | **M0** ✅ | Installable skeleton: daemon, panel wiring, install/uninstall |
-| M1 | MySQL schema, MailScanner logging plugin, config model + importer |
+| **M1** ✅ | MySQL schema + migrations, MailScanner logging plugin, config model + legacy importer |
 | M2 | Rule engine (`sync`), lists, SpamBox, Exim hooks, `selftest` |
 | M3 | Admin UI: settings, lists, reports/graphs |
 | M4 | User UI + quarantine browse/release |

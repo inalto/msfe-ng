@@ -1,13 +1,20 @@
 # Database
 
-MSFE-NG uses **MySQL/MariaDB**. Schema migrations live in `migrations/` and are
-applied by the installer/daemon starting in **M1**.
+MSFE-NG uses **MySQL/MariaDB**. Migrations are `NNNN_name.sql` files in
+`migrations/`, applied with `msfe-ng db-migrate` (which shells out to the `mysql`
+client and tracks applied versions in `schema_migrations`). Run
+`msfe-ng db-migrate --status` to see pending vs applied.
 
-M1 will add:
-- `maillog` — one row per scanned message (spam/virus verdicts, scores, report,
-  quarantine flag, addresses, timestamps). Column set is modeled on the
-  MailScanner logging contract and MailWatch's schema (reference only).
+`0001_init.sql` creates:
+- `maillog` — one row per scanned message (spam/virus/MCP verdicts, scores,
+  reports, quarantine flag, addresses, headers, timestamps). Column set follows
+  the MailScanner logging contract and is compatible with MailWatch's schema
+  (reference only — no code copied). Written by the `MailScanner::CustomConfig`
+  logging plugin (`panel/mailscanner/MSFENG.pm`).
 - `quarantine` — index of held messages for the viewer/release UI (M4).
-- app config/state tables (or keep config in `/etc/msfe-ng` — decided in M1).
+- `msfe_config` — scoped (global/domain/user) key/value app config; the importer
+  (`msfe-ng import`) targets this.
+- `schema_migrations` — applied-migration bookkeeping.
 
-Nothing here is created in M0, so the M0 uninstaller has no database to drop.
+The database holds user mail data and is never dropped automatically on
+uninstall; the uninstaller prints the manual `DROP DATABASE` command instead.

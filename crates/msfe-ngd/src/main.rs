@@ -25,6 +25,10 @@ fn web_root() -> String {
     std::env::var("MSFE_NG_WEBROOT").unwrap_or_else(|_| "/opt/msfe-ng/web".to_string())
 }
 
+fn config_path() -> String {
+    std::env::var("MSFE_NG_CONFIG").unwrap_or_else(|_| msfe_api::DEFAULT_CONFIG_FILE.to_string())
+}
+
 fn main() -> io::Result<()> {
     let path = socket_path();
     let panel = detect_panel();
@@ -71,6 +75,10 @@ fn handle(stream: UnixStream) -> io::Result<()> {
                 panel.kind().as_str()
             ),
         ),
+        "/api/config" => {
+            let cfg = msfe_core::Config::load(std::path::Path::new(&config_path()));
+            http::Response::json(200, &cfg.to_public_json().to_string())
+        }
         "/" | "/whm" | "/whm/" | "/index.html" => {
             http::Response::html(200, &views::render(msfe_api::View::Admin, panel.as_ref()))
         }

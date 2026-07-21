@@ -1,13 +1,21 @@
 //! MSFE-NG core library.
 //!
-//! This crate will eventually hold the rule engine, config model and all the
-//! MailScanner/Exim integration. In M0 it provides the `Panel` abstraction and
-//! panel autodetection so the daemon and CLI can report where they are running.
+//! Holds the panel abstraction, runtime config, the legacy flat-file importer,
+//! the DB migration runner, and a tiny JSON writer. The rule engine and
+//! MailScanner/Exim ops arrive in M2.
 //!
 //! Clean-room note: behavior here is modeled on the *observed* responsibilities
 //! of the original `msbe.pl` / `msrules.pl` / `mschange.pl` and on MailWatch,
 //! but no original code is copied. See CONTRIBUTING.md.
 
+pub mod config;
+pub mod json;
+pub mod legacy;
+pub mod mailscanner;
+pub mod migrate;
 pub mod panel;
 
+pub use config::Config;
+pub use json::Json;
+pub use legacy::{import_legacy, LegacyImport};
 pub use panel::{detect_panel, Panel};

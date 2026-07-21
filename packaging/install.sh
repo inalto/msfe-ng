@@ -34,21 +34,36 @@ info "control panel: $panel"
 
 # ---- core install ------------------------------------------------------------
 info "installing core files"
-mkdir -p "$BINDIR" "$WEBROOT" "$CONFDIR" "$SOCKET_DIR"
+mkdir -p "$BINDIR" "$WEBROOT" "$CONFDIR" "$SOCKET_DIR" "$PREFIX/db/migrations" "$PREFIX/mailscanner"
 install -m 0755 "$BINSRC/msfe-ngd" "$BINDIR/msfe-ngd"
 install -m 0755 "$BINSRC/msfe-ng"  "$BINDIR/msfe-ng"
 # convenience symlink so admins can just run `msfe-ng`
 ln -sf "$BINDIR/msfe-ng" /usr/local/bin/msfe-ng
 cp -a "$REPO/web/." "$WEBROOT/"
+# M1: SQL migrations and the MailScanner logging plugin
+install -m 0644 "$REPO"/db/migrations/*.sql "$PREFIX/db/migrations/"
+install -m 0644 "$REPO/panel/mailscanner/MSFENG.pm" "$PREFIX/mailscanner/MSFENG.pm"
 [ -f "$LOGFILE" ] || { : > "$LOGFILE"; chmod 0640 "$LOGFILE"; }
 # seed a default config only if absent (never clobber operator changes)
 if [ ! -f "$CONFDIR/config.toml" ]; then
     cat > "$CONFDIR/config.toml" <<EOF
-# MSFE-NG configuration (M0 skeleton). Real options land in M1.
+# MSFE-NG configuration.
 panel = "$panel"
 socket = "$SOCKET"
 webroot = "$WEBROOT"
+
+# Database (edit these, then run: msfe-ng db-migrate)
+db_host = "localhost"
+db_port = 3306
+db_name = "msfe_ng"
+db_user = "msfe_ng"
+db_pass = ""
+
+# MailScanner integration (for: msfe-ng mailscanner enable-logging)
+mailscanner_conf = "/etc/MailScanner/MailScanner.conf"
+mailscanner_custom_dir = "/etc/MailScanner/custom"
 EOF
+    chmod 0640 "$CONFDIR/config.toml"
 fi
 ok "core files installed to $PREFIX"
 
@@ -134,4 +149,9 @@ case "$panel" in
     cpanel)      info "Open WHM > Plugins > 'MSFE-NG MailScanner Front-End'." ;;
     directadmin) info "Open DirectAdmin > Admin/User level > MSFE-NG." ;;
 esac
+echo
+info "Next steps (M1):"
+info "  1. Create the MySQL DB + user, set creds in $CONFDIR/config.toml"
+info "  2. Apply the schema:        msfe-ng db-migrate"
+info "  3. Enable message logging:  msfe-ng mailscanner enable-logging   (then restart MailScanner)"
 info "Remove everything with: $HERE/uninstall.sh"
