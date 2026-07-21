@@ -4,11 +4,9 @@
 //! health, panel, config, import[/--save], sync[/--dry-run], spambox, selftest,
 //! db-migrate, mailscanner.
 
-use msfe_api::{
-    PanelKind, DEFAULT_CONFIG_FILE, DEFAULT_MIGRATIONS_DIR, DEFAULT_SOCKET_PATH, VERSION,
-};
+use msfe_api::{DEFAULT_CONFIG_FILE, DEFAULT_MIGRATIONS_DIR, DEFAULT_SOCKET_PATH, VERSION};
 use msfe_core::config::Config;
-use msfe_core::{detect_panel, import_legacy, legacy, migrate, rules, spambox};
+use msfe_core::{detect_panel, import_legacy, migrate, rules, spambox, sync};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -121,8 +119,8 @@ fn cmd_import(args: &[String]) -> ExitCode {
         }
     };
     if save {
-        let pdir = policy_dir();
-        if let Err(e) = save_policy(&pdir, &imp) {
+        let pdir = sync::policy_dir(&config_path());
+        if let Err(e) = sync::save_policy(&pdir, &imp.settings, &imp.whitelist, &imp.blacklist) {
             eprintln!(
                 "msfe-ng import: cannot save policy to {}: {e}",
                 pdir.display()
@@ -142,73 +140,17 @@ fn cmd_import(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Directory where the active policy (normalized legacy files) lives.
-fn policy_dir() -> PathBuf {
-    config_path()
-        .parent()
-        .unwrap_or(Path::new("/etc/msfe-ng"))
-        .join("policy")
-}
-
-/// Write normalized `msconfig.txt` + `mailscannerbw` for `sync` to consume.
-fn save_policy(dir: &Path, imp: &legacy::LegacyImport) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    let mut msconfig = String::new();
-    for (k, v) in &imp.settings {
-        msconfig.push_str(&format!("{k}={v}\n"));
-    }
-    std::fs::write(dir.join("msconfig.txt"), msconfig)?;
-    let bw = format!("{}\n{}\n", imp.whitelist.join(","), imp.blacklist.join(","));
-    std::fs::write(dir.join("mailscannerbw"), bw)
-}
-
-/// Load the active policy: (settings, whitelist, blacklist).
-fn load_policy() -> (Vec<(String, String)>, Vec<String>, Vec<String>) {
-    let dir = policy_dir();
-    let settings = legacy::parse_keyval(
-        &std::fs::read_to_string(dir.join("msconfig.txt")).unwrap_or_default(),
-    );
-    let (wl, bl) =
-        legacy::parse_bw(&std::fs::read_to_string(dir.join("mailscannerbw")).unwrap_or_default());
-    (settings, wl, bl)
-}
-
-/// Local domains to generate rules for. `MSFE_NG_DOMAINS_FILE` overrides source
-/// (for testing); otherwise the panel's local-domains file (+ secondarymx on cPanel).
-fn gather_domains() -> Vec<String> {
-    if let Ok(f) = std::env::var("MSFE_NG_DOMAINS_FILE") {
-        return read_domains(Path::new(&f));
-    }
-    let panel = detect_panel();
-    let mut d = read_domains(Path::new(panel.local_domains_path()));
-    if panel.kind() == PanelKind::Cpanel {
-        d.extend(read_domains(Path::new("/etc/secondarymx")));
-    }
-    // de-dup, preserve order
-    let mut seen = std::collections::HashSet::new();
-    d.retain(|x| seen.insert(x.clone()));
-    d
-}
-
-fn read_domains(path: &Path) -> Vec<String> {
-    std::fs::read_to_string(path)
-        .unwrap_or_default()
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .collect()
-}
-
 /// Reconcile the policy into MailScanner rule files. `--dry-run` prints the
 /// generated files without writing or reloading.
 fn cmd_sync(flag: Option<&str>) -> ExitCode {
     let cfg = Config::load(&config_path());
-    let (settings, wl, bl) = load_policy();
-    let domains = gather_domains();
-    let rs = rules::RuleSettings::from_settings(&settings);
-    let files = rules::generate(&rs, &domains, &wl, &bl);
+    let pdir = sync::policy_dir(&config_path());
+    let (settings, wl, bl) = sync::load_policy(&pdir);
+    let domains = sync::gather_domains(None);
 
     if flag == Some("--dry-run") {
+        let rs = rules::RuleSettings::from_settings(&settings);
+        let files = rules::generate(&rs, &domains, &wl, &bl);
         println!(
             "# dry-run: {} domains, {} whitelist, {} blacklist → {} files in {}",
             domains.len(),
@@ -224,50 +166,24 @@ fn cmd_sync(flag: Option<&str>) -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let dir = Path::new(&cfg.mailscanner_rules_dir);
-    if let Err(e) = std::fs::create_dir_all(dir) {
-        eprintln!("msfe-ng sync: cannot create {}: {e}", dir.display());
-        return ExitCode::from(1);
-    }
-    for f in &files {
-        if let Err(e) = atomic_write(&dir.join(&f.name), f.contents.as_bytes()) {
-            eprintln!("msfe-ng sync: cannot write {}: {e}", f.name);
-            return ExitCode::from(1);
+    match sync::run(&cfg, &config_path(), None) {
+        Ok(n) => {
+            println!(
+                "wrote {n} rule files for {} domains to {}",
+                domains.len(),
+                cfg.mailscanner_rules_dir
+            );
+            if sync::reload_mailscanner() {
+                println!("reloaded MailScanner");
+            } else {
+                eprintln!("note: could not reload MailScanner automatically — reload it to apply");
+            }
+            ExitCode::SUCCESS
         }
-    }
-    println!(
-        "wrote {} rule files for {} domains to {}",
-        files.len(),
-        domains.len(),
-        dir.display()
-    );
-    reload_mailscanner();
-    ExitCode::SUCCESS
-}
-
-/// Write `data` to `path` atomically (temp file + rename).
-fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp.msfe-ng");
-    std::fs::write(&tmp, data)?;
-    std::fs::rename(&tmp, path)
-}
-
-/// Best-effort MailScanner reload (systemd first, then SysV).
-fn reload_mailscanner() {
-    let ok = std::process::Command::new("systemctl")
-        .args(["reload-or-restart", "mailscanner"])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-        || std::process::Command::new("service")
-            .args(["MailScanner", "reload"])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-    if ok {
-        println!("reloaded MailScanner");
-    } else {
-        eprintln!("note: could not reload MailScanner automatically — reload it to apply changes");
+        Err(e) => {
+            eprintln!("msfe-ng sync: {e}");
+            ExitCode::from(1)
+        }
     }
 }
 
@@ -276,7 +192,7 @@ fn cmd_spambox(sub: Option<&str>) -> ExitCode {
     let cfg = Config::load(&config_path());
     let path = Path::new(&cfg.spambox_conf);
     match sub {
-        Some("enable") => match atomic_write(path, spambox::fragment().as_bytes()) {
+        Some("enable") => match sync::atomic_write(path, spambox::fragment().as_bytes()) {
             Ok(()) => {
                 println!("wrote SpamBox fragment to {}", path.display());
                 println!(

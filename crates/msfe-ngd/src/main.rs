@@ -8,6 +8,7 @@
 //! Dependency-free on purpose (std only) — later milestones swap in an async
 //! runtime + router. Keep the handler small until then.
 
+mod api;
 mod http;
 mod views;
 
@@ -67,25 +68,28 @@ fn handle(stream: UnixStream) -> io::Result<()> {
     let req = http::Request::read(&stream)?;
     let panel = detect_panel();
 
-    let resp = match req.path.as_str() {
-        "/health" | "/api/health" => http::Response::json(
+    let resp = if req.path == "/health" || req.path == "/api/health" {
+        http::Response::json(
             200,
             &format!(
                 "{{\"status\":\"ok\",\"version\":\"{VERSION}\",\"panel\":\"{}\"}}",
                 panel.kind().as_str()
             ),
-        ),
-        "/api/config" => {
-            let cfg = msfe_core::Config::load(std::path::Path::new(&config_path()));
-            http::Response::json(200, &cfg.to_public_json().to_string())
+        )
+    } else if req.path.starts_with("/api/") {
+        let cfg_file = config_path();
+        let cfg = msfe_core::Config::load(std::path::Path::new(&cfg_file));
+        api::handle(&req, &cfg, std::path::Path::new(&cfg_file))
+    } else {
+        match req.path.as_str() {
+            "/" | "/whm" | "/whm/" | "/index.html" => {
+                http::Response::html(200, &views::render(msfe_api::View::Admin, panel.as_ref()))
+            }
+            "/user" | "/user/" => {
+                http::Response::html(200, &views::render(msfe_api::View::User, panel.as_ref()))
+            }
+            _ => http::Response::html(404, &views::not_found()),
         }
-        "/" | "/whm" | "/whm/" | "/index.html" => {
-            http::Response::html(200, &views::render(msfe_api::View::Admin, panel.as_ref()))
-        }
-        "/user" | "/user/" => {
-            http::Response::html(200, &views::render(msfe_api::View::User, panel.as_ref()))
-        }
-        _ => http::Response::html(404, &views::not_found()),
     };
 
     resp.write(stream)

@@ -1,20 +1,22 @@
 //! Minimal HTTP/1.1 request reader and response writer over a stream.
 //!
-//! Deliberately tiny: enough to route the placeholder UI in M0. Not a general
-//! HTTP server — no keep-alive, no chunked encoding. Replaced by a real router
-//! crate in a later milestone.
+//! Deliberately tiny: request line + headers + (Content-Length) body. Not a
+//! general HTTP server — no keep-alive, no chunked encoding. Replaced by a real
+//! router crate in a later milestone.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 
 pub struct Request {
-    /// Reserved for M1 routing (POST form handling from the panel shims).
-    #[allow(dead_code)]
     pub method: String,
+    /// Path only (query stripped).
     pub path: String,
+    /// Raw query string (without the leading `?`), if any.
+    pub query: String,
+    /// Request body (read per Content-Length).
+    pub body: String,
 }
 
 impl Request {
-    /// Read just the request line + headers; the body (if any) is ignored in M0.
     pub fn read<R: Read>(stream: R) -> io::Result<Request> {
         let mut reader = BufReader::new(stream);
         let mut request_line = String::new();
@@ -23,19 +25,53 @@ impl Request {
         let mut parts = request_line.split_whitespace();
         let method = parts.next().unwrap_or("GET").to_string();
         let raw_path = parts.next().unwrap_or("/").to_string();
-        // Strip any query string; routing in M0 is path-only.
-        let path = raw_path.split('?').next().unwrap_or("/").to_string();
+        let (path, query) = match raw_path.split_once('?') {
+            Some((p, q)) => (p.to_string(), q.to_string()),
+            None => (raw_path.clone(), String::new()),
+        };
 
-        // Drain headers up to the blank line so the socket is left clean.
+        // Read headers, capturing Content-Length, up to the blank line.
+        let mut content_length = 0usize;
         loop {
             let mut line = String::new();
             let n = reader.read_line(&mut line)?;
             if n == 0 || line == "\r\n" || line == "\n" {
                 break;
             }
+            if let Some((k, v)) = line.split_once(':') {
+                if k.trim().eq_ignore_ascii_case("content-length") {
+                    content_length = v.trim().parse().unwrap_or(0);
+                }
+            }
         }
 
-        Ok(Request { method, path })
+        // Read exactly Content-Length body bytes (bounded to avoid abuse).
+        let mut body = String::new();
+        if content_length > 0 && content_length <= 4 * 1024 * 1024 {
+            let mut buf = vec![0u8; content_length];
+            reader.read_exact(&mut buf)?;
+            body = String::from_utf8_lossy(&buf).into_owned();
+        }
+
+        Ok(Request {
+            method,
+            path,
+            query,
+            body,
+        })
+    }
+
+    /// Look up a query-string parameter (no percent-decoding needed for our
+    /// numeric/identifier params).
+    pub fn query_param(&self, key: &str) -> Option<String> {
+        self.query.split('&').find_map(|kv| {
+            let (k, v) = kv.split_once('=')?;
+            if k == key {
+                Some(v.to_string())
+            } else {
+                None
+            }
+        })
     }
 }
 

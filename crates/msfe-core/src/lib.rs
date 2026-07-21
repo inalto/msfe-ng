@@ -9,6 +9,7 @@
 //! but no original code is copied. See CONTRIBUTING.md.
 
 pub mod config;
+pub mod db;
 pub mod json;
 pub mod legacy;
 pub mod mailscanner;
@@ -16,6 +17,8 @@ pub mod migrate;
 pub mod panel;
 pub mod rules;
 pub mod spambox;
+pub mod stats;
+pub mod sync;
 
 pub use config::Config;
 pub use json::Json;

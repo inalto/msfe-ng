@@ -3,59 +3,249 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{TITLE}}</title>
 <style>
-  :root { color-scheme: light dark; --fg:#1a1a1a; --muted:#6b7280; --line:#e5e7eb;
-          --accent:#2563eb; --bg:#fff; --card:#f9fafb; }
-  @media (prefers-color-scheme: dark) {
-    :root { --fg:#e5e7eb; --muted:#9ca3af; --line:#374151; --accent:#60a5fa;
-            --bg:#0b0f19; --card:#111827; } }
-  * { box-sizing: border-box; }
-  body { font: 15px/1.55 system-ui, sans-serif; margin: 0; color: var(--fg);
-         background: var(--bg); }
-  header { padding: 1.5rem; border-bottom: 1px solid var(--line);
-           display: flex; align-items: center; gap: .75rem; }
-  header .logo { width: 34px; height: 34px; border-radius: 8px;
-                 background: var(--accent); display: grid; place-items: center;
-                 color: #fff; font-weight: 700; }
-  header h1 { font-size: 1.15rem; margin: 0; }
-  header .role { margin-left: auto; font-size: .8rem; color: var(--muted); }
-  main { max-width: 60rem; margin: 0 auto; padding: 2rem 1.5rem; }
-  .banner { background: var(--card); border: 1px solid var(--line);
-            border-radius: 12px; padding: 1.25rem 1.5rem; }
-  .banner h2 { margin: 0 0 .35rem; font-size: 1.05rem; }
-  .banner p { margin: .25rem 0; color: var(--muted); }
-  .nav { display: grid; grid-template-columns: repeat(auto-fill,minmax(15rem,1fr));
-         gap: 1rem; margin-top: 1.5rem; }
-  .nav a { display: block; padding: 1rem 1.15rem; border: 1px solid var(--line);
-           border-radius: 12px; text-decoration: none; color: inherit;
-           background: var(--card); }
-  .nav a[aria-disabled] { opacity: .55; pointer-events: none; }
-  .nav b { display: block; margin-bottom: .2rem; }
-  .nav span { color: var(--muted); font-size: .85rem; }
-  footer { color: var(--muted); font-size: .8rem; text-align: center;
-           padding: 2rem 1rem; }
-  code { background: #8882; padding: .1rem .35rem; border-radius: 4px; }
+  /* Palette from the data-viz reference (status colors validated; blue single-series). */
+  :root{
+    color-scheme: light dark;
+    --page:#f9f9f7; --surface:#fcfcfb; --line:#e1e0d9; --ring:rgba(11,11,11,.10);
+    --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
+    --accent:#2a78d6; --grid:#e1e0d9; --axis:#c3c2b7;
+    --good:#0ca30c; --warning:#fab219; --serious:#ec835a; --critical:#d03b3b;
+  }
+  @media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])){
+    --page:#0d0d0d; --surface:#1a1a19; --line:#2c2c2a; --ring:rgba(255,255,255,.10);
+    --ink:#fff; --ink2:#c3c2b7; --muted:#898781;
+    --accent:#3987e5; --grid:#2c2c2a; --axis:#383835;
+  }}
+  :root[data-theme="dark"]{
+    --page:#0d0d0d; --surface:#1a1a19; --line:#2c2c2a; --ring:rgba(255,255,255,.10);
+    --ink:#fff; --ink2:#c3c2b7; --muted:#898781;
+    --accent:#3987e5; --grid:#2c2c2a; --axis:#383835;
+  }
+  *{box-sizing:border-box}
+  body{font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;margin:0;background:var(--page);color:var(--ink)}
+  header{display:flex;align-items:center;gap:.7rem;padding:1rem 1.25rem;border-bottom:1px solid var(--line);background:var(--surface)}
+  .logo{width:32px;height:32px;border-radius:8px;background:var(--accent);color:#fff;display:grid;place-items:center;font-weight:700}
+  header h1{font-size:1.05rem;margin:0}
+  header .meta{margin-left:auto;color:var(--muted);font-size:.8rem}
+  nav.tabs{display:flex;gap:.25rem;padding:.5rem 1rem 0;border-bottom:1px solid var(--line);background:var(--surface)}
+  nav.tabs button{font:inherit;border:0;background:none;color:var(--ink2);padding:.55rem .9rem;border-radius:8px 8px 0 0;cursor:pointer;border-bottom:2px solid transparent}
+  nav.tabs button[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}
+  main{max-width:64rem;margin:0 auto;padding:1.25rem}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:1rem 1.15rem;margin-bottom:1rem}
+  .card h2{font-size:.95rem;margin:0 0 .75rem}
+  .tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(9rem,1fr));gap:.75rem}
+  .tile{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:.8rem .9rem}
+  .tile .lbl{display:flex;align-items:center;gap:.4rem;color:var(--ink2);font-size:.8rem}
+  .tile .dot{width:9px;height:9px;border-radius:50%}
+  .tile .val{font-size:1.7rem;font-weight:650;margin-top:.2rem;font-variant-numeric:tabular-nums}
+  .row{display:flex;gap:1rem;flex-wrap:wrap}
+  .row>.card{flex:1;min-width:18rem}
+  .ctl{display:flex;gap:.5rem;align-items:center;margin-bottom:1rem}
+  select,input,textarea,button.act{font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:.4rem .6rem}
+  button.act{background:var(--accent);color:#fff;border-color:transparent;cursor:pointer;font-weight:600}
+  button.act:disabled{opacity:.5;cursor:default}
+  label.field{display:grid;gap:.25rem;margin-bottom:.7rem;font-size:.82rem;color:var(--ink2)}
+  label.field input,label.field select{width:100%}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 1.25rem}
+  textarea{width:100%;min-height:14rem;font-family:ui-monospace,monospace;font-size:.82rem;resize:vertical}
+  table{width:100%;border-collapse:collapse;font-size:.82rem}
+  th,td{text-align:left;padding:.4rem .5rem;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:600}
+  td.num{text-align:right;font-variant-numeric:tabular-nums}
+  .badge{display:inline-block;padding:.05rem .4rem;border-radius:999px;font-size:.72rem;color:#fff}
+  .bars text{fill:var(--ink2)} .bars .axis{stroke:var(--axis)} .bars .grid{stroke:var(--grid)}
+  .empty{color:var(--muted);padding:1.5rem 0;text-align:center}
+  .toast{position:fixed;bottom:1rem;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--page);padding:.5rem 1rem;border-radius:8px;opacity:0;transition:opacity .2s;pointer-events:none}
+  .toast.show{opacity:1}
+  .muted{color:var(--muted)}
 </style></head>
 <body>
   <header>
     <span class="logo">MS</span>
     <h1>MSFE-NG · MailScanner Front-End</h1>
-    <span class="role">{{VIEW}} · {{PANEL}}</span>
+    <span class="meta">{{VIEW}} · {{PANEL}} · v{{VERSION}}</span>
   </header>
-  <main>
-    <section class="banner">
-      <h2>Installable skeleton (M0)</h2>
-      <p>The plugin is registered and the daemon is answering. Management
-         features are stubbed until milestones M1–M5 land.</p>
-      <p>Daemon <code>{{VERSION}}</code> · panel <code>{{PANEL}}</code></p>
-    </section>
-    <nav class="nav">
-      <a aria-disabled><b>Global settings</b><span>Score thresholds, actions — M3</span></a>
-      <a aria-disabled><b>Black / white lists</b><span>System &amp; per-domain — M2</span></a>
-      <a aria-disabled><b>Reports &amp; graphs</b><span>Mail log dashboards — M3</span></a>
-      <a aria-disabled><b>Quarantine</b><span>Browse / release — M4</span></a>
-      <a aria-disabled><b>Digests</b><span>Scheduled summaries — M5</span></a>
-      <a href="/health"><b>Health check</b><span>Live daemon status JSON</span></a>
-    </nav>
-  </main>
-  <footer>MSFE-NG — open-source, GPLv3. Clean-room reimplementation; not affiliated with ConfigServer / Way to the Web.</footer>
+  <nav class="tabs" id="tabs">
+    <button data-tab="dash" aria-selected="true">Dashboard</button>
+    <button data-tab="settings" aria-selected="false">Settings</button>
+    <button data-tab="lists" aria-selected="false">Lists</button>
+    <button data-tab="messages" aria-selected="false">Messages</button>
+  </nav>
+  <main id="view"></main>
+  <div class="toast" id="toast"></div>
+
+<script>
+const PANEL="{{PANEL}}";
+// Direct = served by the daemon in dev; else proxied through the panel CGI.
+const DIRECT = !location.pathname.includes('.cgi') && !location.pathname.includes('CMD_PLUGINS');
+async function api(path,{method='GET',body=null}={}){
+  const opts={method,headers:{}};
+  if(body){opts.body=JSON.stringify(body);opts.headers['Content-Type']='application/json';}
+  let url=path;
+  if(!DIRECT){url=location.pathname.split('?')[0];opts.headers['X-MSFE-Path']=path;}
+  const r=await fetch(url,opts);
+  try{return await r.json();}catch(e){return {error:'bad response'};}
+}
+const $=(s,r=document)=>r.querySelector(s);
+const el=(t,a={},...c)=>{const n=document.createElement(t);for(const k in a){if(k==='html')n.innerHTML=a[k];else n.setAttribute(k,a[k]);}c.flat().forEach(x=>n.append(x));return n;};
+const esc=s=>String(s??'').replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));
+function toast(msg){const t=$('#toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2200);}
+
+let policy=null; // {settings:{}, whitelist:[], blacklist:[]}
+let days=7;
+
+const tabs={dash:renderDash,settings:renderSettings,lists:renderLists,messages:renderMessages};
+$('#tabs').addEventListener('click',e=>{
+  const b=e.target.closest('button');if(!b)return;
+  document.querySelectorAll('#tabs button').forEach(x=>x.setAttribute('aria-selected',x===b));
+  tabs[b.dataset.tab]();
+});
+
+// ---- Dashboard --------------------------------------------------------------
+async function renderDash(){
+  const v=$('#view');v.innerHTML='';
+  const ctl=el('div',{class:'ctl'},el('span',{class:'muted'},'Window: '));
+  const sel=el('select');[7,30,90].forEach(d=>sel.append(el('option',{value:d,...(d===days?{selected:'selected'}:{})},d+' days')));
+  sel.onchange=()=>{days=+sel.value;renderDash();};
+  ctl.append(sel);v.append(ctl);
+
+  const tiles=el('div',{class:'tiles'});v.append(tiles);
+  const sum=await api('/api/stats/summary?days='+days);
+  if(sum && sum.available){
+    const spec=[['total','Total','var(--accent)'],['clean','Clean','var(--good)'],
+      ['spam','Spam','var(--warning)'],['highspam','High spam','var(--serious)'],
+      ['virus','Virus','var(--critical)'],['quarantined','Quarantined','var(--muted)']];
+    spec.forEach(([k,lbl,c])=>tiles.append(el('div',{class:'tile'},
+      el('div',{class:'lbl'},el('span',{class:'dot',style:'background:'+c}),lbl),
+      el('div',{class:'val'},String(sum[k]??0)))));
+  } else {
+    tiles.append(el('div',{class:'empty',html:'No data yet. Configure the database (<code>msfe-ng db-migrate</code>) and enable logging (<code>msfe-ng mailscanner enable-logging</code>).'}));
+  }
+
+  const rowc=el('div',{class:'row'});v.append(rowc);
+  const volCard=el('div',{class:'card'},el('h2',{},'Daily volume'));
+  const topCard=el('div',{class:'card'},el('h2',{},'Top sender domains'));
+  rowc.append(volCard,topCard);
+
+  const ser=await api('/api/stats/series?days='+days);
+  if(ser&&ser.available&&ser.points&&ser.points.length)
+    volCard.append(barChart(ser.points.map(p=>({label:p.date.slice(5),value:p.total})),'var(--accent)'));
+  else volCard.append(el('div',{class:'empty'},'No volume data.'));
+
+  const top=await api('/api/stats/top?field=from_domain&days='+days+'&limit=8');
+  if(top&&top.available&&top.items&&top.items.length)
+    topCard.append(hbars(top.items.map(i=>({label:i.key,value:i.count}))));
+  else topCard.append(el('div',{class:'empty'},'No sender data.'));
+}
+
+// vertical bar chart (single series) as inline SVG
+function barChart(data,color){
+  const W=Math.max(320,data.length*34),H=180,pad=24,bw=Math.min(26,(W-2*pad)/data.length-6);
+  const max=Math.max(1,...data.map(d=>d.value));
+  const svg=svgEl('svg',{viewBox:`0 0 ${W} ${H}`,class:'bars',width:'100%',height:H});
+  svg.append(svgEl('line',{class:'axis',x1:pad,y1:H-pad,x2:W-4,y2:H-pad}));
+  data.forEach((d,i)=>{
+    const x=pad+i*((W-2*pad)/data.length)+3, h=(H-2*pad)*d.value/max, y=H-pad-h;
+    const r=svgEl('rect',{x,y,width:bw,height:Math.max(1,h),rx:3,fill:color});
+    r.append(svgEl('title',{},`${d.label}: ${d.value}`));svg.append(r);
+    if(i%Math.ceil(data.length/8)===0) svg.append(svgEl('text',{x:x+bw/2,y:H-pad+12,'text-anchor':'middle','font-size':9},d.label));
+  });
+  return svg;
+}
+// horizontal bars (labeled categories)
+function hbars(data){
+  const max=Math.max(1,...data.map(d=>d.value));
+  const wrap=el('div',{});
+  data.forEach(d=>{
+    const row=el('div',{style:'display:flex;align-items:center;gap:.5rem;margin:.25rem 0'});
+    row.append(el('div',{style:'width:11rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap',class:'muted',title:d.label},d.label));
+    const track=el('div',{style:'flex:1;background:var(--line);border-radius:4px;height:14px'});
+    track.append(el('div',{style:`width:${100*d.value/max}%;background:var(--accent);height:100%;border-radius:4px`}));
+    row.append(track,el('div',{class:'num',style:'width:3rem;text-align:right;font-variant-numeric:tabular-nums'},String(d.value)));
+    wrap.append(row);
+  });
+  return wrap;
+}
+function svgEl(t,a={},...c){const n=document.createElementNS('http://www.w3.org/2000/svg',t);for(const k in a)n.setAttribute(k,a[k]);c.forEach(x=>n.append(x));return n;}
+
+// ---- Settings ---------------------------------------------------------------
+async function ensurePolicy(){ if(!policy) policy=await api('/api/policy'); policy.settings??={};policy.whitelist??=[];policy.blacklist??=[]; }
+const SETTINGS_FIELDS=[
+  ['highscore','High spam score','number'],
+  ['lowscore','Low spam score','number'],
+  ['def_spam','Scan for spam',['yes','no']],
+  ['def_virus','Scan for viruses',['yes','no']],
+  ['def_lspam','Low-spam action',['deliver','delete','spambox','forward']],
+  ['def_hspam','High-spam action',['deliver','delete','spambox','forward']],
+  ['def_dvirus','Deliver disinfected',['yes','no']],
+  ['store','Store copies (quarantine)',['yes','no']],
+];
+async function renderSettings(){
+  const v=$('#view');v.innerHTML='';await ensurePolicy();
+  const card=el('div',{class:'card'},el('h2',{},'Global scanning policy'));
+  const grid=el('div',{class:'grid2'});
+  SETTINGS_FIELDS.forEach(([k,lbl,type])=>{
+    const cur=policy.settings[k]??'';
+    let input;
+    if(Array.isArray(type)){input=el('select');type.forEach(o=>input.append(el('option',{value:o,...(o===cur?{selected:'selected'}:{})},o)));}
+    else input=el('input',{type,value:cur});
+    input.dataset.key=k;
+    grid.append(el('label',{class:'field'},lbl,input));
+  });
+  card.append(grid);
+  const save=el('button',{class:'act'},'Save & apply');
+  save.onclick=async()=>{
+    save.disabled=true;
+    grid.querySelectorAll('[data-key]').forEach(i=>policy.settings[i.dataset.key]=i.value);
+    const r=await api('/api/policy',{method:'PUT',body:policy});
+    save.disabled=false;
+    toast(r&&r.ok?`Saved — ${r.files} rule files written`:'Save failed');
+  };
+  card.append(save);v.append(card);
+}
+
+// ---- Lists ------------------------------------------------------------------
+async function renderLists(){
+  const v=$('#view');v.innerHTML='';await ensurePolicy();
+  const mk=(title,key,hint)=>{
+    const ta=el('textarea',{spellcheck:'false'});ta.value=(policy[key]||[]).join('\n');ta.dataset.key=key;
+    return el('div',{class:'card'},el('h2',{},title),el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},hint),ta);
+  };
+  const row=el('div',{class:'row'});
+  row.append(mk('Whitelist','whitelist','One address/pattern per line, e.g. *@partner.example'),
+              mk('Blacklist','blacklist','One address/pattern per line, e.g. *@spammer.example'));
+  const save=el('button',{class:'act'},'Save & apply');
+  save.onclick=async()=>{
+    save.disabled=true;
+    v.querySelectorAll('[data-key]').forEach(ta=>policy[ta.dataset.key]=ta.value.split('\n').map(s=>s.trim()).filter(Boolean));
+    const r=await api('/api/policy',{method:'PUT',body:policy});
+    save.disabled=false;
+    toast(r&&r.ok?`Saved — ${r.files} rule files written`:'Save failed');
+  };
+  v.append(row,save);
+}
+
+// ---- Messages ---------------------------------------------------------------
+async function renderMessages(){
+  const v=$('#view');v.innerHTML='';
+  const card=el('div',{class:'card'},el('h2',{},'Recent messages'));v.append(card);
+  const data=await api('/api/messages?limit=100');
+  if(!data||!data.available||!data.items||!data.items.length){card.append(el('div',{class:'empty'},'No messages logged yet.'));return;}
+  const t=el('table');
+  t.append(el('tr',{},...['Time','From','To','Subject','Score','Status'].map(h=>el('th',{},h))));
+  data.items.forEach(m=>{
+    let badge='',col='var(--good)',lbl='clean';
+    if(m.virus){col='var(--critical)';lbl='virus';}
+    else if(m.ishighspam){col='var(--serious)';lbl='high spam';}
+    else if(m.isspam){col='var(--warning)';lbl='spam';}
+    badge=el('span',{class:'badge',style:'background:'+col},lbl);
+    t.append(el('tr',{},
+      el('td',{class:'muted'},m.ts),el('td',{},m.from),el('td',{},m.to),
+      el('td',{},m.subject),el('td',{class:'num'},m.score||'0'),el('td',{},badge)));
+  });
+  card.append(t);
+}
+
+renderDash();
+</script>
 </body></html>

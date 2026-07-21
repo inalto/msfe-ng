@@ -7,9 +7,9 @@
 //! shell out and are covered by integration testing on a real DB.
 
 use crate::config::Config;
-use std::io::{self, Write};
+use crate::db;
+use std::io::{self};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Migration {
@@ -55,72 +55,33 @@ pub fn pending(all: &[Migration], applied: &[u32]) -> Vec<Migration> {
         .collect()
 }
 
-/// Build the common `mysql` client argument list from config.
-fn mysql_args(cfg: &Config) -> Vec<String> {
-    let mut a = vec![
-        format!("--host={}", cfg.db_host),
-        format!("--port={}", cfg.db_port),
-        format!("--user={}", cfg.db_user),
-    ];
-    if !cfg.db_pass.is_empty() {
-        // NOTE: passing the password on argv is visible in `ps`. M2 will switch
-        // to a temporary --defaults-extra-file. Acceptable for the M1 skeleton.
-        a.push(format!("--password={}", cfg.db_pass));
-    }
-    a.push(cfg.db_name.clone());
-    a
-}
-
 /// Query applied versions from `schema_migrations`. Returns an empty vec if the
 /// table doesn't exist yet (fresh database).
 pub fn applied_versions(cfg: &Config) -> io::Result<Vec<u32>> {
-    let out = Command::new("mysql")
-        .args(mysql_args(cfg))
-        .arg("-N") // skip column names
-        .arg("-e")
-        .arg("SELECT version FROM schema_migrations ORDER BY version")
-        .output()?;
-    if !out.status.success() {
-        // Most likely: table not created yet. Treat as none applied.
-        return Ok(Vec::new());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| l.trim().parse::<u32>().ok())
+    // A fresh DB has no schema_migrations table → query errors → treat as none.
+    let rows = match db::query(
+        cfg,
+        "SELECT version FROM schema_migrations ORDER BY version",
+    ) {
+        Ok(r) => r,
+        Err(_) => return Ok(Vec::new()),
+    };
+    Ok(rows
+        .iter()
+        .filter_map(|r| r.first().and_then(|c| c.trim().parse::<u32>().ok()))
         .collect())
 }
 
 /// Apply one migration file, then record it in `schema_migrations`.
 pub fn apply(cfg: &Config, m: &Migration) -> io::Result<()> {
     let sql = std::fs::read_to_string(&m.path)?;
-    run_sql(cfg, &sql)?;
+    db::exec_stdin(cfg, &sql)?;
     let record = format!(
         "INSERT INTO schema_migrations (version, name) VALUES ({}, '{}')",
         m.version,
         m.name.replace('\'', "''")
     );
-    run_sql(cfg, &record)
-}
-
-/// Feed SQL to the `mysql` client over stdin.
-fn run_sql(cfg: &Config, sql: &str) -> io::Result<()> {
-    let mut child = Command::new("mysql")
-        .args(mysql_args(cfg))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .spawn()?;
-    child
-        .stdin
-        .take()
-        .expect("stdin piped")
-        .write_all(sql.as_bytes())?;
-    let status = child.wait()?;
-    if !status.success() {
-        return Err(io::Error::other(format!(
-            "mysql exited with {status} applying SQL"
-        )));
-    }
-    Ok(())
+    db::exec_stdin(cfg, &record)
 }
 
 #[cfg(test)]

@@ -1,31 +1,39 @@
 #!/usr/bin/perl
-# MSFE-NG DirectAdmin admin entry (clean-room). Proxies to the msfe-ngd daemon.
-# DirectAdmin executes this and serves its stdout. Auth is handled by DA itself.
+# MSFE-NG DirectAdmin admin entry (clean-room). Transparent proxy to msfe-ngd.
+# DirectAdmin handles auth; we forward the request and relay the response.
+# Daemon sub-path from X-MSFE-Path header (SPA calls), else PATH_INFO, else /whm.
 use strict;
 use warnings;
 use IO::Socket::UNIX ();
 
-my $SOCKET = $ENV{MSFE_NG_SOCKET} || '/var/run/msfe-ng/msfe-ng.sock';
+my $SOCKET  = $ENV{MSFE_NG_SOCKET} || '/var/run/msfe-ng/msfe-ng.sock';
+my $DEFAULT = '/whm';
 
-print "Content-type: text/html; charset=utf-8\n\n";
-print proxy('/whm');
+my $path   = $ENV{HTTP_X_MSFE_PATH} || $ENV{PATH_INFO} || $DEFAULT;
+my $method = $ENV{REQUEST_METHOD} || 'GET';
+my $body   = '';
+read( STDIN, $body, $ENV{CONTENT_LENGTH} ) if ( $ENV{CONTENT_LENGTH} || 0 ) > 0;
 
-sub proxy {
-    my ($path) = @_;
-    my $sock = IO::Socket::UNIX->new(
-        Type => IO::Socket::UNIX::SOCK_STREAM(),
-        Peer => $SOCKET,
-    ) or return down();
-    print {$sock} "GET $path HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-    local $/;
-    my $raw = <$sock>;
-    close $sock;
-    return down() unless defined $raw;
-    my ( undef, $body ) = split /\r\n\r\n/, $raw, 2;
-    return defined $body ? $body : down();
+my $sock = IO::Socket::UNIX->new(
+    Type => IO::Socket::UNIX::SOCK_STREAM(),
+    Peer => $SOCKET,
+);
+unless ($sock) {
+    print "Status: 502 Bad Gateway\nContent-type: text/html\n\n";
+    print "<h2>MSFE-NG daemon is not responding</h2>";
+    exit;
 }
-
-sub down {
-    return "<h2>MSFE-NG daemon is not responding</h2>"
-      . "<p>Try <code>systemctl restart msfe-ng</code>.</p>";
-}
+my $clen = length $body;
+print {$sock}
+  "$method $path HTTP/1.1\r\nHost: localhost\r\nContent-Length: $clen\r\nConnection: close\r\n\r\n$body";
+local $/;
+my $raw = <$sock>;
+close $sock;
+my ( $head, $rbody ) = split /\r\n\r\n/, ( $raw // '' ), 2;
+$head  //= '';
+$rbody //= '';
+my ($status) = $head =~ m{^HTTP/1\.\d\s+(\d{3}[^\r\n]*)};
+my ($ctype)  = $head =~ m{^Content-Type:\s*([^\r\n]+)}im;
+print "Status: " . ( $status || '200 OK' ) . "\n";
+print "Content-type: " . ( $ctype || 'text/html; charset=utf-8' ) . "\n\n";
+print $rbody;
