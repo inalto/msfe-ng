@@ -9,6 +9,10 @@ use IO::Socket::UNIX ();
 my $SOCKET  = $ENV{MSFE_NG_SOCKET} || '/var/run/msfe-ng/msfe-ng.sock';
 my $DEFAULT = '/user';
 
+# The authenticated DirectAdmin account (DA sets USERNAME for user-level plugins).
+my $user = $ENV{USERNAME} || $ENV{USER} || '';
+$user =~ s/[^A-Za-z0-9_.\-]//g;
+
 my $path   = $ENV{HTTP_X_MSFE_PATH} || $ENV{PATH_INFO} || $DEFAULT;
 my $method = $ENV{REQUEST_METHOD} || 'GET';
 my $body   = '';
@@ -25,7 +29,7 @@ unless ($sock) {
 }
 my $clen = length $body;
 print {$sock}
-  "$method $path HTTP/1.1\r\nHost: localhost\r\nContent-Length: $clen\r\nConnection: close\r\n\r\n$body";
+  "$method $path HTTP/1.1\r\nHost: localhost\r\nX-MSFE-User: $user\r\nContent-Length: $clen\r\nConnection: close\r\n\r\n$body";
 local $/;
 my $raw = <$sock>;
 close $sock;

@@ -12,6 +12,8 @@
 //! Rule line format (TAB-separated): `<direction>\t<match>\t<value>` where
 //! direction ∈ {To:, From:, FromOrTo:, FromAndTo:}.
 
+use std::collections::BTreeMap;
+
 /// Resolved policy driving rule generation. Built from the flat `msconfig`-style
 /// settings via [`RuleSettings::from_settings`].
 #[derive(Debug, Clone)]
@@ -126,17 +128,60 @@ impl RuleSettings {
     }
 }
 
-/// Generate all managed rule files for the given domains and system lists.
+/// Resolve a spam-action token (`deliver`/`delete`/`spambox`/`forward`) into its
+/// MailScanner action string using the settings map, applying the `store` prefix.
+/// `prefix` is `spam_action` or `spamhigh_action`. Shared by global settings and
+/// per-domain overrides so both resolve tokens identically.
+pub fn resolve_action(settings: &[(String, String)], prefix: &str, token: &str) -> String {
+    let m = |k: &str| {
+        settings
+            .iter()
+            .find(|(kk, _)| kk == k)
+            .map(|(_, v)| v.clone())
+    };
+    let store = m("store").as_deref() == Some("yes");
+    let action = m(&format!("{prefix}_{token}"))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| token.to_string());
+    if store && !action.contains("store") {
+        format!("store {action}")
+    } else {
+        action
+    }
+}
+
+/// Per-domain policy overrides (set by the end-user UI). Any `None`/empty field
+/// falls back to the global default; resolved MailScanner action strings are
+/// stored (the daemon resolves action tokens at save time).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DomainPolicy {
+    pub spam_scan: Option<String>,
+    pub virus_scan: Option<String>,
+    pub spam_action: Option<String>,
+    pub spamhigh_action: Option<String>,
+    pub virus_delivery: Option<String>,
+    pub lowscore: Option<String>,
+    pub highscore: Option<String>,
+    pub whitelist: Vec<String>,
+    pub blacklist: Vec<String>,
+}
+
+/// A domain that is safe to emit a rule for.
+fn valid_domain(d: &str) -> bool {
+    !d.is_empty() && !d.starts_with('#') && !d.ends_with(".zz")
+}
+
+/// Generate all managed rule files from global settings, the local domains, the
+/// system lists, and per-domain overrides.
 pub fn generate(
     s: &RuleSettings,
     domains: &[String],
     whitelist: &[String],
     blacklist: &[String],
+    overrides: &BTreeMap<String, DomainPolicy>,
 ) -> Vec<RuleFile> {
-    // Per-domain policy files: one `<dir>\t*@domain\tvalue` per domain plus a
-    // catch-all default. Values that contain `[domain]` are substituted.
-    // For virus scanning and the two action files the catch-all defaults are
-    // deliberately safe ("yes" / "deliver") so unknown domains are never dropped.
+    // Catch-all defaults for virus scanning and the action files are deliberately
+    // safe ("yes"/"deliver") so unknown domains are never dropped.
     vec![
         domain_file(
             "spam.scanning.rules",
@@ -144,6 +189,8 @@ pub fn generate(
             &s.spam_scan_def,
             domains,
             &s.spam_scan_def,
+            overrides,
+            |p| p.spam_scan.as_deref(),
         ),
         domain_file(
             "virus.scanning.rules",
@@ -151,6 +198,8 @@ pub fn generate(
             &s.virus_scan_def,
             domains,
             "yes",
+            overrides,
+            |p| p.virus_scan.as_deref(),
         ),
         domain_file(
             "spam.action.rules",
@@ -158,6 +207,8 @@ pub fn generate(
             &s.spam_action_def,
             domains,
             "deliver",
+            overrides,
+            |p| p.spam_action.as_deref(),
         ),
         domain_file(
             "spamhigh.action.rules",
@@ -165,6 +216,8 @@ pub fn generate(
             &s.spamhigh_action_def,
             domains,
             "deliver",
+            overrides,
+            |p| p.spamhigh_action.as_deref(),
         ),
         domain_file(
             "virus.delivery.rules",
@@ -172,6 +225,8 @@ pub fn generate(
             &s.virus_delivery_def,
             domains,
             &s.virus_delivery_def,
+            overrides,
+            |p| p.virus_delivery.as_deref(),
         ),
         domain_file(
             "spam.score.rules",
@@ -179,6 +234,8 @@ pub fn generate(
             &s.lowscore,
             domains,
             &s.lowscore,
+            overrides,
+            |p| p.lowscore.as_deref(),
         ),
         domain_file(
             "spamhigh.score.rules",
@@ -186,23 +243,42 @@ pub fn generate(
             &s.highscore,
             domains,
             &s.highscore,
+            overrides,
+            |p| p.highscore.as_deref(),
         ),
-        list_file("spam.whitelist.rules", whitelist),
-        list_file("spam.blacklist.rules", blacklist),
+        list_file("spam.whitelist.rules", whitelist, domains, overrides, |p| {
+            &p.whitelist
+        }),
+        list_file("spam.blacklist.rules", blacklist, domains, overrides, |p| {
+            &p.blacklist
+        }),
     ]
 }
 
 const HEADER: &str =
     "# Managed by MSFE-NG — do not edit by hand; changes are overwritten by `msfe-ng sync`.\n";
 
-fn domain_file(name: &str, dir: &str, value: &str, domains: &[String], default: &str) -> RuleFile {
+#[allow(clippy::too_many_arguments)]
+fn domain_file(
+    name: &str,
+    dir: &str,
+    global_value: &str,
+    domains: &[String],
+    default: &str,
+    overrides: &BTreeMap<String, DomainPolicy>,
+    pick: impl Fn(&DomainPolicy) -> Option<&str>,
+) -> RuleFile {
     let mut c = String::from(HEADER);
     for d in domains {
         let d = d.trim();
-        if d.is_empty() || d.starts_with('#') || d.ends_with(".zz") {
+        if !valid_domain(d) {
             continue;
         }
-        let v = value.replace("[domain]", d);
+        let v = overrides
+            .get(d)
+            .and_then(&pick)
+            .unwrap_or(global_value)
+            .replace("[domain]", d);
         c.push_str(&format!("{dir}\t*@{d}\t{v}\n"));
     }
     c.push_str(&format!("FromOrTo:\tdefault\t{default}\n"));
@@ -212,15 +288,35 @@ fn domain_file(name: &str, dir: &str, value: &str, domains: &[String], default: 
     }
 }
 
-fn list_file(name: &str, patterns: &[String]) -> RuleFile {
+fn list_file(
+    name: &str,
+    patterns: &[String],
+    domains: &[String],
+    overrides: &BTreeMap<String, DomainPolicy>,
+    pick: impl Fn(&DomainPolicy) -> &Vec<String>,
+) -> RuleFile {
     let mut c = String::from(HEADER);
+    // System-wide list: matches any recipient.
     for p in patterns {
         let p = p.trim();
-        if p.is_empty() {
+        if !p.is_empty() {
+            c.push_str(&format!("To: *@* and From: {p}\tyes\n"));
+        }
+    }
+    // Per-domain lists: scoped to recipients at that domain.
+    for d in domains {
+        let d = d.trim();
+        if !valid_domain(d) {
             continue;
         }
-        // MailScanner whitelist/blacklist rule: match any recipient from pattern.
-        c.push_str(&format!("To: *@* and From: {p}\tyes\n"));
+        if let Some(pol) = overrides.get(d) {
+            for p in pick(pol) {
+                let p = p.trim();
+                if !p.is_empty() {
+                    c.push_str(&format!("To: *@{d} and From: {p}\tyes\n"));
+                }
+            }
+        }
     }
     RuleFile {
         name: name.into(),
@@ -262,7 +358,13 @@ mod tests {
     #[test]
     fn generates_expected_domain_lines() {
         let s = RuleSettings::default();
-        let files = generate(&s, &["a.example".into(), "b.example".into()], &[], &[]);
+        let files = generate(
+            &s,
+            &["a.example".into(), "b.example".into()],
+            &[],
+            &[],
+            &BTreeMap::new(),
+        );
         let scan = files
             .iter()
             .find(|f| f.name == "spam.scanning.rules")
@@ -283,7 +385,7 @@ mod tests {
             ),
         ];
         let s = RuleSettings::from_settings(&pairs);
-        let files = generate(&s, &["x.example".into()], &[], &[]);
+        let files = generate(&s, &["x.example".into()], &[], &[], &BTreeMap::new());
         let act = files
             .iter()
             .find(|f| f.name == "spam.action.rules")
@@ -301,6 +403,7 @@ mod tests {
             &["#comment".into(), "host.zz".into(), "ok.example".into()],
             &[],
             &[],
+            &BTreeMap::new(),
         );
         let scan = &files[0];
         assert!(!scan.contents.contains("#comment"));
@@ -315,6 +418,7 @@ mod tests {
             &[],
             &["*@good.example".into()],
             &["*@bad.example".into()],
+            &BTreeMap::new(),
         );
         let wl = files
             .iter()
@@ -335,5 +439,39 @@ mod tests {
     #[test]
     fn managed_files_count() {
         assert_eq!(managed_files().len(), 9);
+    }
+
+    #[test]
+    fn per_domain_override() {
+        let s = RuleSettings::default(); // global spam scan = yes
+        let mut ov = BTreeMap::new();
+        ov.insert(
+            "opt-out.example".to_string(),
+            DomainPolicy {
+                spam_scan: Some("no".into()),
+                whitelist: vec!["*@vip.example".into()],
+                ..Default::default()
+            },
+        );
+        let files = generate(
+            &s,
+            &["normal.example".into(), "opt-out.example".into()],
+            &[],
+            &[],
+            &ov,
+        );
+        let scan = files
+            .iter()
+            .find(|f| f.name == "spam.scanning.rules")
+            .unwrap();
+        assert!(scan.contents.contains("To:\t*@normal.example\tyes\n")); // global
+        assert!(scan.contents.contains("To:\t*@opt-out.example\tno\n")); // override
+        let wl = files
+            .iter()
+            .find(|f| f.name == "spam.whitelist.rules")
+            .unwrap();
+        assert!(wl
+            .contents
+            .contains("To: *@opt-out.example and From: *@vip.example\tyes\n"));
     }
 }

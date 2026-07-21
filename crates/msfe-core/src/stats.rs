@@ -152,6 +152,69 @@ pub fn messages(cfg: &Config, limit: u32) -> io::Result<Json> {
     ]))
 }
 
+/// SQL single-quote a string literal safely.
+fn sql_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+/// Quarantined messages addressed to any of `domains` (the user's own domains).
+/// Empty domain list → empty result (no leakage).
+pub fn quarantine_list(cfg: &Config, domains: &[String], limit: u32) -> io::Result<Json> {
+    if domains.is_empty() {
+        return Ok(Json::Object(vec![
+            ("available".into(), Json::Bool(true)),
+            ("items".into(), Json::Array(vec![])),
+        ]));
+    }
+    let in_list = domains
+        .iter()
+        .map(|d| sql_quote(d))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT message_id, msg_ts, from_address, to_address, subject, \
+                isspam, ishighspam, virusinfected \
+         FROM maillog WHERE quarantined=1 AND to_domain IN ({in_list}) \
+         ORDER BY msg_ts DESC LIMIT {limit}"
+    );
+    let rows = db::query(cfg, &sql)?;
+    let items = rows
+        .iter()
+        .map(|r| {
+            let f = |i: usize| r.get(i).cloned().unwrap_or_default();
+            let mut kind = "spam";
+            if count(&f(7)).to_string() != "0" {
+                kind = "virus";
+            } else if count(&f(6)).to_string() != "0" {
+                kind = "high spam";
+            }
+            Json::Object(vec![
+                ("id".into(), Json::str(f(0))),
+                ("ts".into(), Json::str(f(1))),
+                ("from".into(), Json::str(f(2))),
+                ("to".into(), Json::str(f(3))),
+                ("subject".into(), Json::str(f(4))),
+                ("kind".into(), Json::str(kind)),
+            ])
+        })
+        .collect();
+    Ok(Json::Object(vec![
+        ("available".into(), Json::Bool(true)),
+        ("items".into(), Json::Array(items)),
+    ]))
+}
+
+/// Recipient domain of a logged message id (for ownership checks). Validate the
+/// id with `quarantine::valid_message_id` before calling.
+pub fn to_domain_of(cfg: &Config, message_id: &str) -> io::Result<Option<String>> {
+    let sql = format!(
+        "SELECT to_domain FROM maillog WHERE message_id={} LIMIT 1",
+        sql_quote(message_id)
+    );
+    let rows = db::query(cfg, &sql)?;
+    Ok(rows.first().and_then(|r| r.first()).cloned())
+}
+
 /// Clamp a query-string integer to a sane range with a default.
 pub fn clamp_int(raw: Option<&str>, default: u32, min: u32, max: u32) -> u32 {
     raw.and_then(|s| s.parse::<u32>().ok())

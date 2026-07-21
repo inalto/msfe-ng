@@ -29,6 +29,7 @@ jobs:
       - name: perl syntax
         run: |
           for f in panel/cpanel/whm/msfe-ng.cgi panel/cpanel/uapi/MSFE_NG.pm \
+                   panel/cpanel/jupiter/msfe-ng.live.cgi \
                    panel/hooks/UpcpHook.pm panel/hooks/EximHook.pm panel/mailscanner/MSFENG.pm \
                    panel/directadmin/admin/index.raw panel/directadmin/user/index.raw; do
             echo "== $f"; perl -c "$f" || exit 1

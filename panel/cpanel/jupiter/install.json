@@ -6,6 +6,6 @@
     "name": "MailScanner",
     "type": "link",
     "id": "msfe_ng",
-    "uri": "msfe_ng/index.html"
+    "uri": "msfe_ng/msfe-ng.live.cgi"
   }
 ]

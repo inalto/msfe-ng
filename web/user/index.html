@@ -3,50 +3,168 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{TITLE}}</title>
 <style>
-  :root { color-scheme: light dark; --fg:#1a1a1a; --muted:#6b7280; --line:#e5e7eb;
-          --accent:#059669; --bg:#fff; --card:#f9fafb; }
-  @media (prefers-color-scheme: dark) {
-    :root { --fg:#e5e7eb; --muted:#9ca3af; --line:#374151; --accent:#34d399;
-            --bg:#0b0f19; --card:#111827; } }
-  * { box-sizing: border-box; }
-  body { font: 15px/1.55 system-ui, sans-serif; margin: 0; color: var(--fg);
-         background: var(--bg); }
-  header { padding: 1.25rem 1.5rem; border-bottom: 1px solid var(--line);
-           display: flex; align-items: center; gap: .75rem; }
-  header .logo { width: 32px; height: 32px; border-radius: 8px;
-                 background: var(--accent); display: grid; place-items: center;
-                 color: #fff; font-weight: 700; }
-  header h1 { font-size: 1.05rem; margin: 0; }
-  main { max-width: 44rem; margin: 0 auto; padding: 2rem 1.5rem; }
-  .banner { background: var(--card); border: 1px solid var(--line);
-            border-radius: 12px; padding: 1.25rem 1.5rem; }
-  .banner h2 { margin: 0 0 .35rem; font-size: 1.05rem; }
-  .banner p { margin: .25rem 0; color: var(--muted); }
-  ul { margin: 1.25rem 0 0; padding: 0; list-style: none; }
-  li { display: flex; justify-content: space-between; padding: .7rem .25rem;
-       border-top: 1px solid var(--line); color: var(--muted); }
-  li:first-child { border-top: 0; }
-  code { background: #8882; padding: .1rem .35rem; border-radius: 4px; }
-  footer { color: var(--muted); font-size: .8rem; text-align: center; padding: 2rem 1rem; }
+  :root{
+    color-scheme:light dark;
+    --page:#f9f9f7;--surface:#fcfcfb;--line:#e1e0d9;--ink:#0b0b0b;--ink2:#52514e;--muted:#898781;
+    --accent:#059669;--good:#0ca30c;--warning:#fab219;--serious:#ec835a;--critical:#d03b3b;
+  }
+  @media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])){
+    --page:#0d0d0d;--surface:#1a1a19;--line:#2c2c2a;--ink:#fff;--ink2:#c3c2b7;--muted:#898781;--accent:#34d399;
+  }}
+  :root[data-theme="dark"]{--page:#0d0d0d;--surface:#1a1a19;--line:#2c2c2a;--ink:#fff;--ink2:#c3c2b7;--accent:#34d399}
+  *{box-sizing:border-box}
+  body{font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;margin:0;background:var(--page);color:var(--ink)}
+  header{display:flex;align-items:center;gap:.7rem;padding:1rem 1.25rem;border-bottom:1px solid var(--line);background:var(--surface)}
+  .logo{width:30px;height:30px;border-radius:8px;background:var(--accent);color:#fff;display:grid;place-items:center;font-weight:700}
+  header h1{font-size:1rem;margin:0}
+  header .dom{margin-left:auto;display:flex;align-items:center;gap:.4rem}
+  nav.tabs{display:flex;gap:.25rem;padding:.5rem 1rem 0;border-bottom:1px solid var(--line);background:var(--surface)}
+  nav.tabs button{font:inherit;border:0;background:none;color:var(--ink2);padding:.55rem .9rem;border-radius:8px 8px 0 0;cursor:pointer;border-bottom:2px solid transparent}
+  nav.tabs button[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}
+  main{max-width:52rem;margin:0 auto;padding:1.25rem}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:1rem 1.15rem;margin-bottom:1rem}
+  .card h2{font-size:.95rem;margin:0 0 .75rem}
+  select,input,textarea,button.act{font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:.4rem .6rem}
+  button.act{background:var(--accent);color:#fff;border-color:transparent;cursor:pointer;font-weight:600}
+  button.act:disabled{opacity:.5}
+  button.link{font:inherit;border:0;background:none;color:var(--accent);cursor:pointer;text-decoration:underline;padding:0 .4rem}
+  label.field{display:grid;gap:.25rem;margin-bottom:.7rem;font-size:.82rem;color:var(--ink2)}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 1.25rem}
+  textarea{width:100%;min-height:12rem;font-family:ui-monospace,monospace;font-size:.82rem;resize:vertical}
+  table{width:100%;border-collapse:collapse;font-size:.82rem}
+  th,td{text-align:left;padding:.4rem .5rem;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:600}
+  .badge{display:inline-block;padding:.05rem .4rem;border-radius:999px;font-size:.72rem;color:#fff}
+  .empty{color:var(--muted);padding:1.5rem 0;text-align:center}
+  .toast{position:fixed;bottom:1rem;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--page);padding:.5rem 1rem;border-radius:8px;opacity:0;transition:opacity .2s;pointer-events:none}
+  .toast.show{opacity:1}
+  .muted{color:var(--muted)}
 </style></head>
 <body>
   <header>
     <span class="logo">MS</span>
-    <h1>Mail Settings</h1>
+    <h1>MailScanner Settings</h1>
+    <span class="dom">Domain: <select id="domsel"></select></span>
   </header>
-  <main>
-    <section class="banner">
-      <h2>MailScanner settings — coming soon</h2>
-      <p>Your account is connected to MSFE-NG <code>{{VERSION}}</code> on
-         {{PANEL}}. Self-service controls are being built (M4).</p>
-    </section>
-    <ul>
-      <li><span>Spam sensitivity &amp; actions</span><span>M4</span></li>
-      <li><span>Personal black / white lists</span><span>M4</span></li>
-      <li><span>SpamBox folder</span><span>M4</span></li>
-      <li><span>Quarantine — view &amp; release held mail</span><span>M4</span></li>
-      <li><span>Daily digest</span><span>M5</span></li>
-    </ul>
-  </main>
-  <footer>MSFE-NG — open-source MailScanner Front-End.</footer>
+  <nav class="tabs" id="tabs">
+    <button data-tab="settings" aria-selected="true">Spam &amp; virus</button>
+    <button data-tab="lists" aria-selected="false">My lists</button>
+    <button data-tab="quarantine" aria-selected="false">Quarantine</button>
+  </nav>
+  <main id="view"></main>
+  <div class="toast" id="toast"></div>
+
+<script>
+// User context (X-MSFE-User) is injected by the panel proxy CGI, not here.
+const DIRECT = !location.pathname.includes('.cgi') && !location.pathname.includes('CMD_PLUGINS');
+async function api(path,{method='GET',body=null,raw=false}={}){
+  const opts={method,headers:{}};
+  if(body){opts.body=JSON.stringify(body);opts.headers['Content-Type']='application/json';}
+  let url=path;
+  if(!DIRECT){url=location.pathname.split('?')[0];opts.headers['X-MSFE-Path']=path;}
+  const r=await fetch(url,opts);
+  if(raw) return r.text();
+  try{return await r.json();}catch(e){return {error:'bad response'};}
+}
+const $=(s,r=document)=>r.querySelector(s);
+const el=(t,a={},...c)=>{const n=document.createElement(t);for(const k in a){if(k==='html')n.innerHTML=a[k];else n.setAttribute(k,a[k]);}c.flat().forEach(x=>n.append(x));return n;};
+function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2200);}
+
+let curDomain=null;
+const tabs={settings:renderSettings,lists:renderLists,quarantine:renderQuarantine};
+let curTab='settings';
+$('#tabs').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;
+  document.querySelectorAll('#tabs button').forEach(x=>x.setAttribute('aria-selected',x===b));
+  curTab=b.dataset.tab;tabs[curTab]();});
+$('#domsel').addEventListener('change',e=>{curDomain=e.target.value;tabs[curTab]();});
+
+async function init(){
+  const d=await api('/api/user/domains');
+  const sel=$('#domsel');
+  if(!d||!d.domains||!d.domains.length){sel.replaceWith(el('span',{class:'muted'},'no domains'));$('#view').append(el('div',{class:'empty'},'No domains found for your account.'));return;}
+  d.domains.forEach(dom=>sel.append(el('option',{value:dom},dom)));
+  curDomain=d.domains[0];
+  renderSettings();
+}
+
+const SEL=(id,cur,opts)=>{const s=el('select',{'data-key':id});
+  s.append(el('option',{value:''},'(inherit default)'));
+  opts.forEach(o=>s.append(el('option',{value:o,...(o===cur?{selected:'selected'}:{})},o)));return s;};
+
+async function renderSettings(){
+  const v=$('#view');v.innerHTML='';
+  const p=await api('/api/user/policy?domain='+encodeURIComponent(curDomain));
+  if(!p||!p.available){v.append(el('div',{class:'empty'},'Could not load settings.'));return;}
+  const ov=p.override||{},g=p.global||{};
+  const card=el('div',{class:'card'},el('h2',{},'Policy for '+curDomain),
+    el('div',{class:'muted',style:'margin-bottom:.75rem;font-size:.8rem'},'Leave a field on “inherit” to use the server default (shown in brackets).'));
+  const grid=el('div',{class:'grid2'});
+  const F=(id,label,opts)=>el('label',{class:'field'},`${label} [default: ${g[id]??'?'}]`,SEL(id,ov[id]??'',opts));
+  grid.append(
+    F('spam_scan','Spam scanning',['yes','no']),
+    F('virus_scan','Virus scanning',['yes','no']),
+    F('spam_action','Low-spam action',['deliver','delete','spambox','forward']),
+    F('spamhigh_action','High-spam action',['deliver','delete','spambox','forward']),
+  );
+  const lo=el('input',{type:'number','data-key':'lowscore',value:ov.lowscore??'',placeholder:'inherit ('+(g.lowscore??'')+')'});
+  const hi=el('input',{type:'number','data-key':'highscore',value:ov.highscore??'',placeholder:'inherit ('+(g.highscore??'')+')'});
+  grid.append(el('label',{class:'field'},'Low spam score',lo),el('label',{class:'field'},'High spam score',hi));
+  card.append(grid);
+  const save=el('button',{class:'act'},'Save & apply');
+  save.onclick=async()=>{save.disabled=true;
+    const o={};grid.querySelectorAll('[data-key]').forEach(i=>{if(i.value!=='')o[i.dataset.key]=i.value;});
+    const r=await api('/api/user/policy',{method:'PUT',body:{domain:curDomain,override:o}});
+    save.disabled=false;toast(r&&r.ok?'Saved':'Save failed'+(r&&r.error?': '+r.error:''));};
+  card.append(save);v.append(card);
+}
+
+async function renderLists(){
+  const v=$('#view');v.innerHTML='';
+  const d=await api('/api/user/lists?domain='+encodeURIComponent(curDomain));
+  const mk=(title,key,hint)=>{const ta=el('textarea',{spellcheck:'false','data-key':key});ta.value=((d&&d[key])||[]).join('\n');
+    return el('div',{class:'card'},el('h2',{},title),el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},hint),ta);};
+  const grid=el('div',{class:'grid2',style:'gap:1rem'});
+  grid.append(mk('Whitelist (always allow)','whitelist','One address/pattern per line, e.g. *@partner.example'),
+              mk('Blacklist (always spam)','blacklist','One address/pattern per line, e.g. *@spammer.example'));
+  const save=el('button',{class:'act'},'Save & apply');
+  save.onclick=async()=>{save.disabled=true;const b={domain:curDomain};
+    v.querySelectorAll('[data-key]').forEach(ta=>b[ta.dataset.key]=ta.value.split('\n').map(s=>s.trim()).filter(Boolean));
+    const r=await api('/api/user/lists',{method:'PUT',body:b});
+    save.disabled=false;toast(r&&r.ok?'Saved':'Save failed');};
+  v.append(el('div',{class:'card'},el('h2',{},'Personal lists for '+curDomain,),grid,save));
+}
+
+async function renderQuarantine(){
+  const v=$('#view');v.innerHTML='';
+  const card=el('div',{class:'card'},el('h2',{},'Quarantined mail'));v.append(card);
+  const d=await api('/api/user/quarantine');
+  if(!d||!d.available||!d.items||!d.items.length){card.append(el('div',{class:'empty'},'Nothing in quarantine.'));return;}
+  const t=el('table');
+  t.append(el('tr',{},...['Date','From','To','Subject','Type',''].map(h=>el('th',{},h))));
+  d.items.forEach(m=>{
+    const col=m.kind==='virus'?'var(--critical)':m.kind==='high spam'?'var(--serious)':'var(--warning)';
+    const view=el('button',{class:'link'},'view');view.onclick=()=>viewMsg(m.id);
+    const rel=el('button',{class:'link'},'release');rel.onclick=()=>releaseMsg(m.id,rel);
+    t.append(el('tr',{},el('td',{class:'muted'},m.ts),el('td',{},m.from),el('td',{},m.to),
+      el('td',{},m.subject),el('td',{},el('span',{class:'badge',style:'background:'+col},m.kind)),
+      el('td',{},view,rel)));
+  });
+  card.append(t);
+}
+async function viewMsg(id){
+  const txt=await api('/api/user/quarantine/message?id='+encodeURIComponent(id),{raw:true});
+  const w=window.open('','_blank');
+  if(w){w.document.write('<pre style="white-space:pre-wrap;font:12px ui-monospace,monospace;padding:1rem">'+
+    txt.replace(/[&<>]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]))+'</pre>');w.document.title='Message '+id;}
+}
+async function releaseMsg(id,btn){
+  if(!confirm('Release this message to the inbox?'))return;
+  btn.disabled=true;
+  const r=await api('/api/user/quarantine/release',{method:'POST',body:{id}});
+  toast(r&&r.ok?'Released':'Release failed'+(r&&r.error?': '+r.error:''));
+  if(r&&r.ok)renderQuarantine();
+}
+
+init();
+</script>
 </body></html>

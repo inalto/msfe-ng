@@ -14,6 +14,9 @@ pub struct Request {
     pub query: String,
     /// Request body (read per Content-Length).
     pub body: String,
+    /// Authenticated panel user, injected by the user-side proxy shim
+    /// (`X-MSFE-User`). Empty for the admin/WHM surface (root, unscoped).
+    pub user: String,
 }
 
 impl Request {
@@ -30,8 +33,9 @@ impl Request {
             None => (raw_path.clone(), String::new()),
         };
 
-        // Read headers, capturing Content-Length, up to the blank line.
+        // Read headers, capturing Content-Length and X-MSFE-User, to the blank line.
         let mut content_length = 0usize;
+        let mut user = String::new();
         loop {
             let mut line = String::new();
             let n = reader.read_line(&mut line)?;
@@ -39,8 +43,11 @@ impl Request {
                 break;
             }
             if let Some((k, v)) = line.split_once(':') {
-                if k.trim().eq_ignore_ascii_case("content-length") {
+                let k = k.trim();
+                if k.eq_ignore_ascii_case("content-length") {
                     content_length = v.trim().parse().unwrap_or(0);
+                } else if k.eq_ignore_ascii_case("x-msfe-user") {
+                    user = v.trim().to_string();
                 }
             }
         }
@@ -58,6 +65,7 @@ impl Request {
             path,
             query,
             body,
+            user,
         })
     }
 
@@ -94,6 +102,14 @@ impl Response {
         Response {
             status,
             content_type: "application/json",
+            body: body.to_string(),
+        }
+    }
+
+    pub fn text(status: u16, body: &str) -> Response {
+        Response {
+            status,
+            content_type: "text/plain; charset=utf-8",
             body: body.to_string(),
         }
     }

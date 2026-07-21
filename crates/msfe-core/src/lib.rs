@@ -15,10 +15,12 @@ pub mod legacy;
 pub mod mailscanner;
 pub mod migrate;
 pub mod panel;
+pub mod quarantine;
 pub mod rules;
 pub mod spambox;
 pub mod stats;
 pub mod sync;
+pub mod users;
 
 pub use config::Config;
 pub use json::Json;

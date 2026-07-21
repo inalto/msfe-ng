@@ -5,12 +5,12 @@ A modern, free (GPLv3) reimplementation of a MailScanner management front-end fo
 replaces the now-defunct, proprietary ConfigServer MailScanner Front-End (MSFE)
 with a clean-room codebase — **no licensing phone-home, no obfuscation**.
 
-> **Status: milestone M3 — admin UI.** The WHM/DirectAdmin admin surface is now a
-> real single-page app served by the daemon: a reporting dashboard (stat tiles +
-> volume/top-sender charts over `maillog`), a global-policy settings form, and
-> white/black list editors that write policy and regenerate rules live. Backed by
-> a JSON API over the Unix socket (`/api/policy`, `/api/stats/*`, `/api/messages`)
-> reached through transparent panel proxies. The end-user UI arrives in M4.
+> **Status: milestone M4 — end-user UI.** cPanel/DirectAdmin account holders now
+> get their own SPA (per-domain spam/virus preferences, personal white/black
+> lists, and a quarantine browser with view + release), scoped to the domains
+> they own. The rule engine gained per-domain overrides; the user API
+> (`/api/user/*`) is authorized against the account's domains, with quarantine
+> actions re-checked by recipient domain. Admin dashboard/settings from M3 remain.
 
 ## Why
 
@@ -61,7 +61,7 @@ sudo packaging/uninstall.sh            # add --purge to also remove /etc/msfe-ng
 | **M1** ✅ | MySQL schema + migrations, MailScanner logging plugin, config model + legacy importer |
 | **M2** ✅ | Rule engine (`sync` + cron), white/black lists, SpamBox fragment, Exim rebuild hook, `selftest` |
 | **M3** ✅ | Admin SPA (dashboard/settings/lists) + reporting API over `maillog`, transparent panel proxies |
-| M4 | User UI + quarantine browse/release |
+| **M4** ✅ | End-user SPA (per-domain prefs, personal lists, quarantine view/release) + scoped `/api/user/*` |
 | M5 | Digests, housekeeping, mailflow management, i18n |
 | M6 | Hardening, upgrade path, signed releases, migration guide |
 

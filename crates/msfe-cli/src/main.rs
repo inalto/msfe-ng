@@ -150,7 +150,8 @@ fn cmd_sync(flag: Option<&str>) -> ExitCode {
 
     if flag == Some("--dry-run") {
         let rs = rules::RuleSettings::from_settings(&settings);
-        let files = rules::generate(&rs, &domains, &wl, &bl);
+        let overrides = sync::load_overrides(&pdir);
+        let files = rules::generate(&rs, &domains, &wl, &bl, &overrides);
         println!(
             "# dry-run: {} domains, {} whitelist, {} blacklist → {} files in {}",
             domains.len(),

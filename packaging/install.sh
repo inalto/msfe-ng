@@ -82,7 +82,7 @@ cpanel_install() {
     install -m 0644 "$REPO/panel/cpanel/msfe-ng.png"     "$CP_WHM_CGI_DIR/msfe-ng.png"
     install -m 0644 "$REPO/panel/cpanel/msfe-ng.conf"    "$CP_APPCONF"
     install -m 0644 "$REPO/panel/cpanel/uapi/MSFE_NG.pm" "$CP_UAPI"
-    install -m 0644 "$REPO/panel/cpanel/jupiter/index.html.tt" "$CP_JUP_DIR/index.html.tt"
+    install -m 0755 "$REPO/panel/cpanel/jupiter/msfe-ng.live.cgi" "$CP_JUP_DIR/msfe-ng.live.cgi"
     install -m 0644 "$REPO/panel/cpanel/jupiter/install.json"  "$CP_JUP_DIR/install.json"
     install -m 0644 "$REPO/panel/cpanel/msfe-ng.png"           "$CP_JUP_DIR/msfe-ng.png"
     install -m 0644 "$REPO/panel/cpanel/jupiter/dynamicui_msfe_ng.conf" "$CP_DYNUI"
