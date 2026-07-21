@@ -10,8 +10,11 @@
 
 pub mod config;
 pub mod db;
+pub mod digest;
+pub mod housekeeping;
 pub mod json;
 pub mod legacy;
+pub mod mailflow;
 pub mod mailscanner;
 pub mod migrate;
 pub mod panel;

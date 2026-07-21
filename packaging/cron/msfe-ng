@@ -1,7 +1,13 @@
 # MSFE-NG cron jobs (installed to /etc/cron.d/msfe-ng).
-#
-# Reconcile local domains + policy into MailScanner rule files every 10 minutes.
-# `msfe-ng sync` is idempotent and reloads MailScanner only when something changed.
 SHELL=/bin/sh
 PATH=/usr/bin:/bin:/opt/msfe-ng/bin
+
+# Reconcile local domains + policy into MailScanner rule files (idempotent;
+# reloads MailScanner only when something changed).
 */10 * * * * root /opt/msfe-ng/bin/msfe-ng sync >/dev/null 2>&1
+
+# Email quarantine digests to digest-enabled domains, once a day.
+0 7 * * * root /opt/msfe-ng/bin/msfe-ng digest >/dev/null 2>&1
+
+# Prune old mail-log rows past the retention window, nightly.
+20 1 * * * root /opt/msfe-ng/bin/msfe-ng housekeeping >/dev/null 2>&1

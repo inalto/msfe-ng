@@ -43,18 +43,38 @@
 <body>
   <header>
     <span class="logo">MS</span>
-    <h1>MailScanner Settings</h1>
-    <span class="dom">Domain: <select id="domsel"></select></span>
+    <h1 data-i18n="title">MailScanner Settings</h1>
+    <span class="dom"><span data-i18n="domain">Domain</span>: <select id="domsel"></select></span>
   </header>
   <nav class="tabs" id="tabs">
-    <button data-tab="settings" aria-selected="true">Spam &amp; virus</button>
-    <button data-tab="lists" aria-selected="false">My lists</button>
-    <button data-tab="quarantine" aria-selected="false">Quarantine</button>
+    <button data-tab="settings" aria-selected="true" data-i18n="tab_settings">Spam &amp; virus</button>
+    <button data-tab="lists" aria-selected="false" data-i18n="tab_lists">My lists</button>
+    <button data-tab="quarantine" aria-selected="false" data-i18n="tab_quarantine">Quarantine</button>
   </nav>
   <main id="view"></main>
   <div class="toast" id="toast"></div>
 
 <script>
+// ---- i18n --------------------------------------------------------------------
+// Add a language by copying the `en` object under its 2-letter code. Missing
+// keys fall back to English. Detection uses the browser language.
+const STRINGS = {
+  en: {
+    title:'MailScanner Settings', domain:'Domain',
+    tab_settings:'Spam & virus', tab_lists:'My lists', tab_quarantine:'Quarantine',
+    save:'Save & apply', saved:'Saved', save_failed:'Save failed',
+    inherit:'(inherit default)', view:'view', release:'release',
+    released:'Released', release_failed:'Release failed',
+    confirm_release:'Release this message to the inbox?',
+    none_quarantine:'Nothing in quarantine.', no_domains:'No domains found for your account.',
+  },
+  // es: { title:'Ajustes de MailScanner', ... },  // example — translators add here
+};
+const LANG = (navigator.language || 'en').slice(0,2).toLowerCase();
+const T = STRINGS[LANG] || STRINGS.en;
+function t(k){ return (T[k] ?? STRINGS.en[k]) ?? k; }
+function applyI18n(root=document){ root.querySelectorAll('[data-i18n]').forEach(e=>{ e.textContent = t(e.getAttribute('data-i18n')); }); }
+
 // User context (X-MSFE-User) is injected by the panel proxy CGI, not here.
 const DIRECT = !location.pathname.includes('.cgi') && !location.pathname.includes('CMD_PLUGINS');
 async function api(path,{method='GET',body=null,raw=false}={}){
@@ -79,16 +99,17 @@ $('#tabs').addEventListener('click',e=>{const b=e.target.closest('button');if(!b
 $('#domsel').addEventListener('change',e=>{curDomain=e.target.value;tabs[curTab]();});
 
 async function init(){
+  applyI18n();
   const d=await api('/api/user/domains');
   const sel=$('#domsel');
-  if(!d||!d.domains||!d.domains.length){sel.replaceWith(el('span',{class:'muted'},'no domains'));$('#view').append(el('div',{class:'empty'},'No domains found for your account.'));return;}
+  if(!d||!d.domains||!d.domains.length){sel.replaceWith(el('span',{class:'muted'},'no domains'));$('#view').append(el('div',{class:'empty'},t('no_domains')));return;}
   d.domains.forEach(dom=>sel.append(el('option',{value:dom},dom)));
   curDomain=d.domains[0];
   renderSettings();
 }
 
 const SEL=(id,cur,opts)=>{const s=el('select',{'data-key':id});
-  s.append(el('option',{value:''},'(inherit default)'));
+  s.append(el('option',{value:''},t('inherit')));
   opts.forEach(o=>s.append(el('option',{value:o,...(o===cur?{selected:'selected'}:{})},o)));return s;};
 
 async function renderSettings(){
@@ -110,11 +131,11 @@ async function renderSettings(){
   const hi=el('input',{type:'number','data-key':'highscore',value:ov.highscore??'',placeholder:'inherit ('+(g.highscore??'')+')'});
   grid.append(el('label',{class:'field'},'Low spam score',lo),el('label',{class:'field'},'High spam score',hi));
   card.append(grid);
-  const save=el('button',{class:'act'},'Save & apply');
+  const save=el('button',{class:'act'},t('save'));
   save.onclick=async()=>{save.disabled=true;
     const o={};grid.querySelectorAll('[data-key]').forEach(i=>{if(i.value!=='')o[i.dataset.key]=i.value;});
     const r=await api('/api/user/policy',{method:'PUT',body:{domain:curDomain,override:o}});
-    save.disabled=false;toast(r&&r.ok?'Saved':'Save failed'+(r&&r.error?': '+r.error:''));};
+    save.disabled=false;toast(r&&r.ok?t('saved'):t('save_failed')+(r&&r.error?': '+r.error:''));};
   card.append(save);v.append(card);
 }
 
@@ -126,11 +147,11 @@ async function renderLists(){
   const grid=el('div',{class:'grid2',style:'gap:1rem'});
   grid.append(mk('Whitelist (always allow)','whitelist','One address/pattern per line, e.g. *@partner.example'),
               mk('Blacklist (always spam)','blacklist','One address/pattern per line, e.g. *@spammer.example'));
-  const save=el('button',{class:'act'},'Save & apply');
+  const save=el('button',{class:'act'},t('save'));
   save.onclick=async()=>{save.disabled=true;const b={domain:curDomain};
     v.querySelectorAll('[data-key]').forEach(ta=>b[ta.dataset.key]=ta.value.split('\n').map(s=>s.trim()).filter(Boolean));
     const r=await api('/api/user/lists',{method:'PUT',body:b});
-    save.disabled=false;toast(r&&r.ok?'Saved':'Save failed');};
+    save.disabled=false;toast(r&&r.ok?t('saved'):t('save_failed'));};
   v.append(el('div',{class:'card'},el('h2',{},'Personal lists for '+curDomain,),grid,save));
 }
 
@@ -138,13 +159,13 @@ async function renderQuarantine(){
   const v=$('#view');v.innerHTML='';
   const card=el('div',{class:'card'},el('h2',{},'Quarantined mail'));v.append(card);
   const d=await api('/api/user/quarantine');
-  if(!d||!d.available||!d.items||!d.items.length){card.append(el('div',{class:'empty'},'Nothing in quarantine.'));return;}
+  if(!d||!d.available||!d.items||!d.items.length){card.append(el('div',{class:'empty'},t('none_quarantine')));return;}
   const t=el('table');
   t.append(el('tr',{},...['Date','From','To','Subject','Type',''].map(h=>el('th',{},h))));
   d.items.forEach(m=>{
     const col=m.kind==='virus'?'var(--critical)':m.kind==='high spam'?'var(--serious)':'var(--warning)';
-    const view=el('button',{class:'link'},'view');view.onclick=()=>viewMsg(m.id);
-    const rel=el('button',{class:'link'},'release');rel.onclick=()=>releaseMsg(m.id,rel);
+    const view=el('button',{class:'link'},t('view'));view.onclick=()=>viewMsg(m.id);
+    const rel=el('button',{class:'link'},t('release'));rel.onclick=()=>releaseMsg(m.id,rel);
     t.append(el('tr',{},el('td',{class:'muted'},m.ts),el('td',{},m.from),el('td',{},m.to),
       el('td',{},m.subject),el('td',{},el('span',{class:'badge',style:'background:'+col},m.kind)),
       el('td',{},view,rel)));
@@ -158,10 +179,10 @@ async function viewMsg(id){
     txt.replace(/[&<>]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]))+'</pre>');w.document.title='Message '+id;}
 }
 async function releaseMsg(id,btn){
-  if(!confirm('Release this message to the inbox?'))return;
+  if(!confirm(t('confirm_release')))return;
   btn.disabled=true;
   const r=await api('/api/user/quarantine/release',{method:'POST',body:{id}});
-  toast(r&&r.ok?'Released':'Release failed'+(r&&r.error?': '+r.error:''));
+  toast(r&&r.ok?t('released'):t('release_failed')+(r&&r.error?': '+r.error:''));
   if(r&&r.ok)renderQuarantine();
 }
 

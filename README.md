@@ -5,12 +5,12 @@ A modern, free (GPLv3) reimplementation of a MailScanner management front-end fo
 replaces the now-defunct, proprietary ConfigServer MailScanner Front-End (MSFE)
 with a clean-room codebase — **no licensing phone-home, no obfuscation**.
 
-> **Status: milestone M4 — end-user UI.** cPanel/DirectAdmin account holders now
-> get their own SPA (per-domain spam/virus preferences, personal white/black
-> lists, and a quarantine browser with view + release), scoped to the domains
-> they own. The rule engine gained per-domain overrides; the user API
-> (`/api/user/*`) is authorized against the account's domains, with quarantine
-> actions re-checked by recipient domain. Admin dashboard/settings from M3 remain.
+> **Status: milestone M5 — digests, housekeeping, mailflow, i18n.** MSFE-NG now
+> emails per-domain quarantine digests (`msfe-ng digest`), prunes the mail log on
+> a retention window (`msfe-ng housekeeping`), toggles MailScanner scanning via
+> the exiscandisable flag (`msfe-ng exim`), and the end-user SPA has an i18n
+> framework (English shipped; drop-in language packs). Daily crons run the digest
+> and housekeeping. Everything from M0–M4 remains.
 
 ## Why
 
@@ -62,7 +62,7 @@ sudo packaging/uninstall.sh            # add --purge to also remove /etc/msfe-ng
 | **M2** ✅ | Rule engine (`sync` + cron), white/black lists, SpamBox fragment, Exim rebuild hook, `selftest` |
 | **M3** ✅ | Admin SPA (dashboard/settings/lists) + reporting API over `maillog`, transparent panel proxies |
 | **M4** ✅ | End-user SPA (per-domain prefs, personal lists, quarantine view/release) + scoped `/api/user/*` |
-| M5 | Digests, housekeeping, mailflow management, i18n |
+| **M5** ✅ | Quarantine digests, mail-log housekeeping, scanning toggle (exiscandisable), i18n framework + daily crons |
 | M6 | Hardening, upgrade path, signed releases, migration guide |
 
 ## Legal

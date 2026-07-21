@@ -48,6 +48,9 @@ fn main() -> ExitCode {
         "sync" => cmd_sync(args.get(1).map(String::as_str)),
         "spambox" => cmd_spambox(args.get(1).map(String::as_str)),
         "selftest" => cmd_selftest(),
+        "housekeeping" => cmd_housekeeping(),
+        "digest" => cmd_digest(args.get(1).map(String::as_str)),
+        "exim" => cmd_exim(args.get(1).map(String::as_str)),
         "help" | "--help" | "-h" => {
             print_help();
             ExitCode::SUCCESS
@@ -127,6 +130,19 @@ fn cmd_import(args: &[String]) -> ExitCode {
             );
             return ExitCode::from(1);
         }
+        // Persist digest configuration too (colon format, for `msfe-ng digest`).
+        let dd = imp
+            .digest_domains
+            .iter()
+            .map(|d| {
+                format!(
+                    "{}:{}:{}:{}:{}:{}",
+                    d.domain, d.enabled, d.to, d.freq, d.digest_virus, d.spambox
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let _ = std::fs::write(pdir.join("digestdomains"), format!("{dd}\n"));
         println!(
             "saved policy to {} ({} settings, {} whitelist, {} blacklist). Run: msfe-ng sync",
             pdir.display(),
@@ -471,6 +487,93 @@ fn edit_conf(path: &str, f: impl FnOnce(&str) -> String) -> std::io::Result<()> 
     std::fs::write(path, f(&original))
 }
 
+/// Prune old mail-log rows (retention from the `cleanmysql` policy setting).
+fn cmd_housekeeping() -> ExitCode {
+    let cfg = Config::load(&config_path());
+    let (settings, _, _) = sync::load_policy(&sync::policy_dir(&config_path()));
+    let days = msfe_core::housekeeping::retention_days(&settings);
+    match msfe_core::housekeeping::prune(&cfg, days) {
+        Ok(()) => {
+            println!("housekeeping: pruned maillog/quarantine rows older than {days} days");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("msfe-ng housekeeping: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Send quarantine digests to digest-enabled domains (`--dry-run` to preview).
+fn cmd_digest(flag: Option<&str>) -> ExitCode {
+    let cfg = Config::load(&config_path());
+    let dry = flag == Some("--dry-run");
+    let results = msfe_core::digest::run(&cfg, &sync::policy_dir(&config_path()), dry);
+    if results.is_empty() {
+        println!("digest: nothing to send");
+        return ExitCode::SUCCESS;
+    }
+    for r in &results {
+        let state = if dry {
+            "(dry-run)"
+        } else if r.sent {
+            "sent"
+        } else {
+            "FAILED"
+        };
+        println!(
+            "digest: {} — {} held → {} {state}",
+            r.domain, r.count, r.recipient
+        );
+    }
+    ExitCode::SUCCESS
+}
+
+/// Toggle / report MailScanner scanning via the exiscandisable flag.
+fn cmd_exim(sub: Option<&str>) -> ExitCode {
+    use msfe_core::mailflow;
+    match sub {
+        Some("status") => {
+            println!(
+                "MailScanner scanning: {}",
+                if mailflow::scanning_enabled() {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+            ExitCode::SUCCESS
+        }
+        Some("enable-scanning") => match mailflow::set_scanning(true) {
+            Ok(()) => {
+                println!("scanning enabled");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("msfe-ng exim: {e}");
+                ExitCode::from(1)
+            }
+        },
+        Some("disable-scanning") => match mailflow::set_scanning(false) {
+            Ok(()) => {
+                println!(
+                    "scanning disabled ({} created)",
+                    mailflow::exiscandisable_path().display()
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("msfe-ng exim: {e}");
+                ExitCode::from(1)
+            }
+        },
+        _ => {
+            eprintln!("usage: msfe-ng exim <status|enable-scanning|disable-scanning>");
+            ExitCode::from(2)
+        }
+    }
+}
+
 fn print_help() {
     println!(
         "msfe-ng {VERSION} — MailScanner Front-End (open-source)
@@ -488,6 +591,9 @@ COMMANDS:
     sync --dry-run      Show the rule files that would be written
     spambox <enable|disable|status>   Manage the SpamBox Exim fragment
     selftest            Send GTUBE/EICAR/clean test mail through the MTA
+    digest [--dry-run]  Email quarantine digests to digest-enabled domains
+    housekeeping        Prune old mail-log rows (cleanmysql retention)
+    exim <status|enable-scanning|disable-scanning>   Toggle MailScanner scanning
     db-migrate          Apply pending SQL migrations
     db-migrate --status Show which migrations are applied/pending
     mailscanner status  Show MailScanner logging plugin state
