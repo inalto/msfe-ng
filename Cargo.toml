@@ -12,8 +12,8 @@ version = "0.0.1"
 edition = "2021"
 rust-version = "1.74"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/OWNER/msfe-ng"
-authors = ["MSFE-NG contributors"]
+repository = "https://github.com/inalto/msfe-ng"
+authors = ["Alain Martini (Martini Multimedia s.a.s.)", "MSFE-NG contributors"]
 
 # M0 deliberately uses no external crates so the skeleton builds fully offline.
 # Later milestones will add: tokio/axum (daemon), serde/serde_json (api),

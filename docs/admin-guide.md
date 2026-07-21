@@ -8,7 +8,7 @@ commands as root on the mail server.
 
 ```sh
 # one-liner bootstrap (downloads + verifies the latest release tarball):
-curl -sSfL https://raw.githubusercontent.com/OWNER/msfe-ng/main/packaging/get.sh | sh
+curl -sSfL https://raw.githubusercontent.com/inalto/msfe-ng/main/packaging/get.sh | sh
 
 # …or from a checkout:
 cargo build --release --workspace

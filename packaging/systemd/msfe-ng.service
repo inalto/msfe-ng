@@ -1,6 +1,6 @@
 [Unit]
 Description=MSFE-NG MailScanner Front-End daemon
-Documentation=https://github.com/OWNER/msfe-ng
+Documentation=https://github.com/inalto/msfe-ng
 After=network.target
 
 [Service]

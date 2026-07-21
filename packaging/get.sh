@@ -1,14 +1,14 @@
 #!/bin/sh
 # MSFE-NG bootstrap installer.
 #
-#   curl -sSfL https://raw.githubusercontent.com/OWNER/msfe-ng/main/packaging/get.sh | sh
+#   curl -sSfL https://raw.githubusercontent.com/inalto/msfe-ng/main/packaging/get.sh | sh
 #
 # Downloads the latest release tarball, verifies its checksum, and runs the
 # installer. Run as root on a cPanel or DirectAdmin host. Set MSFE_NG_VERSION to
 # pin a version, or MSFE_NG_REPO to use a fork.
 set -eu
 
-REPO="${MSFE_NG_REPO:-OWNER/msfe-ng}"
+REPO="${MSFE_NG_REPO:-inalto/msfe-ng}"
 VERSION="${MSFE_NG_VERSION:-latest}"
 
 [ "$(id -u)" = "0" ] || { echo "run as root"; exit 1; }
