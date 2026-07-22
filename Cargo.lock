@@ -4,11 +4,11 @@ version = 3
 
 [[package]]
 name = "msfe-api"
-version = "0.0.1"
+version = "0.0.2"
 
 [[package]]
 name = "msfe-cli"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "msfe-api",
  "msfe-core",
@@ -16,14 +16,14 @@ dependencies = [
 
 [[package]]
 name = "msfe-core"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "msfe-api",
 ]
 
 [[package]]
 name = "msfe-ngd"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "msfe-api",
  "msfe-core",

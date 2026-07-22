@@ -11,13 +11,18 @@ cd "$REPO"
 VER="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -1)"
 [ -n "$VER" ] || { echo "cannot read version from Cargo.toml"; exit 1; }
 
-echo "== building release binaries =="
-cargo build --release --workspace
+# Build fully static binaries (musl) so the release runs on any glibc,
+# old or new (EL8 servers ship glibc 2.28 and reject EL9-built binaries).
+TARGET="x86_64-unknown-linux-musl"
+rustup target add "$TARGET" >/dev/null 2>&1 || true
+
+echo "== building release binaries ($TARGET) =="
+cargo build --release --workspace --target "$TARGET"
 
 OUT="$REPO/dist/msfe-ng-$VER"
 rm -rf "$OUT"
 mkdir -p "$OUT/bin"
-cp target/release/msfe-ngd target/release/msfe-ng "$OUT/bin/"
+cp "target/$TARGET/release/msfe-ngd" "target/$TARGET/release/msfe-ng" "$OUT/bin/"
 cp -r web panel db packaging "$OUT/"
 cp LICENSE README.md "$OUT/" 2>/dev/null || true
 echo "$VER" > "$OUT/VERSION"
