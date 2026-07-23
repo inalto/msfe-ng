@@ -696,6 +696,10 @@ fn cmd_service(sub: Option<&str>) -> ExitCode {
                 println!(
                     "WARNING: MailScanner engine installed but MailScanner.conf is missing — run: msfe-ng engine install"
                 );
+            } else if service::engine_run_enabled() == Some(false) {
+                println!(
+                    "NOTE: MailScanner is held by its startup latch (run_mailscanner=0 in /etc/MailScanner/defaults) — not yet wired into Exim; start will fail until the wiring step enables it"
+                );
             }
             println!(
                 "MailScanner: {} ({} processes), scanning {}",

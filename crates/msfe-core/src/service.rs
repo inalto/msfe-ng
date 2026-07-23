@@ -47,6 +47,23 @@ pub fn engine_configured() -> bool {
     engine_installed() && Path::new("/etc/MailScanner/MailScanner.conf").exists()
 }
 
+/// MailScanner's own startup latch: fresh installs ship
+/// `/etc/MailScanner/defaults` with `run_mailscanner=0` and ms-init refuses to
+/// start until an admin flips it (the wiring step does, once Exim is set up).
+/// Returns None when the defaults file is absent/unreadable.
+pub fn engine_run_enabled() -> Option<bool> {
+    let path = std::env::var("MSFE_NG_MS_DEFAULTS")
+        .unwrap_or_else(|_| "/etc/MailScanner/defaults".to_string());
+    let text = std::fs::read_to_string(path).ok()?;
+    for line in text.lines() {
+        let l = line.trim();
+        if let Some(v) = l.strip_prefix("run_mailscanner=") {
+            return Some(v.trim() == "1");
+        }
+    }
+    None
+}
+
 pub fn status() -> ServiceStatus {
     let active = Command::new("systemctl")
         .args(["is-active", "--quiet", SYSTEMD_UNIT])

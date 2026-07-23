@@ -338,6 +338,12 @@ fn service_status(cfg: &Config) -> Response {
                 "engine_configured".into(),
                 Json::Bool(service::engine_configured()),
             ),
+            (
+                "engine_run_enabled".into(),
+                service::engine_run_enabled()
+                    .map(Json::Bool)
+                    .unwrap_or(Json::Null),
+            ),
             ("active".into(), Json::Bool(st.active)),
             ("procs".into(), Json::Int(st.procs as i64)),
             ("scanning".into(), Json::Bool(mailflow::scanning_enabled())),
