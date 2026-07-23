@@ -73,6 +73,27 @@ run /usr/sbin/ms-configure \
     --SELPermissive=N \
     --ramdiskSize=0
 
+# ms-configure tolerates individual CPAN build failures, and some required
+# modules (e.g. Sys::Hostname::Long) are not packaged in EL/EPEL at all — so
+# verify with MailScanner's own lint and cpanm whatever is still missing.
+if [ "$DRY" != 1 ] && [ -x /usr/sbin/MailScanner ]; then
+    info "verifying perl dependencies (MailScanner --lint)"
+    command -v cpanm >/dev/null 2>&1 || run "$PKG" -y install perl-App-cpanminus
+    tries=0
+    while [ "$tries" -lt 20 ]; do
+        missing="$( { /usr/sbin/MailScanner --lint 2>&1 || true; } \
+            | sed -n "s/.*Can't locate \([A-Za-z0-9_\/]*\)\.pm .*/\1/p" \
+            | head -1 | sed 's|/|::|g')"
+        [ -n "$missing" ] || break
+        info "installing missing perl module: $missing"
+        cpanm --notest "$missing" || die "cpanm $missing failed — install it manually, then re-run"
+        tries=$((tries + 1))
+    done
+    if [ "$tries" -gt 0 ]; then
+        info "installed $tries missing perl module(s) via cpanm"
+    fi
+fi
+
 # Mail flow must not change on install: the engine stays disabled until the
 # admin wires it into Exim and starts it deliberately.
 run systemctl disable --now mailscanner 2>/dev/null || true
