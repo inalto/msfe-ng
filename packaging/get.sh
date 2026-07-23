@@ -15,20 +15,24 @@ VERSION="${MSFE_NG_VERSION:-latest}"
 command -v curl >/dev/null 2>&1 || { echo "curl is required"; exit 1; }
 command -v tar  >/dev/null 2>&1 || { echo "tar is required"; exit 1; }
 
+# Releases only publish versioned assets (msfe-ng-<ver>.tar.gz), so "latest"
+# must first be resolved to a concrete tag via the release-page redirect.
 if [ "$VERSION" = "latest" ]; then
-    base="https://github.com/$REPO/releases/latest/download"
-else
-    base="https://github.com/$REPO/releases/download/v$VERSION"
+    tag="$(curl -sSfL -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest")"
+    tag="${tag##*/}"
+    case "$tag" in
+        v*) VERSION="${tag#v}" ;;
+        *)  echo "cannot resolve latest release of $REPO"; exit 1 ;;
+    esac
 fi
+base="https://github.com/$REPO/releases/download/v$VERSION"
+name="msfe-ng-$VERSION.tar.gz"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 cd "$tmp"
 
 echo "== downloading MSFE-NG ($VERSION) from $REPO =="
-# The release publishes a single versioned tarball; resolve its name if pinned.
-name="msfe-ng.tar.gz"
-if [ "$VERSION" != "latest" ]; then name="msfe-ng-$VERSION.tar.gz"; fi
 curl -sSfL "$base/$name" -o msfe-ng.tar.gz
 if curl -sSfL "$base/$name.sha256" -o sums 2>/dev/null; then
     sed "s#$name#msfe-ng.tar.gz#" sums | sha256sum -c - || { echo "checksum FAILED"; exit 1; }
