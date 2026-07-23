@@ -205,6 +205,102 @@ pub fn run(cfg: &Config, policy_path: &Path, override_domains: Option<&str>) -> 
     Ok(files.len())
 }
 
+/// Canonical rule lines a managed file is expected to contain, regenerated from
+/// the current policy with custom rules merged. Baseline for stray detection.
+pub fn expected_rule_lines(config_file: &Path, name: &str) -> Vec<String> {
+    let dir = policy_dir(config_file);
+    let (settings, wl, bl) = load_policy(&dir);
+    let overrides = load_overrides(&dir);
+    let rs = rules::RuleSettings::from_settings(&settings);
+    let domains = gather_domains(None);
+    let mut files = rules::generate(&rs, &domains, &wl, &bl, &overrides);
+    rules::merge_custom(
+        &mut files,
+        &crate::rulefile::load_all_custom(&dir, &rules::managed_files()),
+    );
+    files
+        .iter()
+        .find(|f| f.name == name)
+        .map(|f| {
+            crate::rulefile::rules_of(&crate::rulefile::parse(&f.contents))
+                .iter()
+                .map(|r| r.to_line())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub struct AdoptReport {
+    pub adopted: usize,
+    /// `default` rules are never adopted: merged custom rules sit ahead of
+    /// everything else, so an adopted catch-all would shadow every other rule.
+    /// Defaults are policy, not custom rules.
+    pub skipped_defaults: usize,
+    pub unparsed: usize,
+    /// (file, adopted-count) for files that gained rules.
+    pub per_file: Vec<(String, usize)>,
+}
+
+/// Absorb ("borrow") rules found in existing on-disk ruleset files into the
+/// custom store, normalized to canonical form — regardless of the whitespace
+/// style they were written in. Only rules that differ from what policy already
+/// generates are taken. `source` overrides the rules dir (e.g. a legacy MSFE
+/// install's rules directory when migrating); `only` restricts to one file.
+/// The caller is responsible for running `run()` + reload afterwards.
+pub fn adopt_rules(
+    cfg: &Config,
+    config_file: &Path,
+    source: Option<&Path>,
+    only: Option<&str>,
+) -> io::Result<AdoptReport> {
+    let src_dir = source.unwrap_or(Path::new(&cfg.mailscanner_rules_dir));
+    let pdir = policy_dir(config_file);
+    let mut report = AdoptReport {
+        adopted: 0,
+        skipped_defaults: 0,
+        unparsed: 0,
+        per_file: Vec::new(),
+    };
+    for name in rules::managed_files() {
+        if only.is_some_and(|f| f != name) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(src_dir.join(&name)) else {
+            continue;
+        };
+        let expected = expected_rule_lines(config_file, &name);
+        let mut custom = crate::rulefile::load_custom(&pdir, &name);
+        let mut added = 0;
+        for line in crate::rulefile::parse(&text) {
+            match line {
+                crate::rulefile::Line::Unparsed(_) => report.unparsed += 1,
+                crate::rulefile::Line::Rule(r) => {
+                    if r.pattern.eq_ignore_ascii_case("default") {
+                        if !expected.contains(&r.to_line()) {
+                            report.skipped_defaults += 1;
+                        }
+                        continue;
+                    }
+                    if !expected.contains(&r.to_line())
+                        && !custom.contains(&r)
+                        && r.validate().is_ok()
+                    {
+                        custom.push(r);
+                        added += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if added > 0 {
+            crate::rulefile::save_custom(&pdir, &name, &custom)?;
+            report.adopted += added;
+            report.per_file.push((name, added));
+        }
+    }
+    Ok(report)
+}
+
 /// Best-effort MailScanner reload (systemd first, then SysV). Returns success.
 pub fn reload_mailscanner() -> bool {
     std::process::Command::new("systemctl")

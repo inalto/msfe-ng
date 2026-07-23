@@ -267,7 +267,19 @@ async function renderRules(){
 
   const fsel=el('select');
   (files.files||[]).forEach(f=>fsel.append(el('option',{value:f.name},f.name+(f.custom?` (${f.custom} custom)`:''))));
-  v.append(el('div',{class:'ctl'},el('span',{class:'muted'},'Ruleset:'),fsel));
+  const adoptAll=Object.assign(el('button',{class:'act plain'},'Borrow all current rules'),
+    {title:'Absorb every rule found in the live ruleset files (any whitespace style) into the custom store, normalized. Rules already generated from policy and default lines are skipped.',
+     onclick:async()=>{
+      if(!confirm('Borrow all rules currently in the live ruleset files?\n\nEvery rule not already generated from policy is copied into the custom store (normalized to canonical form) so it survives future syncs. Default lines are skipped — defaults come from policy.'))return;
+      adoptAll.disabled=true;
+      const r=await api('/api/rules/adopt',{method:'POST',body:{}});
+      adoptAll.disabled=false;
+      if(r&&r.ok){
+        toast(`${r.adopted} rule(s) borrowed`+(r.skipped_defaults?`, ${r.skipped_defaults} default(s) skipped`:'')+(r.unparsed?`, ${r.unparsed} unparsable ignored`:''));
+        renderRules();
+      } else toast(r.error||'adopt failed');
+     }});
+  v.append(el('div',{class:'ctl'},el('span',{class:'muted'},'Ruleset:'),fsel,adoptAll));
 
   // Custom rules editor
   const cc=el('div',{class:'card'},el('h2',{},'Custom rules'),

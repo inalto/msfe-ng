@@ -538,9 +538,13 @@ fn cmd_digest(flag: Option<&str>) -> ExitCode {
 }
 
 /// Structured rules tooling: `lint` parses every managed on-disk ruleset with
-/// the tolerant parser and reports lines that MailScanner may misread.
+/// the tolerant parser and reports lines that MailScanner may misread; `adopt`
+/// absorbs existing on-disk rules into the custom store ("borrow" them).
 fn cmd_rules(sub: Option<&str>) -> ExitCode {
     use msfe_core::rulefile;
+    if sub == Some("adopt") {
+        return cmd_rules_adopt();
+    }
     match sub {
         Some("lint") => {
             let cfg = Config::load(&config_path());
@@ -577,8 +581,50 @@ fn cmd_rules(sub: Option<&str>) -> ExitCode {
             }
         }
         _ => {
-            eprintln!("usage: msfe-ng rules lint");
+            eprintln!("usage: msfe-ng rules <lint|adopt [--from <dir>]>");
             ExitCode::from(2)
+        }
+    }
+}
+
+/// Borrow all rules present in the on-disk ruleset files (or a legacy install's
+/// rules dir via `--from`) into the custom store, then resync.
+fn cmd_rules_adopt() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(3).collect();
+    let from = args
+        .iter()
+        .position(|a| a == "--from")
+        .and_then(|i| args.get(i + 1))
+        .map(PathBuf::from);
+    let cfg = Config::load(&config_path());
+    match sync::adopt_rules(&cfg, &config_path(), from.as_deref(), None) {
+        Ok(r) => {
+            for (f, n) in &r.per_file {
+                println!("{f}: adopted {n} rule(s)");
+            }
+            println!(
+                "adopted {} rule(s) into the custom store ({} default line(s) skipped — defaults come from policy; {} unparsable line(s) ignored)",
+                r.adopted, r.skipped_defaults, r.unparsed
+            );
+            if r.adopted > 0 {
+                match sync::run(&cfg, &config_path(), None) {
+                    Ok(n) => {
+                        println!("resynced {n} rule files");
+                        if !sync::reload_mailscanner() {
+                            eprintln!("note: could not reload MailScanner automatically");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("msfe-ng rules adopt: sync failed: {e}");
+                        return ExitCode::from(1);
+                    }
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("msfe-ng rules adopt: {e}");
+            ExitCode::from(1)
         }
     }
 }
@@ -785,6 +831,7 @@ COMMANDS:
     exim <status|enable-scanning|disable-scanning>   Toggle MailScanner scanning
     service <status|start|stop|reload|restart|queue-fix>   MailScanner service & queues
     rules lint          Check managed ruleset files for unparsable lines
+    rules adopt [--from <dir>]   Borrow existing on-disk rules into the custom store
     backup <file.tgz>   Back up config + policy to a tarball
     restore <file.tgz>  Restore config + policy from a tarball
     db-migrate          Apply pending SQL migrations

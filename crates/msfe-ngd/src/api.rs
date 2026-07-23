@@ -202,31 +202,6 @@ fn rules_custom_put(req: &Request, cfg: &Config, config_file: &Path) -> Response
     }
 }
 
-/// Expected canonical rule lines for a managed file, regenerated from policy
-/// (with customs merged) — the baseline for stray detection.
-fn expected_lines(config_file: &Path, file: &str) -> Vec<String> {
-    let pdir = sync::policy_dir(config_file);
-    let (settings, wl, bl) = sync::load_policy(&pdir);
-    let overrides = sync::load_overrides(&pdir);
-    let rs = rules::RuleSettings::from_settings(&settings);
-    let domains = sync::gather_domains(None);
-    let mut files = rules::generate(&rs, &domains, &wl, &bl, &overrides);
-    rules::merge_custom(
-        &mut files,
-        &rulefile::load_all_custom(&pdir, &rules::managed_files()),
-    );
-    files
-        .iter()
-        .find(|f| f.name == file)
-        .map(|f| {
-            rulefile::rules_of(&rulefile::parse(&f.contents))
-                .iter()
-                .map(|r| r.to_line())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// Parse the live on-disk rules file and annotate each line: rules not in the
 /// regenerated baseline are strays (hand edits about to be lost), unparsable
 /// lines are flagged for manual attention.
@@ -237,7 +212,7 @@ fn rules_live(req: &Request, cfg: &Config, config_file: &Path) -> Response {
     }
     let path = Path::new(&cfg.mailscanner_rules_dir).join(&file);
     let text = std::fs::read_to_string(&path).unwrap_or_default();
-    let expected = expected_lines(config_file, &file);
+    let expected = sync::expected_rule_lines(config_file, &file);
     let mut rows = Vec::new();
     let mut strays = 0;
     let mut unparsed = 0;
@@ -284,35 +259,58 @@ fn rules_live(req: &Request, cfg: &Config, config_file: &Path) -> Response {
 }
 
 /// Rescue stray on-disk rules (hand edits, in any whitespace style) into the
-/// custom store — normalized to canonical form — then resync.
+/// custom store — normalized to canonical form — then resync. With a `file`
+/// in the body, only that ruleset; without, all managed rulesets ("borrow all
+/// current rules"). `default` rules are never adopted (they belong to policy).
 fn rules_adopt(req: &Request, cfg: &Config, config_file: &Path) -> Response {
     let v = Json::parse(&req.body).unwrap_or(Json::Null);
     let file = v.str_field("file");
-    if !valid_managed(&file) {
+    if !file.is_empty() && !valid_managed(&file) {
         return Response::json(400, r#"{"error":"not a managed rules file"}"#);
     }
-    let path = Path::new(&cfg.mailscanner_rules_dir).join(&file);
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
-    let expected = expected_lines(config_file, &file);
-    let pdir = sync::policy_dir(config_file);
-    let mut custom = rulefile::load_custom(&pdir, &file);
-    let mut adopted = 0;
-    for r in rulefile::rules_of(&rulefile::parse(&text)) {
-        if !expected.contains(&r.to_line()) && !custom.contains(&r) && r.validate().is_ok() {
-            custom.push(r);
-            adopted += 1;
-        }
-    }
-    if adopted > 0 {
-        if let Err(e) = rulefile::save_custom(&pdir, &file, &custom) {
-            return Response::json(500, &format!("{{\"error\":\"cannot save: {e}\"}}"));
-        }
+    let only = if file.is_empty() {
+        None
+    } else {
+        Some(file.as_str())
+    };
+    let report = match sync::adopt_rules(cfg, config_file, None, only) {
+        Ok(r) => r,
+        Err(e) => return Response::json(500, &format!("{{\"error\":\"cannot save: {e}\"}}")),
+    };
+    if report.adopted > 0 {
         if let Err(e) = sync::run(cfg, config_file, None) {
             return Response::json(500, &format!("{{\"error\":\"sync failed: {e}\"}}"));
         }
         sync::reload_mailscanner();
     }
-    Response::json(200, &format!("{{\"ok\":true,\"adopted\":{adopted}}}"))
+    Response::json(
+        200,
+        &Json::Object(vec![
+            ("ok".into(), Json::Bool(true)),
+            ("adopted".into(), Json::Int(report.adopted as i64)),
+            (
+                "skipped_defaults".into(),
+                Json::Int(report.skipped_defaults as i64),
+            ),
+            ("unparsed".into(), Json::Int(report.unparsed as i64)),
+            (
+                "per_file".into(),
+                Json::Array(
+                    report
+                        .per_file
+                        .iter()
+                        .map(|(f, n)| {
+                            Json::Object(vec![
+                                ("file".into(), Json::str(f)),
+                                ("adopted".into(), Json::Int(*n as i64)),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+        ])
+        .to_string(),
+    )
 }
 
 // ---- service handlers --------------------------------------------------------
