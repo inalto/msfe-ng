@@ -12,8 +12,23 @@ REPO="$(cd "$HERE/.." && pwd)"
 
 require_root
 
+# --with-engine (or MSFE_NG_WITH_ENGINE=1, usable through `curl … | sh`):
+# also install the MailScanner engine itself when it is missing.
+WITH_ENGINE="${MSFE_NG_WITH_ENGINE:-0}"
+for a in "$@"; do
+    [ "$a" = "--with-engine" ] && WITH_ENGINE=1
+done
+
 # ---- preflight ---------------------------------------------------------------
 sh "$HERE/preflight.sh" || die "preflight failed"
+
+# ---- optional: MailScanner engine --------------------------------------------
+if [ "$WITH_ENGINE" = 1 ]; then
+    info "installing MailScanner engine (this can take several minutes)"
+    sh "$HERE/engine-install.sh" || die "engine install failed"
+elif ! command -v MailScanner >/dev/null 2>&1 && [ ! -x /usr/sbin/MailScanner ]; then
+    warn "MailScanner engine not installed — add --with-engine (or MSFE_NG_WITH_ENGINE=1), or run: msfe-ng engine install"
+fi
 
 # ---- locate or build binaries ------------------------------------------------
 BINSRC="$(find_bindir "$REPO" || true)"
@@ -43,6 +58,8 @@ install -m 0755 "$BINSRC/msfe-ngd" "$BINDIR/msfe-ngd"
 install -m 0755 "$BINSRC/msfe-ng"  "$BINDIR/msfe-ng"
 # convenience symlink so admins can just run `msfe-ng`
 ln -sf "$BINDIR/msfe-ng" /usr/local/bin/msfe-ng
+# engine installer kept on disk so `msfe-ng engine install` works post-install
+install -m 0755 "$HERE/engine-install.sh" "$BINDIR/msfe-ng-engine-install"
 cp -a "$REPO/web/." "$WEBROOT/"
 # M1: SQL migrations and the MailScanner logging plugin
 install -m 0644 "$REPO"/db/migrations/*.sql "$PREFIX/db/migrations/"

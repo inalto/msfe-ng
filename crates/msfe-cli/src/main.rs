@@ -53,6 +53,7 @@ fn main() -> ExitCode {
         "exim" => cmd_exim(args.get(1).map(String::as_str)),
         "service" => cmd_service(args.get(1).map(String::as_str)),
         "rules" => cmd_rules(args.get(1).map(String::as_str)),
+        "engine" => cmd_engine(args.get(1).map(String::as_str)),
         "backup" => cmd_backup(args.get(1).map(String::as_str)),
         "restore" => cmd_restore(args.get(1).map(String::as_str)),
         "help" | "--help" | "-h" => {
@@ -537,6 +538,56 @@ fn cmd_digest(flag: Option<&str>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// MailScanner engine management: `status` reports whether the engine is
+/// installed and running; `install` runs the bundled unattended installer
+/// (official MailScanner v5 rpm + dependencies; never touches Exim).
+fn cmd_engine(sub: Option<&str>) -> ExitCode {
+    use msfe_core::service;
+    let installed = Path::new("/usr/sbin/MailScanner").exists()
+        || std::process::Command::new("sh")
+            .args(["-c", "command -v MailScanner >/dev/null 2>&1"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+    match sub {
+        Some("status") => {
+            if installed {
+                let st = service::status();
+                println!(
+                    "engine: installed, {} ({} processes)",
+                    if st.active { "active" } else { "stopped" },
+                    st.procs
+                );
+            } else {
+                println!("engine: NOT installed — run: msfe-ng engine install");
+            }
+            ExitCode::SUCCESS
+        }
+        Some("install") => {
+            let script = "/opt/msfe-ng/bin/msfe-ng-engine-install";
+            if !Path::new(script).exists() {
+                eprintln!("msfe-ng engine: {script} not found (reinstall MSFE-NG)");
+                return ExitCode::from(1);
+            }
+            match std::process::Command::new("sh").arg(script).status() {
+                Ok(s) if s.success() => ExitCode::SUCCESS,
+                Ok(_) => {
+                    eprintln!("msfe-ng engine install: failed (see output above)");
+                    ExitCode::from(1)
+                }
+                Err(e) => {
+                    eprintln!("msfe-ng engine install: {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        _ => {
+            eprintln!("usage: msfe-ng engine <status|install>");
+            ExitCode::from(2)
+        }
+    }
+}
+
 /// Structured rules tooling: `lint` parses every managed on-disk ruleset with
 /// the tolerant parser and reports lines that MailScanner may misread; `adopt`
 /// absorbs existing on-disk rules into the custom store ("borrow" them).
@@ -843,6 +894,7 @@ COMMANDS:
     service <status|start|stop|reload|restart|queue-fix>   MailScanner service & queues
     rules lint          Check managed ruleset files for unparsable lines
     rules adopt [--from <dir>]   Borrow existing on-disk rules into the custom store
+    engine <status|install>      Install / check the MailScanner engine itself
     backup <file.tgz>   Back up config + policy to a tarball
     restore <file.tgz>  Restore config + policy from a tarball
     db-migrate          Apply pending SQL migrations

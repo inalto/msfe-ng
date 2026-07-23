@@ -5,7 +5,8 @@
 #
 # Downloads the latest release tarball, verifies its checksum, and runs the
 # installer. Run as root on a cPanel or DirectAdmin host. Set MSFE_NG_VERSION to
-# pin a version, or MSFE_NG_REPO to use a fork.
+# pin a version, or MSFE_NG_REPO to use a fork. Set MSFE_NG_WITH_ENGINE=1 to
+# also install the MailScanner engine itself if it is missing.
 set -eu
 
 REPO="${MSFE_NG_REPO:-inalto/msfe-ng}"
