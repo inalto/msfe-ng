@@ -25,7 +25,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck && shellcheck packaging/*.sh
+        # -S warning: info-level notes (SC2015 with an intentional `|| true`,
+        # SC1091 dynamic source) are fine; warnings and errors still fail.
+        run: sudo apt-get update && sudo apt-get install -y shellcheck && shellcheck -S warning packaging/*.sh
       - name: perl syntax
         run: |
           for f in panel/cpanel/whm/msfe-ng.cgi panel/cpanel/uapi/MSFE_NG.pm \
