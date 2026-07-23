@@ -456,6 +456,19 @@ async function renderService(){
     toast(r&&r.ok?('Scanning '+(r.scanning?'enabled':'disabled')):(r.error||'failed'));
     refreshStatus();
   };
+  const cfgBtn=el('button',{class:'act plain'},'Configure for Exim');
+  cfgBtn.onclick=async()=>{
+    if(!confirm('Configure MailScanner for this server?\n\nSets MailScanner.conf up for Exim (queue directories, run-as user, sendmail paths — a backup of the original is kept) and creates the incoming spool directory.\n\nMail flow does NOT change.'))return;
+    cfgBtn.disabled=true;
+    const r=await api('/api/service/engine-configure',{method:'POST'});
+    cfgBtn.disabled=false;
+    if(r&&r.ok){
+      const n=(r.set||[]).length+(r.created||[]).length;
+      toast(n?`Configured (${(r.set||[]).length} settings, ${(r.created||[]).length} directories) — now run the health check`:'Already configured — nothing to change');
+      if((r.chown_failed||[]).length)toast('Warning: ownership not set on '+r.chown_failed.join(', '));
+    } else toast(r.error||'configure failed');
+    refreshStatus();
+  };
   const syncBtn=el('button',{class:'act plain'},'Update rules now');
   syncBtn.onclick=async()=>{
     syncBtn.disabled=true;
@@ -463,7 +476,7 @@ async function renderService(){
     syncBtn.disabled=false;
     toast(r&&r.ok?`Rules updated — ${r.files} files, reload ${r.reloaded?'ok':'failed'}`:(r.error||'sync failed'));
   };
-  btns.append(mfBtn,syncBtn);
+  btns.append(cfgBtn,mfBtn,syncBtn);
   v.append(con);
 
   // Health check: MailScanner's own self-test, with a plain verdict.

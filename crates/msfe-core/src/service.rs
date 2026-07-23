@@ -235,6 +235,18 @@ pub fn journal(lines: usize) -> String {
 
 // ---- mail queues -------------------------------------------------------------
 
+/// The queue dirs this platform *should* use (env override or the split-spool
+/// defaults) — what `engine::configure` writes into MailScanner.conf.
+pub fn queue_dir_targets() -> (PathBuf, PathBuf) {
+    if let (Ok(i), Ok(o)) = (
+        std::env::var("MSFE_NG_INCOMING_QUEUE"),
+        std::env::var("MSFE_NG_OUTGOING_QUEUE"),
+    ) {
+        return (i.into(), o.into());
+    }
+    (DEFAULT_INCOMING_QUEUE.into(), DEFAULT_OUTGOING_QUEUE.into())
+}
+
 /// Incoming/outgoing Exim queue input dirs: MailScanner.conf directives when
 /// present, cPanel split-spool defaults otherwise. Env overrides for tests.
 pub fn queue_dirs(cfg: &Config) -> (PathBuf, PathBuf) {

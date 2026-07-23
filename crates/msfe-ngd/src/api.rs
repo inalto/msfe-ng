@@ -71,6 +71,22 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                 ),
             }
         }
+        ("POST", "/api/service/engine-configure") => match msfe_core::engine::configure(cfg) {
+            Ok(r) => {
+                let arr = |v: &[String]| Json::Array(v.iter().map(Json::str).collect());
+                Response::json(
+                    200,
+                    &Json::Object(vec![
+                        ("ok".into(), Json::Bool(true)),
+                        ("set".into(), arr(&r.set)),
+                        ("created".into(), arr(&r.created)),
+                        ("chown_failed".into(), arr(&r.chown_failed)),
+                    ])
+                    .to_string(),
+                )
+            }
+            Err(e) => Response::json(500, &format!("{{\"error\":\"configure: {e}\"}}")),
+        },
         ("POST", "/api/service/lint") => {
             let r = service::lint();
             Response::json(
