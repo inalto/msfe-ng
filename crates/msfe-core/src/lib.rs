@@ -20,6 +20,7 @@ pub mod migrate;
 pub mod panel;
 pub mod quarantine;
 pub mod rules;
+pub mod service;
 pub mod spambox;
 pub mod stats;
 pub mod sync;

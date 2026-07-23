@@ -26,9 +26,19 @@ unless ( Whostmgr::ACLS::hasroot() ) {
     exit;
 }
 
-my $path   = $ENV{HTTP_X_MSFE_PATH} || $ENV{PATH_INFO} || '/whm';
 my $method = $ENV{REQUEST_METHOD} || 'GET';
 my $query  = $ENV{QUERY_STRING} || '';
+
+# Root-only impersonation: ?msfe_user=<account> serves the end-user UI scoped
+# to that account ("view as user"). Safe because this shim is behind hasroot();
+# the cPanel/DA user shims ignore this parameter entirely.
+my $impersonate = '';
+if ( $query =~ /(?:^|&)msfe_user=([A-Za-z0-9._-]{1,64})(?:&|$)/ ) {
+    $impersonate = $1;
+}
+
+my $default = $impersonate ? '/user' : '/whm';
+my $path    = $ENV{HTTP_X_MSFE_PATH} || $ENV{PATH_INFO} || $default;
 
 # A top-level navigation (not an SPA fetch, not the embedded frame) gets the
 # WHM chrome — header and left menu — with the SPA in an iframe filling the
@@ -87,8 +97,9 @@ sub proxy {
         return;
     }
     my $clen = length $body;
+    my $extra = $impersonate ? "X-MSFE-User: $impersonate\r\n" : '';
     print {$sock}
-      "$method $path HTTP/1.1\r\nHost: localhost\r\nContent-Length: $clen\r\nConnection: close\r\n\r\n$body";
+      "$method $path HTTP/1.1\r\nHost: localhost\r\n${extra}Content-Length: $clen\r\nConnection: close\r\n\r\n$body";
 
     local $/;
     my $raw = <$sock>;

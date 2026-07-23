@@ -81,7 +81,8 @@ async function api(path,{method='GET',body=null,raw=false}={}){
   const opts={method,headers:{}};
   if(body){opts.body=JSON.stringify(body);opts.headers['Content-Type']='application/json';}
   let url=path;
-  if(!DIRECT){url=location.pathname.split('?')[0];opts.headers['X-MSFE-Path']=path;}
+  // keep the query string: the admin "view as user" flow carries ?msfe_user=…
+  if(!DIRECT){url=location.pathname+location.search;opts.headers['X-MSFE-Path']=path;}
   const r=await fetch(url,opts);
   if(raw) return r.text();
   try{return await r.json();}catch(e){return {error:'bad response'};}

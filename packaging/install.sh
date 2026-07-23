@@ -66,6 +66,9 @@ db_pass = ""
 # MailScanner integration (for: msfe-ng mailscanner enable-logging)
 mailscanner_conf = "/etc/MailScanner/MailScanner.conf"
 mailscanner_custom_dir = "/etc/MailScanner/custom"
+
+# Mail log watched by the WHM Service tab
+maillog_path = "/var/log/maillog"
 EOF
     chmod 0640 "$CONFDIR/config.toml"
 fi

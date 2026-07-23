@@ -26,6 +26,8 @@ pub struct Config {
     pub spambox_conf: String,
     /// MailScanner quarantine spool directory (for the user quarantine viewer).
     pub quarantine_dir: String,
+    /// Mail log file watched by the admin Service tab.
+    pub maillog_path: String,
 }
 
 impl Default for Config {
@@ -44,6 +46,7 @@ impl Default for Config {
             mailscanner_rules_dir: "/etc/MailScanner/rules".into(),
             spambox_conf: "/etc/msfe-ng/spambox.exim".into(),
             quarantine_dir: "/var/spool/MailScanner/quarantine".into(),
+            maillog_path: "/var/log/maillog".into(),
         }
     }
 }
@@ -76,6 +79,7 @@ impl Config {
                 "mailscanner_rules_dir" => c.mailscanner_rules_dir = v,
                 "spambox_conf" => c.spambox_conf = v,
                 "quarantine_dir" => c.quarantine_dir = v,
+                "maillog_path" => c.maillog_path = v,
                 _ => {} // unknown keys ignored
             }
         }

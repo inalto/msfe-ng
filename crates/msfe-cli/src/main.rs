@@ -51,6 +51,7 @@ fn main() -> ExitCode {
         "housekeeping" => cmd_housekeeping(),
         "digest" => cmd_digest(args.get(1).map(String::as_str)),
         "exim" => cmd_exim(args.get(1).map(String::as_str)),
+        "service" => cmd_service(args.get(1).map(String::as_str)),
         "backup" => cmd_backup(args.get(1).map(String::as_str)),
         "restore" => cmd_restore(args.get(1).map(String::as_str)),
         "help" | "--help" | "-h" => {
@@ -531,6 +532,61 @@ fn cmd_digest(flag: Option<&str>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// MailScanner service control and queue tooling (mirrors the Service tab).
+fn cmd_service(sub: Option<&str>) -> ExitCode {
+    use msfe_core::{mailflow, service};
+    let cfg = Config::load(&config_path());
+    match sub {
+        Some("status") => {
+            let st = service::status();
+            let (inc, out) = service::queue_dirs(&cfg);
+            println!(
+                "MailScanner: {} ({} processes), scanning {}",
+                if st.active { "active" } else { "stopped" },
+                st.procs,
+                if mailflow::scanning_enabled() { "enabled" } else { "disabled" }
+            );
+            println!(
+                "queues: incoming {} ({}), outgoing {} ({})",
+                service::count_queue(&inc),
+                inc.display(),
+                service::count_queue(&out),
+                out.display()
+            );
+            ExitCode::SUCCESS
+        }
+        Some(a @ ("start" | "stop" | "reload" | "restart")) => match service::control(a) {
+            Ok(()) => {
+                println!("MailScanner {a}: ok");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("msfe-ng service {a}: {e}");
+                ExitCode::from(1)
+            }
+        },
+        Some("queue-fix") => match service::queue_fix(&cfg) {
+            Ok(r) => {
+                println!(
+                    "queue-fix: {} orphaned files moved to {}, delivery run {}",
+                    r.moved,
+                    r.badqueue_dir.display(),
+                    if r.flush_started { "started" } else { "NOT started" }
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("msfe-ng service queue-fix: {e}");
+                ExitCode::from(1)
+            }
+        },
+        _ => {
+            eprintln!("usage: msfe-ng service <status|start|stop|reload|restart|queue-fix>");
+            ExitCode::from(2)
+        }
+    }
+}
+
 /// Toggle / report MailScanner scanning via the exiscandisable flag.
 fn cmd_exim(sub: Option<&str>) -> ExitCode {
     use msfe_core::mailflow;
@@ -676,6 +732,7 @@ COMMANDS:
     digest [--dry-run]  Email quarantine digests to digest-enabled domains
     housekeeping        Prune old mail-log rows (cleanmysql retention)
     exim <status|enable-scanning|disable-scanning>   Toggle MailScanner scanning
+    service <status|start|stop|reload|restart|queue-fix>   MailScanner service & queues
     backup <file.tgz>   Back up config + policy to a tarball
     restore <file.tgz>  Restore config + policy from a tarball
     db-migrate          Apply pending SQL migrations

@@ -55,6 +55,11 @@
   .badge{display:inline-block;padding:.05rem .4rem;border-radius:999px;font-size:.72rem;color:#fff}
   .bars text{fill:var(--ink2)} .bars .axis{stroke:var(--axis)} .bars .grid{stroke:var(--grid)}
   .empty{color:var(--muted);padding:1.5rem 0;text-align:center}
+  pre.log{background:var(--page);border:1px solid var(--line);border-radius:8px;padding:.6rem .8rem;font:.76rem/1.45 ui-monospace,monospace;max-height:24rem;overflow:auto;white-space:pre-wrap;word-break:break-all;margin:0}
+  button.act.danger{background:var(--critical)}
+  button.act.plain{background:var(--surface);color:var(--ink);border:1px solid var(--line);font-weight:500}
+  .statline{display:flex;gap:1.2rem;flex-wrap:wrap;align-items:center;margin-bottom:.8rem}
+  .statline .dot{width:9px;height:9px;border-radius:50%;display:inline-block;margin-right:.35rem}
   .toast{position:fixed;bottom:1rem;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--page);padding:.5rem 1rem;border-radius:8px;opacity:0;transition:opacity .2s;pointer-events:none}
   .toast.show{opacity:1}
   .muted{color:var(--muted)}
@@ -70,6 +75,8 @@
     <button data-tab="settings" aria-selected="false">Settings</button>
     <button data-tab="lists" aria-selected="false">Lists</button>
     <button data-tab="messages" aria-selected="false">Messages</button>
+    <button data-tab="service" aria-selected="false">Service</button>
+    <button data-tab="config" aria-selected="false">Config</button>
   </nav>
   <main id="view"></main>
   <div class="toast" id="toast"></div>
@@ -78,12 +85,13 @@
 const PANEL="{{PANEL}}";
 // Direct = served by the daemon in dev; else proxied through the panel CGI.
 const DIRECT = !location.pathname.includes('.cgi') && !location.pathname.includes('CMD_PLUGINS');
-async function api(path,{method='GET',body=null}={}){
+async function api(path,{method='GET',body=null,raw=false}={}){
   const opts={method,headers:{}};
   if(body){opts.body=JSON.stringify(body);opts.headers['Content-Type']='application/json';}
   let url=path;
   if(!DIRECT){url=location.pathname.split('?')[0];opts.headers['X-MSFE-Path']=path;}
   const r=await fetch(url,opts);
+  if(raw) return r.text();
   try{return await r.json();}catch(e){return {error:'bad response'};}
 }
 const $=(s,r=document)=>r.querySelector(s);
@@ -94,9 +102,11 @@ function toast(msg){const t=$('#toast');t.textContent=msg;t.classList.add('show'
 let policy=null; // {settings:{}, whitelist:[], blacklist:[]}
 let days=7;
 
-const tabs={dash:renderDash,settings:renderSettings,lists:renderLists,messages:renderMessages};
+const tabs={dash:renderDash,settings:renderSettings,lists:renderLists,messages:renderMessages,service:renderService,config:renderConfig};
+let logTimer=null; // maillog auto-refresh; cleared on every tab switch
 $('#tabs').addEventListener('click',e=>{
   const b=e.target.closest('button');if(!b)return;
+  clearInterval(logTimer);logTimer=null;
   document.querySelectorAll('#tabs button').forEach(x=>x.setAttribute('aria-selected',x===b));
   tabs[b.dataset.tab]();
 });
@@ -244,6 +254,180 @@ async function renderMessages(){
       el('td',{},m.subject),el('td',{class:'num'},m.score||'0'),el('td',{},badge)));
   });
   card.append(t);
+}
+
+// ---- Service ----------------------------------------------------------------
+async function renderService(){
+  const v=$('#view');v.innerHTML='';
+
+  // MailScanner service card
+  const svc=el('div',{class:'card'},el('h2',{},'MailScanner service'));v.append(svc);
+  const stat=el('div',{class:'statline'},el('span',{class:'muted'},'Loading status…'));svc.append(stat);
+  const btns=el('div',{class:'ctl'});svc.append(btns);
+  async function refreshStatus(){
+    const s=await api('/api/service/status');
+    stat.innerHTML='';
+    if(s.error){stat.append(el('span',{class:'muted'},'Status unavailable'));return;}
+    stat.append(
+      el('span',{},el('span',{class:'dot',style:'background:'+(s.active?'var(--good)':'var(--critical)')}),
+        s.active?'Running':'Stopped',s.procs?` (${s.procs} processes)`:''),
+      el('span',{},el('span',{class:'dot',style:'background:'+(s.scanning?'var(--good)':'var(--warning)')}),
+        'Scanning '+(s.scanning?'enabled':'disabled (mail bypasses MailScanner)')),
+      el('span',{class:'muted'},`Queues: ${s.queues?.incoming??'?'} incoming · ${s.queues?.outgoing??'?'} outgoing`));
+    mfBtn.textContent=s.scanning?'Disable MailScanner (mailflow)':'Enable MailScanner (mailflow)';
+    mfBtn.dataset.enable=s.scanning?'false':'true';
+  }
+  async function ctl(action,confirmMsg){
+    if(confirmMsg&&!confirm(confirmMsg))return;
+    const r=await api('/api/service/control',{method:'POST',body:{action}});
+    toast(r&&r.ok?`MailScanner ${action}: ok`:(r.error||`${action} failed`));
+    refreshStatus();
+  }
+  const stopWarn='Stop the MailScanner processes?\n\nNo email will be delivered while the MailScanner processes are stopped.';
+  btns.append(
+    Object.assign(el('button',{class:'act'},'Start'),{onclick:()=>ctl('start')}),
+    Object.assign(el('button',{class:'act danger'},'Stop'),{onclick:()=>ctl('stop',stopWarn)}),
+    Object.assign(el('button',{class:'act plain'},'Reload'),{onclick:()=>ctl('reload')}),
+    Object.assign(el('button',{class:'act plain'},'Restart'),{onclick:()=>ctl('restart','Restart the MailScanner processes?')}));
+  const mfBtn=el('button',{class:'act plain'},'…');
+  mfBtn.onclick=async()=>{
+    const enable=mfBtn.dataset.enable==='true';
+    if(!enable&&!confirm('Disable MailScanner?\n\nMail delivery goes back to Exim only. Any email in the MailScanner queue will not be processed until MailScanner is re-enabled.'))return;
+    const r=await api('/api/service/mailflow',{method:'POST',body:{enabled:enable}});
+    toast(r&&r.ok?('Scanning '+(r.scanning?'enabled':'disabled')):(r.error||'failed'));
+    refreshStatus();
+  };
+  const syncBtn=el('button',{class:'act plain'},'Update rules now');
+  syncBtn.onclick=async()=>{
+    syncBtn.disabled=true;
+    const r=await api('/api/service/sync',{method:'POST'});
+    syncBtn.disabled=false;
+    toast(r&&r.ok?`Rules updated — ${r.files} files, reload ${r.reloaded?'ok':'failed'}`:(r.error||'sync failed'));
+  };
+  btns.append(mfBtn,syncBtn);
+
+  // Queue card
+  const qc=el('div',{class:'card'},el('h2',{},'Mail queues'));v.append(qc);
+  const qbody=el('div',{},el('span',{class:'muted'},'Checking queues…'));qc.append(qbody);
+  async function refreshQueue(){
+    const q=await api('/api/service/queue');
+    qbody.innerHTML='';
+    if(q.error){qbody.append(el('span',{class:'muted'},'Queue check unavailable'));return;}
+    qbody.append(el('div',{class:'statline'},
+      el('span',{},`Incoming: ${q.incoming} `,el('span',{class:'muted'},`(${q.incoming_dir})`)),
+      el('span',{},`Outgoing: ${q.outgoing} `,el('span',{class:'muted'},`(${q.outgoing_dir})`)),
+      el('span',{},(q.orphans||[]).length
+        ? el('span',{style:'color:var(--serious)'},`${q.orphans.length} incorrectly queued file(s)`)
+        : el('span',{style:'color:var(--good)'},'No incorrectly queued emails'))));
+    if((q.orphans||[]).length)
+      qbody.append(el('pre',{class:'log'},q.orphans.join('\n')));
+  }
+  const qbtns=el('div',{class:'ctl'});qc.append(qbtns);
+  qbtns.append(
+    Object.assign(el('button',{class:'act plain'},'Re-check'),{onclick:refreshQueue}),
+    Object.assign(el('button',{class:'act'},'Fix queues & force delivery run'),{onclick:async()=>{
+      if(!confirm('Move incorrectly queued files aside (kept in msfe-ng-badqueue, never deleted) and force an Exim queue run?'))return;
+      const r=await api('/api/service/queue/fix',{method:'POST'});
+      toast(r&&r.ok?`${r.moved} file(s) moved, delivery run ${r.flush_started?'started':'not started'}`:(r.error||'fix failed'));
+      refreshQueue();
+    }}));
+
+  // Maillog card
+  const lc=el('div',{class:'card'},el('h2',{},'Mail log'));v.append(lc);
+  const lctl=el('div',{class:'ctl'});lc.append(lctl);
+  const lsel=el('select');[100,300,1000].forEach(n=>lsel.append(el('option',{value:n},n+' lines')));
+  const pre=el('pre',{class:'log'},'Loading…');
+  async function refreshLog(){
+    const text=await api('/api/service/maillog?lines='+lsel.value,{raw:true});
+    const stick=pre.scrollTop+pre.clientHeight>=pre.scrollHeight-4;
+    pre.textContent=text||'(empty)';
+    if(stick)pre.scrollTop=pre.scrollHeight;
+  }
+  const auto=el('input',{type:'checkbox',id:'logauto'});
+  auto.onchange=()=>{clearInterval(logTimer);logTimer=auto.checked?setInterval(refreshLog,5000):null;};
+  lctl.append(lsel,
+    Object.assign(el('button',{class:'act plain'},'Refresh'),{onclick:refreshLog}),
+    auto,el('label',{for:'logauto',class:'muted'},'auto-refresh (5s)'));
+  lc.append(pre);
+
+  // User view + update card
+  const uc=el('div',{class:'row'});v.append(uc);
+  if(!DIRECT){
+    const imp=el('div',{class:'card'},el('h2',{},'View as user'),
+      el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},'Opens the end-user settings UI for an account in a new tab (impersonated, admin-only).'));
+    const uin=el('input',{placeholder:'account name'});
+    imp.append(el('div',{class:'ctl'},uin,
+      Object.assign(el('button',{class:'act plain'},'Open as user'),{onclick:()=>{
+        const u=uin.value.trim();
+        if(!/^[a-z0-9._-]+$/i.test(u)){toast('Enter a valid account name');return;}
+        window.open(location.pathname.split('?')[0]+'?embedded=1&msfe_user='+encodeURIComponent(u),'_blank');
+      }})));
+    uc.append(imp);
+  }
+  const up=el('div',{class:'card'},el('h2',{},'Updates'));
+  const upline=el('div',{class:'statline'},el('span',{class:'muted'},'MSFE-NG v{{VERSION}}'));
+  const upBtn=el('button',{class:'act plain'},'Check for updates');
+  upBtn.onclick=async()=>{
+    upBtn.disabled=true;
+    const r=await api('/api/service/update');
+    upBtn.disabled=false;
+    upline.innerHTML='';
+    if(!r||!r.latest){upline.append(el('span',{class:'muted'},'Could not reach the release server.'));return;}
+    if(r.latest===r.current)upline.append(el('span',{style:'color:var(--good)'},`v${r.current} — up to date`));
+    else upline.append(el('span',{style:'color:var(--warning)'},`v${r.latest} available (installed v${r.current}) — `),
+      el('a',{href:'https://github.com/inalto/msfe-ng/releases',target:'_blank'},'release notes'));
+  };
+  up.append(upline,upBtn);uc.append(up);
+
+  refreshStatus();refreshQueue();refreshLog();
+}
+
+// ---- Config files & rulesets -------------------------------------------------
+async function renderConfig(){
+  const v=$('#view');v.innerHTML='';
+
+  const ec=el('div',{class:'card'},el('h2',{},'Configuration files'),
+    el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},
+      'A one-time .msfe-ng.bak backup of the original is kept next to each file. Reload MailScanner after changing MailScanner.conf.'));
+  v.append(ec);
+  const fsel=el('select');
+  [['mailscanner','MailScanner.conf'],['msfe','MSFE-NG config.toml']].forEach(([val,lbl])=>fsel.append(el('option',{value:val},lbl)));
+  const pathLbl=el('span',{class:'muted'});
+  const ta=el('textarea',{spellcheck:'false',style:'min-height:22rem'});
+  async function loadConf(){
+    ta.value='';pathLbl.textContent='loading…';
+    const r=await api('/api/service/conf?which='+fsel.value);
+    if(r.error){pathLbl.textContent=r.error;return;}
+    ta.value=r.content;pathLbl.textContent=r.path;
+  }
+  fsel.onchange=loadConf;
+  const saveBtn=el('button',{class:'act'},'Save');
+  saveBtn.onclick=async()=>{
+    if(!confirm('Save changes to '+pathLbl.textContent+'?'))return;
+    saveBtn.disabled=true;
+    const r=await api('/api/service/conf',{method:'PUT',body:{which:fsel.value,content:ta.value}});
+    saveBtn.disabled=false;
+    if(r&&r.ok){toast(fsel.value==='mailscanner'?'Saved — reload MailScanner to apply':'Saved');}
+    else toast(r.error||'save failed');
+  };
+  ec.append(el('div',{class:'ctl'},fsel,saveBtn,pathLbl),ta);
+
+  const rc=el('div',{class:'card'},el('h2',{},'Generated rulesets'),
+    el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},
+      'Read-only: these files are regenerated by sync — edit policy, not the files.'));
+  v.append(rc);
+  const list=el('div',{class:'ctl',style:'flex-wrap:wrap'});
+  const rpre=el('pre',{class:'log'},'Select a ruleset file to view it.');
+  rc.append(list,rpre);
+  const r=await api('/api/service/rules');
+  (r.files||[]).forEach(f=>{
+    list.append(Object.assign(el('button',{class:'act plain'},`${f.name} (${f.size} B)`),{onclick:async()=>{
+      rpre.textContent=await api('/api/service/rules/view?name='+encodeURIComponent(f.name),{raw:true});
+    }}));
+  });
+  if(!(r.files||[]).length)list.append(el('span',{class:'muted'},'No ruleset files in '+(r.dir||'rules dir')+' yet — run sync.'));
+
+  loadConf();
 }
 
 renderDash();

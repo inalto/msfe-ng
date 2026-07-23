@@ -20,6 +20,11 @@ listed only to name the *behavior* being matched — no code is reused.
 | SpamBox Exim fragment (`spambox.conf`) | generated Exim include, config-toggled | M2 |
 | i18n (`mslang.*.txt`) | JS i18n bundles | M5 |
 | Self-test (`mailtest.pl`, GTUBE/EICAR) | `msfe-ng selftest` | M2 |
+| Service control: status/start/stop/reload/restart, queue lengths, queue fixing, maillog watch (WHM "MailScanner Service" section) | `msfe-core::service` + `/api/service/*` + WHM Service tab; `msfe-ng service` CLI | M7 |
+| MailScanner.conf / front-end config editing, ruleset viewing (WHM "MailScanner Configuration" section) | `/api/service/conf` + `/api/service/rules` + WHM Config tab (one-time `.msfe-ng.bak` backups) | M7 |
+| "Access user settings as the user" (impersonation) | root-gated WHM shim `?msfe_user=` → `X-MSFE-User`; Service tab "View as user" | M7 |
+| Upgrade check button | on-demand `/api/service/update` (GitHub releases redirect via curl; no automatic phone-home) | M7 |
+| ConfigServer OutGoing Spam Monitor (osm) integration | **out of scope — separate proprietary ConfigServer product** | — |
 | Phone-home licensing (`servers`, base64 blobs) | **dropped — intentionally not reimplemented** | — |
 
 ## Config formats to import (facts, safe to reuse)

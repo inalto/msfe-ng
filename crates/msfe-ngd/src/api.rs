@@ -4,7 +4,7 @@
 use crate::http::{Request, Response};
 use msfe_core::json::Json;
 use msfe_core::rules::DomainPolicy;
-use msfe_core::{quarantine, stats, sync, users, Config};
+use msfe_core::{mailflow, quarantine, service, stats, sync, users, Config};
 use std::path::Path;
 
 /// Route `/api/*` requests. `config_file` is the daemon's config path (used to
@@ -44,8 +44,246 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             stat_response(stats::messages(cfg, limit))
         }
 
+        // ---- MailScanner service operations (root-only admin surface) -------
+        ("GET", "/api/service/status") => service_status(cfg),
+        ("POST", "/api/service/control") => service_control(req),
+        ("POST", "/api/service/mailflow") => service_mailflow(req),
+        ("POST", "/api/service/sync") => service_sync(cfg, config_file),
+        ("GET", "/api/service/maillog") => service_maillog(req, cfg),
+        ("GET", "/api/service/queue") => service_queue(cfg),
+        ("POST", "/api/service/queue/fix") => service_queue_fix(cfg),
+        ("GET", "/api/service/rules") => service_rules(cfg),
+        ("GET", "/api/service/rules/view") => service_rules_view(req, cfg),
+        ("GET", "/api/service/conf") => service_conf_read(req, cfg, config_file),
+        ("PUT", "/api/service/conf") => service_conf_write(req, cfg, config_file),
+        ("GET", "/api/service/update") => service_update(),
+
         _ => Response::json(404, r#"{"error":"not found"}"#),
     }
+}
+
+// ---- service handlers --------------------------------------------------------
+
+fn service_status(cfg: &Config) -> Response {
+    let st = service::status();
+    let (inc_dir, out_dir) = service::queue_dirs(cfg);
+    Response::json(
+        200,
+        &Json::Object(vec![
+            ("active".into(), Json::Bool(st.active)),
+            ("procs".into(), Json::Int(st.procs as i64)),
+            (
+                "scanning".into(),
+                Json::Bool(mailflow::scanning_enabled()),
+            ),
+            (
+                "queues".into(),
+                Json::Object(vec![
+                    (
+                        "incoming".into(),
+                        Json::Int(service::count_queue(&inc_dir) as i64),
+                    ),
+                    (
+                        "outgoing".into(),
+                        Json::Int(service::count_queue(&out_dir) as i64),
+                    ),
+                ]),
+            ),
+            ("version".into(), Json::str(msfe_api::VERSION)),
+        ])
+        .to_string(),
+    )
+}
+
+fn service_control(req: &Request) -> Response {
+    let v = Json::parse(&req.body).unwrap_or(Json::Null);
+    let action = v.str_field("action");
+    match service::control(&action) {
+        Ok(()) => {
+            let st = service::status();
+            Response::json(
+                200,
+                &format!(
+                    "{{\"ok\":true,\"active\":{},\"procs\":{}}}",
+                    st.active, st.procs
+                ),
+            )
+        }
+        Err(e) => Response::json(
+            500,
+            &Json::Object(vec![("error".into(), Json::str(format!("{action} failed: {e}")))])
+                .to_string(),
+        ),
+    }
+}
+
+/// Enable/disable scanning via the exiscandisable mailflow flag.
+fn service_mailflow(req: &Request) -> Response {
+    let v = Json::parse(&req.body).unwrap_or(Json::Null);
+    let enabled = matches!(v.get("enabled"), Some(Json::Bool(true)));
+    match mailflow::set_scanning(enabled) {
+        Ok(()) => Response::json(
+            200,
+            &format!("{{\"ok\":true,\"scanning\":{}}}", mailflow::scanning_enabled()),
+        ),
+        Err(e) => Response::json(500, &format!("{{\"error\":\"mailflow: {e}\"}}")),
+    }
+}
+
+/// Regenerate rule files from policy (incl. end-user overrides) and reload.
+fn service_sync(cfg: &Config, config_file: &Path) -> Response {
+    match sync::run(cfg, config_file, None) {
+        Ok(n) => {
+            let reloaded = sync::reload_mailscanner();
+            Response::json(
+                200,
+                &format!("{{\"ok\":true,\"files\":{n},\"reloaded\":{reloaded}}}"),
+            )
+        }
+        Err(e) => Response::json(500, &format!("{{\"error\":\"sync failed: {e}\"}}")),
+    }
+}
+
+fn service_maillog(req: &Request, cfg: &Config) -> Response {
+    let lines = stats::clamp_int(req.query_param("lines").as_deref(), 200, 10, 2000);
+    match service::tail_file(Path::new(&cfg.maillog_path), lines as usize) {
+        Ok(text) => Response::text(200, &text),
+        Err(e) => Response::text(200, &format!("(cannot read {}: {e})", cfg.maillog_path)),
+    }
+}
+
+fn service_queue(cfg: &Config) -> Response {
+    let (inc_dir, out_dir) = service::queue_dirs(cfg);
+    let orphans: Vec<Json> = [&inc_dir, &out_dir]
+        .iter()
+        .flat_map(|d| service::find_orphans(d, 600))
+        .map(|p| Json::str(p.display().to_string()))
+        .collect();
+    Response::json(
+        200,
+        &Json::Object(vec![
+            ("incoming_dir".into(), Json::str(inc_dir.display().to_string())),
+            ("outgoing_dir".into(), Json::str(out_dir.display().to_string())),
+            (
+                "incoming".into(),
+                Json::Int(service::count_queue(&inc_dir) as i64),
+            ),
+            (
+                "outgoing".into(),
+                Json::Int(service::count_queue(&out_dir) as i64),
+            ),
+            ("orphans".into(), Json::Array(orphans)),
+        ])
+        .to_string(),
+    )
+}
+
+fn service_queue_fix(cfg: &Config) -> Response {
+    match service::queue_fix(cfg) {
+        Ok(r) => Response::json(
+            200,
+            &Json::Object(vec![
+                ("ok".into(), Json::Bool(true)),
+                ("moved".into(), Json::Int(r.moved as i64)),
+                (
+                    "badqueue_dir".into(),
+                    Json::str(r.badqueue_dir.display().to_string()),
+                ),
+                ("flush_started".into(), Json::Bool(r.flush_started)),
+            ])
+            .to_string(),
+        ),
+        Err(e) => Response::json(500, &format!("{{\"error\":\"queue fix: {e}\"}}")),
+    }
+}
+
+fn service_rules(cfg: &Config) -> Response {
+    let items: Vec<Json> = service::list_rules(cfg)
+        .into_iter()
+        .map(|(name, size)| {
+            Json::Object(vec![
+                ("name".into(), Json::str(name)),
+                ("size".into(), Json::Int(size as i64)),
+            ])
+        })
+        .collect();
+    Response::json(
+        200,
+        &Json::Object(vec![
+            ("dir".into(), Json::str(&cfg.mailscanner_rules_dir)),
+            ("files".into(), Json::Array(items)),
+        ])
+        .to_string(),
+    )
+}
+
+fn service_rules_view(req: &Request, cfg: &Config) -> Response {
+    let name = req.query_param("name").unwrap_or_default();
+    match service::read_rule(cfg, &name) {
+        Ok(text) => Response::text(200, &text),
+        Err(_) => Response::json(404, r#"{"error":"no such ruleset"}"#),
+    }
+}
+
+/// Resolve the editable-file selector to a path. Only these two files are ever
+/// exposed for editing.
+fn conf_target(which: &str, cfg: &Config, config_file: &Path) -> Option<std::path::PathBuf> {
+    match which {
+        "mailscanner" => Some(cfg.mailscanner_conf.clone().into()),
+        "msfe" => Some(config_file.to_path_buf()),
+        _ => None,
+    }
+}
+
+fn service_conf_read(req: &Request, cfg: &Config, config_file: &Path) -> Response {
+    let which = req.query_param("which").unwrap_or_default();
+    let Some(path) = conf_target(&which, cfg, config_file) else {
+        return Response::json(400, r#"{"error":"which must be mailscanner|msfe"}"#);
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Response::json(
+            200,
+            &Json::Object(vec![
+                ("path".into(), Json::str(path.display().to_string())),
+                ("content".into(), Json::str(text)),
+            ])
+            .to_string(),
+        ),
+        Err(e) => Response::json(500, &format!("{{\"error\":\"cannot read: {e}\"}}")),
+    }
+}
+
+fn service_conf_write(req: &Request, cfg: &Config, config_file: &Path) -> Response {
+    let v = match Json::parse(&req.body) {
+        Ok(v) => v,
+        Err(e) => return Response::json(400, &format!("{{\"error\":\"bad json: {e}\"}}")),
+    };
+    let which = v.str_field("which");
+    let Some(path) = conf_target(&which, cfg, config_file) else {
+        return Response::json(400, r#"{"error":"which must be mailscanner|msfe"}"#);
+    };
+    let Some(content) = v.get("content").and_then(Json::as_str) else {
+        return Response::json(400, r#"{"error":"missing content"}"#);
+    };
+    match service::save_conf(&path, content) {
+        Ok(()) => Response::json(200, r#"{"ok":true}"#),
+        Err(e) => Response::json(500, &format!("{{\"error\":\"cannot save: {e}\"}}")),
+    }
+}
+
+fn service_update() -> Response {
+    let latest = service::latest_version();
+    Response::json(
+        200,
+        &Json::Object(vec![
+            ("current".into(), Json::str(msfe_api::VERSION)),
+            (
+                "latest".into(),
+                latest.map(Json::Str).unwrap_or(Json::Null),
+            ),
+        ])
+        .to_string(),
+    )
 }
 
 fn policy_json(settings: &[(String, String)], wl: &[String], bl: &[String]) -> Json {
