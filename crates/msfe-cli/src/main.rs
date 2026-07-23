@@ -581,8 +581,35 @@ fn cmd_engine(sub: Option<&str>) -> ExitCode {
                 }
             }
         }
+        Some(a @ ("enable" | "disable")) => {
+            let on = a == "enable";
+            match service::set_engine_run(on) {
+                Ok(()) => {
+                    println!(
+                        "safety switch (run_mailscanner) is now {}",
+                        if on { "ON" } else { "OFF" }
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("msfe-ng engine {a}: {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        Some("lint") => {
+            let r = service::lint();
+            println!("{}", r.output);
+            if r.ok {
+                println!("RESULT: everything is OK");
+                ExitCode::SUCCESS
+            } else {
+                println!("RESULT: problems found (see above)");
+                ExitCode::from(1)
+            }
+        }
         _ => {
-            eprintln!("usage: msfe-ng engine <status|install>");
+            eprintln!("usage: msfe-ng engine <status|install|enable|disable|lint>");
             ExitCode::from(2)
         }
     }
@@ -907,7 +934,7 @@ COMMANDS:
     service <status|start|stop|reload|restart|queue-fix>   MailScanner service & queues
     rules lint          Check managed ruleset files for unparsable lines
     rules adopt [--from <dir>]   Borrow existing on-disk rules into the custom store
-    engine <status|install>      Install / check the MailScanner engine itself
+    engine <status|install|enable|disable|lint>   Manage the MailScanner engine itself
     backup <file.tgz>   Back up config + policy to a tarball
     restore <file.tgz>  Restore config + policy from a tarball
     db-migrate          Apply pending SQL migrations

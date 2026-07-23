@@ -47,14 +47,18 @@ pub fn engine_configured() -> bool {
     engine_installed() && Path::new("/etc/MailScanner/MailScanner.conf").exists()
 }
 
+fn ms_defaults_path() -> PathBuf {
+    std::env::var("MSFE_NG_MS_DEFAULTS")
+        .unwrap_or_else(|_| "/etc/MailScanner/defaults".to_string())
+        .into()
+}
+
 /// MailScanner's own startup latch: fresh installs ship
 /// `/etc/MailScanner/defaults` with `run_mailscanner=0` and ms-init refuses to
 /// start until an admin flips it (the wiring step does, once Exim is set up).
 /// Returns None when the defaults file is absent/unreadable.
 pub fn engine_run_enabled() -> Option<bool> {
-    let path = std::env::var("MSFE_NG_MS_DEFAULTS")
-        .unwrap_or_else(|_| "/etc/MailScanner/defaults".to_string());
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = std::fs::read_to_string(ms_defaults_path()).ok()?;
     for line in text.lines() {
         let l = line.trim();
         if let Some(v) = l.strip_prefix("run_mailscanner=") {
@@ -62,6 +66,54 @@ pub fn engine_run_enabled() -> Option<bool> {
         }
     }
     None
+}
+
+/// Flip the startup latch (`run_mailscanner=` in MailScanner's defaults file),
+/// preserving the rest of the file; appends the line if absent.
+pub fn set_engine_run(enabled: bool) -> io::Result<()> {
+    let path = ms_defaults_path();
+    let text = std::fs::read_to_string(&path)?;
+    let val = if enabled { "1" } else { "0" };
+    let mut found = false;
+    let mut out: Vec<String> = text
+        .lines()
+        .map(|l| {
+            if l.trim_start().starts_with("run_mailscanner=") {
+                found = true;
+                format!("run_mailscanner={val}")
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    if !found {
+        out.push(format!("run_mailscanner={val}"));
+    }
+    crate::sync::atomic_write(&path, (out.join("\n") + "\n").as_bytes())
+}
+
+pub struct LintReport {
+    pub ok: bool,
+    pub output: String,
+}
+
+/// Run MailScanner's own self-check (`--lint`): validates the configuration,
+/// perl modules, virus scanner and spam engine. Slow (tens of seconds).
+pub fn lint() -> LintReport {
+    for bin in ["/usr/sbin/MailScanner", "MailScanner"] {
+        if let Ok(o) = Command::new(bin).arg("--lint").output() {
+            let mut output = String::from_utf8_lossy(&o.stdout).into_owned();
+            output.push_str(&String::from_utf8_lossy(&o.stderr));
+            return LintReport {
+                ok: o.status.success(),
+                output: output.trim().to_string(),
+            };
+        }
+    }
+    LintReport {
+        ok: false,
+        output: "MailScanner engine is not installed (run: msfe-ng engine install)".into(),
+    }
 }
 
 pub fn status() -> ServiceStatus {

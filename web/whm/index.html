@@ -372,6 +372,7 @@ async function renderService(){
   // MailScanner service card
   const svc=el('div',{class:'card'},el('h2',{},'MailScanner service'));v.append(svc);
   const stat=el('div',{class:'statline'},el('span',{class:'muted'},'Loading status…'));svc.append(stat);
+  const latch=el('div',{class:'statline'});svc.append(latch);
   const btns=el('div',{class:'ctl'});svc.append(btns);
   async function refreshStatus(){
     const s=await api('/api/service/status');
@@ -384,7 +385,23 @@ async function renderService(){
           :'⚠ MailScanner engine is installed but /etc/MailScanner/MailScanner.conf is missing — run "msfe-ng engine install" to repair.'));
     } else if(s.engine_run_enabled===false){
       stat.append(el('div',{style:'flex-basis:100%;color:var(--warning);font-weight:600'},
-        '⚠ MailScanner is installed but held by its startup latch (run_mailscanner=0 in /etc/MailScanner/defaults): it is not yet configured/wired for this server, so Start will fail until the wiring step enables it.'));
+        '⚠ MailScanner cannot start: its safety switch is OFF. Turn it on below when you are ready.'));
+    }
+    latch.innerHTML='';
+    if(s.engine!==false&&s.engine_configured!==false&&typeof s.engine_run_enabled==='boolean'){
+      const on=s.engine_run_enabled;
+      latch.append(
+        el('span',{},el('span',{class:'dot',style:'background:'+(on?'var(--good)':'var(--warning)')}),
+          'Safety switch: '+(on?'ON — MailScanner is allowed to run':'OFF — MailScanner cannot start')),
+        Object.assign(el('button',{class:'act plain'},on?'Turn OFF (block MailScanner)':'Turn ON (allow MailScanner to run)'),{onclick:async()=>{
+          const msg=on
+            ?'Turn the safety switch OFF?\n\nMailScanner will refuse to start until you turn it back on.'
+            :'Turn the safety switch ON?\n\nThis allows the MailScanner service to be started. It does NOT change how mail flows — Exim must still be wired to MailScanner before anything is scanned.';
+          if(!confirm(msg))return;
+          const r=await api('/api/service/engine-latch',{method:'POST',body:{enabled:!on}});
+          toast(r&&r.ok?('Safety switch is now '+(r.run_enabled?'ON':'OFF')):(r.error||'failed'));
+          refreshStatus();
+        }}));
     }
     stat.append(
       el('span',{},el('span',{class:'dot',style:'background:'+(s.active?'var(--good)':'var(--critical)')}),
@@ -448,6 +465,26 @@ async function renderService(){
   };
   btns.append(mfBtn,syncBtn);
   v.append(con);
+
+  // Health check: MailScanner's own self-test, with a plain verdict.
+  const hc=el('div',{class:'card'},el('h2',{},'Health check'),
+    el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},
+      "Runs MailScanner's built-in self-check: configuration, required modules, virus scanner and spam engine. Safe to run any time — it does not touch mail."));
+  const hcVerdict=el('div',{class:'statline'});
+  const hcBtn=el('button',{class:'act'},'Test that everything is OK');
+  const hcOut=el('pre',{class:'log',style:'display:none'});
+  hcBtn.onclick=async()=>{
+    hcBtn.disabled=true;hcOut.style.display='none';
+    hcVerdict.innerHTML='';hcVerdict.append(el('span',{class:'muted'},'Testing — this can take up to a minute…'));
+    const r=await api('/api/service/lint',{method:'POST'});
+    hcBtn.disabled=false;hcVerdict.innerHTML='';
+    if(r&&r.ok)hcVerdict.append(el('span',{style:'color:var(--good);font-weight:600'},'✅ Everything is OK — MailScanner’s self-check passed.'));
+    else hcVerdict.append(el('span',{style:'color:var(--critical);font-weight:600'},'❌ Problems found — details below.'));
+    hcOut.textContent=(r&&r.output)||r.error||'(no output)';
+    hcOut.style.display='';
+  };
+  hc.append(hcVerdict,hcBtn,hcOut);
+  v.append(hc);
 
   // Queue card
   const qc=el('div',{class:'card'},el('h2',{},'Mail queues'));v.append(qc);

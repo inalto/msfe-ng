@@ -48,6 +48,40 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
         ("GET", "/api/service/status") => service_status(cfg),
         ("POST", "/api/service/control") => service_control(req),
         ("POST", "/api/service/mailflow") => service_mailflow(req),
+        ("POST", "/api/service/engine-latch") => {
+            let v = Json::parse(&req.body).unwrap_or(Json::Null);
+            let enabled = matches!(v.get("enabled"), Some(Json::Bool(true)));
+            match service::set_engine_run(enabled) {
+                Ok(()) => Response::json(
+                    200,
+                    &Json::Object(vec![
+                        ("ok".into(), Json::Bool(true)),
+                        (
+                            "run_enabled".into(),
+                            service::engine_run_enabled()
+                                .map(Json::Bool)
+                                .unwrap_or(Json::Null),
+                        ),
+                    ])
+                    .to_string(),
+                ),
+                Err(e) => Response::json(
+                    500,
+                    &format!("{{\"error\":\"cannot update defaults: {e}\"}}"),
+                ),
+            }
+        }
+        ("POST", "/api/service/lint") => {
+            let r = service::lint();
+            Response::json(
+                200,
+                &Json::Object(vec![
+                    ("ok".into(), Json::Bool(r.ok)),
+                    ("output".into(), Json::str(r.output)),
+                ])
+                .to_string(),
+            )
+        }
         ("POST", "/api/service/sync") => service_sync(cfg, config_file),
         ("GET", "/api/service/maillog") => service_maillog(req, cfg),
         ("GET", "/api/service/journal") => {
