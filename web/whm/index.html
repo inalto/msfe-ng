@@ -377,6 +377,12 @@ async function renderService(){
     const s=await api('/api/service/status');
     stat.innerHTML='';
     if(s.error){stat.append(el('span',{class:'muted'},'Status unavailable'));return;}
+    if(s.engine===false||s.engine_configured===false){
+      stat.append(el('div',{style:'flex-basis:100%;color:var(--critical);font-weight:600'},
+        s.engine===false
+          ?'⚠ MailScanner engine is not installed — mail is NOT being scanned. Install it with "msfe-ng engine install" (or reinstall MSFE-NG with --with-engine).'
+          :'⚠ MailScanner engine is installed but /etc/MailScanner/MailScanner.conf is missing — run "msfe-ng engine install" to repair.'));
+    }
     stat.append(
       el('span',{},el('span',{class:'dot',style:'background:'+(s.active?'var(--good)':'var(--critical)')}),
         s.active?'Running':'Stopped',s.procs?` (${s.procs} processes)`:''),

@@ -688,6 +688,15 @@ fn cmd_service(sub: Option<&str>) -> ExitCode {
         Some("status") => {
             let st = service::status();
             let (inc, out) = service::queue_dirs(&cfg);
+            if !service::engine_installed() {
+                println!(
+                    "WARNING: MailScanner engine is NOT installed — mail is not being scanned. Run: msfe-ng engine install"
+                );
+            } else if !service::engine_configured() {
+                println!(
+                    "WARNING: MailScanner engine installed but MailScanner.conf is missing — run: msfe-ng engine install"
+                );
+            }
             println!(
                 "MailScanner: {} ({} processes), scanning {}",
                 if st.active { "active" } else { "stopped" },

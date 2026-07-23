@@ -34,6 +34,19 @@ pub struct ServiceStatus {
     pub procs: usize,
 }
 
+/// True when the MailScanner engine itself is installed (binary/lib present).
+pub fn engine_installed() -> bool {
+    Path::new("/usr/sbin/MailScanner").exists()
+        || Path::new("/usr/lib/MailScanner").is_dir()
+        || Path::new("/usr/local/cpanel/3rdparty/mailscanner").is_dir()
+}
+
+/// True when the engine looks *usable*: installed and with its config present.
+/// (`/etc/MailScanner` alone proves nothing — MSFE-NG creates its rules dir.)
+pub fn engine_configured() -> bool {
+    engine_installed() && Path::new("/etc/MailScanner/MailScanner.conf").exists()
+}
+
 pub fn status() -> ServiceStatus {
     let active = Command::new("systemctl")
         .args(["is-active", "--quiet", SYSTEMD_UNIT])
