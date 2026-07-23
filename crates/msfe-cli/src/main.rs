@@ -656,16 +656,19 @@ fn cmd_service(sub: Option<&str>) -> ExitCode {
             );
             ExitCode::SUCCESS
         }
-        Some(a @ ("start" | "stop" | "reload" | "restart")) => match service::control(a) {
-            Ok(()) => {
+        Some(a @ ("start" | "stop" | "reload" | "restart")) => {
+            let outcome = service::control(a);
+            for line in &outcome.transcript {
+                println!("{line}");
+            }
+            if outcome.ok {
                 println!("MailScanner {a}: ok");
                 ExitCode::SUCCESS
-            }
-            Err(e) => {
-                eprintln!("msfe-ng service {a}: {e}");
+            } else {
+                eprintln!("msfe-ng service {a}: failed (see transcript above)");
                 ExitCode::from(1)
             }
-        },
+        }
         Some("queue-fix") => match service::queue_fix(&cfg) {
             Ok(r) => {
                 println!(

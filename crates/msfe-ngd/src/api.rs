@@ -50,6 +50,18 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
         ("POST", "/api/service/mailflow") => service_mailflow(req),
         ("POST", "/api/service/sync") => service_sync(cfg, config_file),
         ("GET", "/api/service/maillog") => service_maillog(req, cfg),
+        ("GET", "/api/service/journal") => {
+            let lines = stats::clamp_int(req.query_param("lines").as_deref(), 80, 10, 500);
+            let j = service::journal(lines as usize);
+            Response::text(
+                200,
+                if j.is_empty() {
+                    "(no journal entries)"
+                } else {
+                    &j
+                },
+            )
+        }
         ("GET", "/api/service/queue") => service_queue(cfg),
         ("POST", "/api/service/queue/fix") => service_queue_fix(cfg),
         ("GET", "/api/service/rules") => service_rules(cfg),
@@ -346,26 +358,22 @@ fn service_status(cfg: &Config) -> Response {
 fn service_control(req: &Request) -> Response {
     let v = Json::parse(&req.body).unwrap_or(Json::Null);
     let action = v.str_field("action");
-    match service::control(&action) {
-        Ok(()) => {
-            let st = service::status();
-            Response::json(
-                200,
-                &format!(
-                    "{{\"ok\":true,\"active\":{},\"procs\":{}}}",
-                    st.active, st.procs
-                ),
-            )
-        }
-        Err(e) => Response::json(
-            500,
-            &Json::Object(vec![(
-                "error".into(),
-                Json::str(format!("{action} failed: {e}")),
-            )])
-            .to_string(),
-        ),
-    }
+    let outcome = service::control(&action);
+    let st = service::status();
+    Response::json(
+        200,
+        &Json::Object(vec![
+            ("ok".into(), Json::Bool(outcome.ok)),
+            ("action".into(), Json::str(&action)),
+            ("active".into(), Json::Bool(st.active)),
+            ("procs".into(), Json::Int(st.procs as i64)),
+            (
+                "transcript".into(),
+                Json::Array(outcome.transcript.iter().map(Json::str).collect()),
+            ),
+        ])
+        .to_string(),
+    )
 }
 
 /// Enable/disable scanning via the exiscandisable mailflow flag.

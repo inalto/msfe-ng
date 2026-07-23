@@ -105,9 +105,11 @@ let days=7;
 
 const tabs={dash:renderDash,settings:renderSettings,lists:renderLists,messages:renderMessages,rules:renderRules,service:renderService,config:renderConfig};
 let logTimer=null; // maillog auto-refresh; cleared on every tab switch
+let jrnTimer=null; // restart-console journal polling; cleared on every tab switch
 $('#tabs').addEventListener('click',e=>{
   const b=e.target.closest('button');if(!b)return;
   clearInterval(logTimer);logTimer=null;
+  clearInterval(jrnTimer);jrnTimer=null;
   document.querySelectorAll('#tabs button').forEach(x=>x.setAttribute('aria-selected',x===b));
   tabs[b.dataset.tab]();
 });
@@ -384,11 +386,35 @@ async function renderService(){
     mfBtn.textContent=s.scanning?'Disable MailScanner (mailflow)':'Enable MailScanner (mailflow)';
     mfBtn.dataset.enable=s.scanning?'false':'true';
   }
+  // Activity console: shows the exact commands run + their output, then keeps
+  // the MailScanner journal refreshing so startup progress/errors are visible.
+  const con=el('div',{class:'card',style:'display:none'},el('h2',{},'Activity console'));
+  const conCmd=el('pre',{class:'log',style:'max-height:10rem'});
+  const conJ=el('pre',{class:'log'});
+  con.append(conCmd,
+    el('div',{class:'muted',style:'margin:.5rem 0 .25rem;font-size:.8rem'},'MailScanner journal (refreshing for ~20s after an action):'),
+    conJ);
+  function pollJournal(){
+    clearInterval(jrnTimer);let n=0;
+    const tick=async()=>{
+      conJ.textContent=await api('/api/service/journal?lines=60',{raw:true});
+      conJ.scrollTop=conJ.scrollHeight;
+      refreshStatus();
+      if(++n>=10){clearInterval(jrnTimer);jrnTimer=null;}
+    };
+    tick();jrnTimer=setInterval(tick,2000);
+  }
   async function ctl(action,confirmMsg){
     if(confirmMsg&&!confirm(confirmMsg))return;
+    con.style.display='';
+    conCmd.textContent+=(conCmd.textContent?'\n':'')+`▶ ${action} — ${new Date().toLocaleTimeString()}`;
     const r=await api('/api/service/control',{method:'POST',body:{action}});
-    toast(r&&r.ok?`MailScanner ${action}: ok`:(r.error||`${action} failed`));
+    (r.transcript||[r.error||'no response from daemon']).forEach(l=>{conCmd.textContent+='\n  '+l;});
+    conCmd.textContent+='\n  result: '+(r.ok?'success':'FAILED')+(typeof r.procs==='number'?` — ${r.procs} process(es), ${r.active?'active':'not active'}`:'');
+    conCmd.scrollTop=conCmd.scrollHeight;
+    toast(r&&r.ok?`MailScanner ${action}: ok`:`${action} failed — see console`);
     refreshStatus();
+    pollJournal();
   }
   const stopWarn='Stop the MailScanner processes?\n\nNo email will be delivered while the MailScanner processes are stopped.';
   btns.append(
@@ -412,6 +438,7 @@ async function renderService(){
     toast(r&&r.ok?`Rules updated — ${r.files} files, reload ${r.reloaded?'ok':'failed'}`:(r.error||'sync failed'));
   };
   btns.append(mfBtn,syncBtn);
+  v.append(con);
 
   // Queue card
   const qc=el('div',{class:'card'},el('h2',{},'Mail queues'));v.append(qc);

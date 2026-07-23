@@ -73,11 +73,23 @@ fn count_processes() -> usize {
         .count()
 }
 
-/// Run a service action (`start|stop|reload|restart`), systemd first then SysV.
-/// Returns Err with the failing command's output for the API/CLI to surface.
-pub fn control(action: &str) -> Result<(), String> {
+/// What a control action actually did: which command line succeeded (or that
+/// both paths failed) and everything the commands printed, so the UI/CLI can
+/// show the operator what happened instead of a bare ok/failed.
+pub struct ControlOutcome {
+    pub ok: bool,
+    /// Transcript lines: each attempted command and its captured output.
+    pub transcript: Vec<String>,
+}
+
+/// Run a service action (`start|stop|reload|restart`), systemd first then SysV,
+/// capturing each attempt's output into a transcript.
+pub fn control(action: &str) -> ControlOutcome {
     if !matches!(action, "start" | "stop" | "reload" | "restart") {
-        return Err(format!("unknown action '{action}'"));
+        return ControlOutcome {
+            ok: false,
+            transcript: vec![format!("unknown action '{action}'")],
+        };
     }
     // Units without an ExecReload= still honor reload-or-restart.
     let sysd_verb = if action == "reload" {
@@ -85,20 +97,58 @@ pub fn control(action: &str) -> Result<(), String> {
     } else {
         action
     };
-    let sysd = Command::new("systemctl")
-        .args([sysd_verb, SYSTEMD_UNIT])
-        .output();
-    if let Ok(o) = &sysd {
-        if o.status.success() {
-            return Ok(());
+    let mut transcript = Vec::new();
+    let mut run = |cmd: &str, args: &[&str]| -> bool {
+        transcript.push(format!("$ {cmd} {}", args.join(" ")));
+        match Command::new(cmd).args(args).output() {
+            Ok(o) => {
+                for stream in [&o.stdout, &o.stderr] {
+                    for l in String::from_utf8_lossy(stream).lines() {
+                        if !l.trim().is_empty() {
+                            transcript.push(l.to_string());
+                        }
+                    }
+                }
+                let code = o.status.code().unwrap_or(-1);
+                transcript.push(if o.status.success() {
+                    "→ ok".to_string()
+                } else {
+                    format!("→ exit {code}")
+                });
+                o.status.success()
+            }
+            Err(e) => {
+                transcript.push(format!("→ cannot run: {e}"));
+                false
+            }
         }
-    }
-    let sysv = Command::new("service").args([SYSV_NAME, action]).output();
-    match sysv {
-        Ok(o) if o.status.success() => Ok(()),
-        Ok(o) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
-        Err(e) => Err(e.to_string()),
-    }
+    };
+    let ok = run("systemctl", &[sysd_verb, SYSTEMD_UNIT]) || run("service", &[SYSV_NAME, action]);
+    ControlOutcome { ok, transcript }
+}
+
+/// Recent journal entries for the MailScanner unit(s), for the restart console.
+/// Covers both the native unit name and the SysV-generator one; empty when
+/// journalctl is unavailable or has nothing.
+pub fn journal(lines: usize) -> String {
+    let n = lines.clamp(10, 500).to_string();
+    Command::new("journalctl")
+        .args([
+            "-u",
+            SYSTEMD_UNIT,
+            "-u",
+            SYSV_NAME,
+            "-n",
+            &n,
+            "--no-pager",
+            "-o",
+            "short",
+        ])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim_end().to_string())
+        .unwrap_or_default()
 }
 
 // ---- mail queues -------------------------------------------------------------
