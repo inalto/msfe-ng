@@ -33,7 +33,9 @@ else
 fi
 
 # MailScanner engine is an external dependency (not shipped). Warn only.
-softcheck "MailScanner engine present" sh -c 'command -v MailScanner || test -d /etc/MailScanner || test -d /usr/local/cpanel/3rdparty/mailscanner'
+# Check for the engine itself — not /etc/MailScanner, which MSFE-NG's own
+# sync creates (rules dir), turning the check into a false positive.
+softcheck "MailScanner engine present" sh -c 'command -v MailScanner || test -x /usr/sbin/MailScanner || test -d /usr/lib/MailScanner || test -d /usr/local/cpanel/3rdparty/mailscanner'
 softcheck "MySQL/MariaDB client present" sh -c 'command -v mysql || command -v mariadb'
 
 if [ "$fail" -ne 0 ]; then
