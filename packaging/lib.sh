@@ -60,7 +60,9 @@ find_bindir() {
     _here="$1"   # repo/tarball root
     # release tarball ships bin/; dev checkout builds target/release
     for d in "$_here/bin" "$_here/dist/bin" "$_here/../dist/bin" "$_here/target/release" "$_here/../target/release"; do
-        if [ -x "$d/msfe-ngd" ] && [ -x "$d/msfe-ng" ]; then
+        # -f, not -x: on noexec mounts (cPanel securetmp /tmp) -x is false even
+        # with the exec bit set. install(1) sets 0755 on the copies anyway.
+        if [ -f "$d/msfe-ngd" ] && [ -f "$d/msfe-ng" ]; then
             echo "$d"; return 0
         fi
     done

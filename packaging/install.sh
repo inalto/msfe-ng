@@ -26,7 +26,7 @@ if [ -z "${BINSRC:-}" ]; then
         die "no prebuilt binaries and cargo not installed. Build on a dev box (cargo build --release) or ship a dist/ dir."
     fi
 fi
-[ -x "$BINSRC/msfe-ngd" ] || die "msfe-ngd not found in $BINSRC"
+[ -f "$BINSRC/msfe-ngd" ] || die "msfe-ngd not found in $BINSRC"
 info "using binaries from $BINSRC"
 
 panel="$(detect_panel)"

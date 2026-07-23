@@ -28,7 +28,9 @@ fi
 base="https://github.com/$REPO/releases/download/v$VERSION"
 name="msfe-ng-$VERSION.tar.gz"
 
-tmp="$(mktemp -d)"
+# Not /tmp: cPanel's securetmp mounts it noexec, which breaks the installer's
+# executable checks on the unpacked binaries. We run as root, so use /root.
+tmp="$(mktemp -d /root/msfe-ng-get.XXXXXX)"
 trap 'rm -rf "$tmp"' EXIT
 cd "$tmp"
 
