@@ -641,7 +641,11 @@ fn cmd_service(sub: Option<&str>) -> ExitCode {
                 "MailScanner: {} ({} processes), scanning {}",
                 if st.active { "active" } else { "stopped" },
                 st.procs,
-                if mailflow::scanning_enabled() { "enabled" } else { "disabled" }
+                if mailflow::scanning_enabled() {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
             );
             println!(
                 "queues: incoming {} ({}), outgoing {} ({})",
@@ -668,7 +672,11 @@ fn cmd_service(sub: Option<&str>) -> ExitCode {
                     "queue-fix: {} orphaned files moved to {}, delivery run {}",
                     r.moved,
                     r.badqueue_dir.display(),
-                    if r.flush_started { "started" } else { "NOT started" }
+                    if r.flush_started {
+                        "started"
+                    } else {
+                        "NOT started"
+                    }
                 );
                 ExitCode::SUCCESS
             }

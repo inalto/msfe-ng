@@ -1,6 +1,7 @@
 #!/bin/sh
 # Shared constants and helpers for the MSFE-NG install/uninstall scripts.
 # POSIX sh. Sourced by install.sh and uninstall.sh — do not run directly.
+# shellcheck disable=SC2034  # constants are consumed by the sourcing scripts
 
 # ----- install locations (our own namespace; never /usr/msfe) -----------------
 PREFIX="/opt/msfe-ng"

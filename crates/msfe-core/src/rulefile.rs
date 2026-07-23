@@ -81,10 +81,8 @@ impl Rule {
     /// Structural validity: non-empty whitespace-free pattern(s), non-empty
     /// value, no control characters anywhere.
     pub fn validate(&self) -> Result<(), String> {
-        let ok_pat = |p: &str| {
-            !p.is_empty()
-                && !p.chars().any(|c| c.is_whitespace() || c.is_control())
-        };
+        let ok_pat =
+            |p: &str| !p.is_empty() && !p.chars().any(|c| c.is_whitespace() || c.is_control());
         if !ok_pat(&self.pattern) {
             return Err(format!("bad pattern '{}'", self.pattern));
         }
@@ -261,8 +259,7 @@ mod tests {
 
     #[test]
     fn value_keeps_inner_spacing() {
-        let Line::Rule(r) =
-            parse_line("To: *@x.example  store deliver header \"X-Spam:  yes\"")
+        let Line::Rule(r) = parse_line("To: *@x.example  store deliver header \"X-Spam:  yes\"")
         else {
             panic!()
         };
@@ -303,11 +300,11 @@ mod tests {
         // parsing the canonical output again changes nothing
         let twice: String = parse(&once)
             .iter()
-            .filter_map(|l| match l {
-                Line::Rule(r) => Some(r.to_line() + "\n"),
-                Line::Comment(c) => Some(c.clone() + "\n"),
-                Line::Blank => Some("\n".into()),
-                Line::Unparsed(u) => Some(u.clone() + "\n"),
+            .map(|l| match l {
+                Line::Rule(r) => r.to_line() + "\n",
+                Line::Comment(c) => c.clone() + "\n",
+                Line::Blank => "\n".into(),
+                Line::Unparsed(u) => u.clone() + "\n",
             })
             .collect();
         assert_eq!(once, twice);
@@ -319,7 +316,10 @@ mod tests {
             parse_line("this is not a rule"),
             Line::Unparsed("this is not a rule".into())
         );
-        assert_eq!(parse_line("To: onlypattern"), Line::Unparsed("To: onlypattern".into()));
+        assert_eq!(
+            parse_line("To: onlypattern"),
+            Line::Unparsed("To: onlypattern".into())
+        );
         assert_eq!(parse_line("# c"), Line::Comment("# c".into()));
         assert_eq!(parse_line("   "), Line::Blank);
     }

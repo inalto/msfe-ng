@@ -323,10 +323,7 @@ fn service_status(cfg: &Config) -> Response {
         &Json::Object(vec![
             ("active".into(), Json::Bool(st.active)),
             ("procs".into(), Json::Int(st.procs as i64)),
-            (
-                "scanning".into(),
-                Json::Bool(mailflow::scanning_enabled()),
-            ),
+            ("scanning".into(), Json::Bool(mailflow::scanning_enabled())),
             (
                 "queues".into(),
                 Json::Object(vec![
@@ -362,8 +359,11 @@ fn service_control(req: &Request) -> Response {
         }
         Err(e) => Response::json(
             500,
-            &Json::Object(vec![("error".into(), Json::str(format!("{action} failed: {e}")))])
-                .to_string(),
+            &Json::Object(vec![(
+                "error".into(),
+                Json::str(format!("{action} failed: {e}")),
+            )])
+            .to_string(),
         ),
     }
 }
@@ -375,7 +375,10 @@ fn service_mailflow(req: &Request) -> Response {
     match mailflow::set_scanning(enabled) {
         Ok(()) => Response::json(
             200,
-            &format!("{{\"ok\":true,\"scanning\":{}}}", mailflow::scanning_enabled()),
+            &format!(
+                "{{\"ok\":true,\"scanning\":{}}}",
+                mailflow::scanning_enabled()
+            ),
         ),
         Err(e) => Response::json(500, &format!("{{\"error\":\"mailflow: {e}\"}}")),
     }
@@ -413,8 +416,14 @@ fn service_queue(cfg: &Config) -> Response {
     Response::json(
         200,
         &Json::Object(vec![
-            ("incoming_dir".into(), Json::str(inc_dir.display().to_string())),
-            ("outgoing_dir".into(), Json::str(out_dir.display().to_string())),
+            (
+                "incoming_dir".into(),
+                Json::str(inc_dir.display().to_string()),
+            ),
+            (
+                "outgoing_dir".into(),
+                Json::str(out_dir.display().to_string()),
+            ),
             (
                 "incoming".into(),
                 Json::Int(service::count_queue(&inc_dir) as i64),
@@ -528,10 +537,7 @@ fn service_update() -> Response {
         200,
         &Json::Object(vec![
             ("current".into(), Json::str(msfe_api::VERSION)),
-            (
-                "latest".into(),
-                latest.map(Json::Str).unwrap_or(Json::Null),
-            ),
+            ("latest".into(), latest.map(Json::Str).unwrap_or(Json::Null)),
         ])
         .to_string(),
     )

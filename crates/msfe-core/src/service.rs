@@ -67,9 +67,7 @@ fn count_processes() -> usize {
         })
         .filter(|e| {
             std::fs::read(e.path().join("cmdline"))
-                .map(|c| {
-                    String::from_utf8_lossy(&c).contains("MailScanner")
-                })
+                .map(|c| String::from_utf8_lossy(&c).contains("MailScanner"))
                 .unwrap_or(false)
         })
         .count()
@@ -291,7 +289,11 @@ pub fn tail_file(path: &Path, lines: usize) -> io::Result<String> {
     let all: Vec<&str> = text.lines().collect();
     let from = all.len().saturating_sub(lines);
     // When we started mid-file the first line is likely partial — drop it.
-    let from = if start > 0 && from == 0 { 1.min(all.len()) } else { from };
+    let from = if start > 0 && from == 0 {
+        1.min(all.len())
+    } else {
+        from
+    };
     Ok(all[from..].join("\n"))
 }
 
@@ -352,11 +354,19 @@ const UPDATE_REPO: &str = "inalto/msfe-ng";
 /// redirect via curl (the codebase has no TLS client). Never called
 /// automatically — only from the admin's explicit "check for updates".
 pub fn latest_version() -> Option<String> {
-    let repo =
-        std::env::var("MSFE_NG_UPDATE_REPO").unwrap_or_else(|_| UPDATE_REPO.to_string());
+    let repo = std::env::var("MSFE_NG_UPDATE_REPO").unwrap_or_else(|_| UPDATE_REPO.to_string());
     let url = format!("https://github.com/{repo}/releases/latest");
     let out = Command::new("curl")
-        .args(["-sSfL", "-o", "/dev/null", "-w", "%{url_effective}", "-m", "8", &url])
+        .args([
+            "-sSfL",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{url_effective}",
+            "-m",
+            "8",
+            &url,
+        ])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -449,7 +459,13 @@ mod tests {
             extract_tag("https://github.com/inalto/msfe-ng/releases/tag/v0.0.3"),
             Some("0.0.3".into())
         );
-        assert_eq!(extract_tag("https://github.com/inalto/msfe-ng/releases"), None);
-        assert_eq!(extract_tag("https://github.com/x/y/releases/tag/main"), None);
+        assert_eq!(
+            extract_tag("https://github.com/inalto/msfe-ng/releases"),
+            None
+        );
+        assert_eq!(
+            extract_tag("https://github.com/x/y/releases/tag/main"),
+            None
+        );
     }
 }
