@@ -28,6 +28,19 @@ unless ( Whostmgr::ACLS::hasroot() ) {
 
 my $path   = $ENV{HTTP_X_MSFE_PATH} || $ENV{PATH_INFO} || '/whm';
 my $method = $ENV{REQUEST_METHOD} || 'GET';
+my $query  = $ENV{QUERY_STRING} || '';
+
+# A top-level navigation (not an SPA fetch, not the embedded frame) gets the
+# WHM chrome — header and left menu — with the SPA in an iframe filling the
+# content area. The iframe reloads this CGI with embedded=1, which serves the
+# app exactly as before, so its header-based API fetches are unaffected.
+if (   $method eq 'GET'
+    && !$ENV{HTTP_X_MSFE_PATH}
+    && !$ENV{PATH_INFO}
+    && $query !~ /(?:^|&)embedded=1(?:&|$)/ ) {
+    exit if eval { render_whm_frame(); 1 };
+    # chrome unavailable (template API changed?) — fall through to raw proxy
+}
 
 # Read the request body (for PUT/POST) from STDIN.
 my $body = '';
@@ -36,6 +49,29 @@ if ( ( $ENV{CONTENT_LENGTH} || 0 ) > 0 ) {
 }
 
 proxy( $method, $path, $body );
+
+sub render_whm_frame {
+    require Whostmgr::HTMLInterface;
+    print "Content-type: text/html; charset=utf-8\r\n\r\n";
+    Whostmgr::HTMLInterface::defheader( 'MailscannerNG', '', '/cgi/msfe-ng/msfe-ng.cgi' );
+    print <<'HTML';
+<style>#msfe-ng-frame{width:100%;border:0;display:block;min-height:600px;}</style>
+<iframe id="msfe-ng-frame" src="msfe-ng.cgi?embedded=1" title="MailscannerNG"></iframe>
+<script>
+(function () {
+    var f = document.getElementById('msfe-ng-frame');
+    function fit() {
+        var top = f.getBoundingClientRect().top + window.pageYOffset;
+        f.style.height = Math.max(600, window.innerHeight - top - 24) + 'px';
+    }
+    window.addEventListener('resize', fit);
+    fit();
+})();
+</script>
+HTML
+    Whostmgr::HTMLInterface::deffooter();
+    return 1;
+}
 
 # Forward to the daemon and relay status + Content-Type + body back to the browser.
 sub proxy {
