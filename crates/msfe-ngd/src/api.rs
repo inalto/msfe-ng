@@ -4,7 +4,7 @@
 use crate::http::{Request, Response};
 use msfe_core::json::Json;
 use msfe_core::rules::DomainPolicy;
-use msfe_core::{mailflow, quarantine, service, stats, sync, users, Config};
+use msfe_core::{mailflow, quarantine, rulefile, rules, service, stats, sync, users, Config};
 use std::path::Path;
 
 /// Route `/api/*` requests. `config_file` is the daemon's config path (used to
@@ -58,8 +58,261 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
         ("PUT", "/api/service/conf") => service_conf_write(req, cfg, config_file),
         ("GET", "/api/service/update") => service_update(),
 
+        // ---- structured rule management (root-only admin surface) -----------
+        ("GET", "/api/rules/files") => rules_files(config_file),
+        ("GET", "/api/rules/custom") => rules_custom_get(req, config_file),
+        ("PUT", "/api/rules/custom") => rules_custom_put(req, cfg, config_file),
+        ("GET", "/api/rules/live") => rules_live(req, cfg, config_file),
+        ("POST", "/api/rules/adopt") => rules_adopt(req, cfg, config_file),
+
         _ => Response::json(404, r#"{"error":"not found"}"#),
     }
+}
+
+// ---- structured rule handlers ------------------------------------------------
+
+fn rule_to_json(r: &rulefile::Rule) -> Json {
+    let opt = |o: &Option<String>| o.clone().map(Json::Str).unwrap_or(Json::Null);
+    Json::Object(vec![
+        ("direction".into(), Json::str(r.direction.as_str())),
+        ("pattern".into(), Json::str(&r.pattern)),
+        (
+            "and_direction".into(),
+            r.and_direction
+                .map(|d| Json::str(d.as_str()))
+                .unwrap_or(Json::Null),
+        ),
+        ("and_pattern".into(), opt(&r.and_pattern)),
+        ("value".into(), Json::str(&r.value)),
+    ])
+}
+
+fn json_to_rule(v: &Json) -> Result<rulefile::Rule, String> {
+    let dir = rulefile::Direction::parse(&v.str_field("direction"))
+        .ok_or_else(|| format!("bad direction '{}'", v.str_field("direction")))?;
+    let and_dir_s = v.str_field("and_direction");
+    let and_pat_s = v.str_field("and_pattern");
+    let (and_direction, and_pattern) = if and_dir_s.is_empty() && and_pat_s.is_empty() {
+        (None, None)
+    } else {
+        (
+            Some(
+                rulefile::Direction::parse(&and_dir_s)
+                    .ok_or_else(|| format!("bad direction '{and_dir_s}'"))?,
+            ),
+            Some(and_pat_s),
+        )
+    };
+    let r = rulefile::Rule {
+        direction: dir,
+        pattern: v.str_field("pattern"),
+        and_direction,
+        and_pattern,
+        value: v.str_field("value").trim().to_string(),
+    };
+    r.validate()?;
+    Ok(r)
+}
+
+fn valid_managed(name: &str) -> bool {
+    rules::managed_files().iter().any(|f| f == name)
+}
+
+fn rules_files(config_file: &Path) -> Response {
+    let pdir = sync::policy_dir(config_file);
+    let items: Vec<Json> = rules::managed_files()
+        .into_iter()
+        .map(|name| {
+            let n = rulefile::load_custom(&pdir, &name).len();
+            Json::Object(vec![
+                ("name".into(), Json::str(name)),
+                ("custom".into(), Json::Int(n as i64)),
+            ])
+        })
+        .collect();
+    Response::json(
+        200,
+        &Json::Object(vec![("files".into(), Json::Array(items))]).to_string(),
+    )
+}
+
+fn rules_custom_get(req: &Request, config_file: &Path) -> Response {
+    let file = req.query_param("file").unwrap_or_default();
+    if !valid_managed(&file) {
+        return Response::json(400, r#"{"error":"not a managed rules file"}"#);
+    }
+    let rules = rulefile::load_custom(&sync::policy_dir(config_file), &file);
+    Response::json(
+        200,
+        &Json::Object(vec![
+            ("file".into(), Json::str(&file)),
+            (
+                "rules".into(),
+                Json::Array(rules.iter().map(rule_to_json).collect()),
+            ),
+        ])
+        .to_string(),
+    )
+}
+
+fn rules_custom_put(req: &Request, cfg: &Config, config_file: &Path) -> Response {
+    let v = match Json::parse(&req.body) {
+        Ok(v) => v,
+        Err(e) => return Response::json(400, &format!("{{\"error\":\"bad json: {e}\"}}")),
+    };
+    let file = v.str_field("file");
+    if !valid_managed(&file) {
+        return Response::json(400, r#"{"error":"not a managed rules file"}"#);
+    }
+    let mut parsed = Vec::new();
+    for (i, rj) in v
+        .get("rules")
+        .and_then(Json::as_array)
+        .unwrap_or(&[])
+        .iter()
+        .enumerate()
+    {
+        match json_to_rule(rj) {
+            Ok(r) => parsed.push(r),
+            Err(e) => {
+                return Response::json(
+                    400,
+                    &Json::Object(vec![(
+                        "error".into(),
+                        Json::str(format!("rule {}: {e}", i + 1)),
+                    )])
+                    .to_string(),
+                )
+            }
+        }
+    }
+    let pdir = sync::policy_dir(config_file);
+    if let Err(e) = rulefile::save_custom(&pdir, &file, &parsed) {
+        return Response::json(500, &format!("{{\"error\":\"cannot save: {e}\"}}"));
+    }
+    match sync::run(cfg, config_file, None) {
+        Ok(n) => {
+            let reloaded = sync::reload_mailscanner();
+            Response::json(
+                200,
+                &format!("{{\"ok\":true,\"files\":{n},\"reloaded\":{reloaded}}}"),
+            )
+        }
+        Err(e) => Response::json(500, &format!("{{\"error\":\"sync failed: {e}\"}}")),
+    }
+}
+
+/// Expected canonical rule lines for a managed file, regenerated from policy
+/// (with customs merged) — the baseline for stray detection.
+fn expected_lines(config_file: &Path, file: &str) -> Vec<String> {
+    let pdir = sync::policy_dir(config_file);
+    let (settings, wl, bl) = sync::load_policy(&pdir);
+    let overrides = sync::load_overrides(&pdir);
+    let rs = rules::RuleSettings::from_settings(&settings);
+    let domains = sync::gather_domains(None);
+    let mut files = rules::generate(&rs, &domains, &wl, &bl, &overrides);
+    rules::merge_custom(
+        &mut files,
+        &rulefile::load_all_custom(&pdir, &rules::managed_files()),
+    );
+    files
+        .iter()
+        .find(|f| f.name == file)
+        .map(|f| {
+            rulefile::rules_of(&rulefile::parse(&f.contents))
+                .iter()
+                .map(|r| r.to_line())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Parse the live on-disk rules file and annotate each line: rules not in the
+/// regenerated baseline are strays (hand edits about to be lost), unparsable
+/// lines are flagged for manual attention.
+fn rules_live(req: &Request, cfg: &Config, config_file: &Path) -> Response {
+    let file = req.query_param("file").unwrap_or_default();
+    if !valid_managed(&file) {
+        return Response::json(400, r#"{"error":"not a managed rules file"}"#);
+    }
+    let path = Path::new(&cfg.mailscanner_rules_dir).join(&file);
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let expected = expected_lines(config_file, &file);
+    let mut rows = Vec::new();
+    let mut strays = 0;
+    let mut unparsed = 0;
+    for line in rulefile::parse(&text) {
+        match line {
+            rulefile::Line::Blank => {}
+            rulefile::Line::Comment(c) => rows.push(Json::Object(vec![
+                ("kind".into(), Json::str("comment")),
+                ("text".into(), Json::str(c)),
+            ])),
+            rulefile::Line::Unparsed(u) => {
+                unparsed += 1;
+                rows.push(Json::Object(vec![
+                    ("kind".into(), Json::str("unparsed")),
+                    ("text".into(), Json::str(u)),
+                ]));
+            }
+            rulefile::Line::Rule(r) => {
+                let stray = !expected.contains(&r.to_line());
+                if stray {
+                    strays += 1;
+                }
+                let mut o = match rule_to_json(&r) {
+                    Json::Object(f) => f,
+                    _ => vec![],
+                };
+                o.insert(0, ("kind".into(), Json::str("rule")));
+                o.push(("stray".into(), Json::Bool(stray)));
+                rows.push(Json::Object(o));
+            }
+        }
+    }
+    Response::json(
+        200,
+        &Json::Object(vec![
+            ("file".into(), Json::str(&file)),
+            ("path".into(), Json::str(path.display().to_string())),
+            ("strays".into(), Json::Int(strays)),
+            ("unparsed".into(), Json::Int(unparsed)),
+            ("lines".into(), Json::Array(rows)),
+        ])
+        .to_string(),
+    )
+}
+
+/// Rescue stray on-disk rules (hand edits, in any whitespace style) into the
+/// custom store — normalized to canonical form — then resync.
+fn rules_adopt(req: &Request, cfg: &Config, config_file: &Path) -> Response {
+    let v = Json::parse(&req.body).unwrap_or(Json::Null);
+    let file = v.str_field("file");
+    if !valid_managed(&file) {
+        return Response::json(400, r#"{"error":"not a managed rules file"}"#);
+    }
+    let path = Path::new(&cfg.mailscanner_rules_dir).join(&file);
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let expected = expected_lines(config_file, &file);
+    let pdir = sync::policy_dir(config_file);
+    let mut custom = rulefile::load_custom(&pdir, &file);
+    let mut adopted = 0;
+    for r in rulefile::rules_of(&rulefile::parse(&text)) {
+        if !expected.contains(&r.to_line()) && !custom.contains(&r) && r.validate().is_ok() {
+            custom.push(r);
+            adopted += 1;
+        }
+    }
+    if adopted > 0 {
+        if let Err(e) = rulefile::save_custom(&pdir, &file, &custom) {
+            return Response::json(500, &format!("{{\"error\":\"cannot save: {e}\"}}"));
+        }
+        if let Err(e) = sync::run(cfg, config_file, None) {
+            return Response::json(500, &format!("{{\"error\":\"sync failed: {e}\"}}"));
+        }
+        sync::reload_mailscanner();
+    }
+    Response::json(200, &format!("{{\"ok\":true,\"adopted\":{adopted}}}"))
 }
 
 // ---- service handlers --------------------------------------------------------

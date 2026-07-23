@@ -191,7 +191,11 @@ pub fn run(cfg: &Config, policy_path: &Path, override_domains: Option<&str>) -> 
     }
     let domains = gather_domains(override_domains);
     let rs = rules::RuleSettings::from_settings(&settings);
-    let files = rules::generate(&rs, &domains, &wl, &bl, &overrides);
+    let mut files = rules::generate(&rs, &domains, &wl, &bl, &overrides);
+    rules::merge_custom(
+        &mut files,
+        &crate::rulefile::load_all_custom(&dir, &rules::managed_files()),
+    );
 
     let rules_dir = Path::new(&cfg.mailscanner_rules_dir);
     std::fs::create_dir_all(rules_dir)?;

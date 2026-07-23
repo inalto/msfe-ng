@@ -24,6 +24,7 @@ listed only to name the *behavior* being matched — no code is reused.
 | MailScanner.conf / front-end config editing, ruleset viewing (WHM "MailScanner Configuration" section) | `/api/service/conf` + `/api/service/rules` + WHM Config tab (one-time `.msfe-ng.bak` backups) | M7 |
 | "Access user settings as the user" (impersonation) | root-gated WHM shim `?msfe_user=` → `X-MSFE-User`; Service tab "View as user" | M7 |
 | Upgrade check button | on-demand `/api/service/update` (GitHub releases redirect via curl; no automatic phone-home) | M7 |
+| Rule handling (`msrules.pl` line splicing, tab-fragile) | `msfe-core::rulefile` structured parser (any whitespace) + canonical TAB serializer; custom rules store merged by sync; WHM Rules tab with stray-rule adoption; `msfe-ng rules lint` | M8 |
 | ConfigServer OutGoing Spam Monitor (osm) integration | **out of scope — separate proprietary ConfigServer product** | — |
 | Phone-home licensing (`servers`, base64 blobs) | **dropped — intentionally not reimplemented** | — |
 

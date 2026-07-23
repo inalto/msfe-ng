@@ -52,6 +52,7 @@ fn main() -> ExitCode {
         "digest" => cmd_digest(args.get(1).map(String::as_str)),
         "exim" => cmd_exim(args.get(1).map(String::as_str)),
         "service" => cmd_service(args.get(1).map(String::as_str)),
+        "rules" => cmd_rules(args.get(1).map(String::as_str)),
         "backup" => cmd_backup(args.get(1).map(String::as_str)),
         "restore" => cmd_restore(args.get(1).map(String::as_str)),
         "help" | "--help" | "-h" => {
@@ -170,7 +171,11 @@ fn cmd_sync(flag: Option<&str>) -> ExitCode {
     if flag == Some("--dry-run") {
         let rs = rules::RuleSettings::from_settings(&settings);
         let overrides = sync::load_overrides(&pdir);
-        let files = rules::generate(&rs, &domains, &wl, &bl, &overrides);
+        let mut files = rules::generate(&rs, &domains, &wl, &bl, &overrides);
+        rules::merge_custom(
+            &mut files,
+            &msfe_core::rulefile::load_all_custom(&pdir, &rules::managed_files()),
+        );
         println!(
             "# dry-run: {} domains, {} whitelist, {} blacklist → {} files in {}",
             domains.len(),
@@ -532,6 +537,52 @@ fn cmd_digest(flag: Option<&str>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Structured rules tooling: `lint` parses every managed on-disk ruleset with
+/// the tolerant parser and reports lines that MailScanner may misread.
+fn cmd_rules(sub: Option<&str>) -> ExitCode {
+    use msfe_core::rulefile;
+    match sub {
+        Some("lint") => {
+            let cfg = Config::load(&config_path());
+            let mut problems = 0;
+            for name in rules::managed_files() {
+                let path = Path::new(&cfg.mailscanner_rules_dir).join(&name);
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    println!("{name}: missing (run msfe-ng sync)");
+                    continue;
+                };
+                let lines = rulefile::parse(&text);
+                let rules_n = rulefile::rules_of(&lines).len();
+                let bad: Vec<&str> = lines
+                    .iter()
+                    .filter_map(|l| match l {
+                        rulefile::Line::Unparsed(u) => Some(u.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                if bad.is_empty() {
+                    println!("{name}: ok ({rules_n} rules)");
+                } else {
+                    problems += bad.len();
+                    println!("{name}: {rules_n} rules, {} UNPARSABLE line(s):", bad.len());
+                    for b in &bad {
+                        println!("    {b}");
+                    }
+                }
+            }
+            if problems == 0 {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
+        _ => {
+            eprintln!("usage: msfe-ng rules lint");
+            ExitCode::from(2)
+        }
+    }
+}
+
 /// MailScanner service control and queue tooling (mirrors the Service tab).
 fn cmd_service(sub: Option<&str>) -> ExitCode {
     use msfe_core::{mailflow, service};
@@ -733,6 +784,7 @@ COMMANDS:
     housekeeping        Prune old mail-log rows (cleanmysql retention)
     exim <status|enable-scanning|disable-scanning>   Toggle MailScanner scanning
     service <status|start|stop|reload|restart|queue-fix>   MailScanner service & queues
+    rules lint          Check managed ruleset files for unparsable lines
     backup <file.tgz>   Back up config + policy to a tarball
     restore <file.tgz>  Restore config + policy from a tarball
     db-migrate          Apply pending SQL migrations

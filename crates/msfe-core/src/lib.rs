@@ -19,6 +19,7 @@ pub mod mailscanner;
 pub mod migrate;
 pub mod panel;
 pub mod quarantine;
+pub mod rulefile;
 pub mod rules;
 pub mod service;
 pub mod spambox;

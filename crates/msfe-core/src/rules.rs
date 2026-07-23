@@ -257,6 +257,28 @@ pub fn generate(
 
 const HEADER: &str =
     "# Managed by MSFE-NG — do not edit by hand; changes are overwritten by `msfe-ng sync`.\n";
+const CUSTOM_HEADER: &str = "# Custom rules (managed via the WHM Rules tab):\n";
+
+/// Splice admin-defined custom rules into the generated files, right after the
+/// header — ahead of the domain lines, since MailScanner rulesets are
+/// first-match-wins, so custom rules take precedence and survive regeneration.
+pub fn merge_custom(
+    files: &mut [RuleFile],
+    customs: &std::collections::BTreeMap<String, Vec<crate::rulefile::Rule>>,
+) {
+    for f in files {
+        let Some(rules) = customs.get(&f.name).filter(|r| !r.is_empty()) else {
+            continue;
+        };
+        let block: String = String::from(CUSTOM_HEADER)
+            + &rules.iter().map(|r| r.to_line() + "\n").collect::<String>();
+        if let Some(rest) = f.contents.strip_prefix(HEADER) {
+            f.contents = format!("{HEADER}{block}{rest}");
+        } else {
+            f.contents = format!("{block}{}", f.contents);
+        }
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 fn domain_file(
