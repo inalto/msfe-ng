@@ -5,6 +5,7 @@
 use strict;
 use warnings;
 use IO::Socket::UNIX ();
+use Socket qw(SOCK_STREAM);
 
 my $SOCKET  = $ENV{MSFE_NG_SOCKET} || '/var/run/msfe-ng/msfe-ng.sock';
 my $DEFAULT = '/user';
@@ -19,7 +20,7 @@ my $body   = '';
 read( STDIN, $body, $ENV{CONTENT_LENGTH} ) if ( $ENV{CONTENT_LENGTH} || 0 ) > 0;
 
 my $sock = IO::Socket::UNIX->new(
-    Type => IO::Socket::UNIX::SOCK_STREAM(),
+    Type => SOCK_STREAM,
     Peer => $SOCKET,
 );
 unless ($sock) {

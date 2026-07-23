@@ -1,5 +1,5 @@
 #!/usr/local/cpanel/3rdparty/bin/perl
-#WHMADDON:msfe_ng:MSFE-NG MailScanner Front-End
+#WHMADDON:msfe_ng:MailscannerNG
 #ACLS:all
 #
 # MSFE-NG WHM entry CGI (clean-room; not derived from any ConfigServer code).
@@ -15,6 +15,7 @@ use strict;
 use warnings;
 use lib '/usr/local/cpanel';
 use IO::Socket::UNIX ();
+use Socket qw(SOCK_STREAM);
 require Whostmgr::ACLS;
 
 my $SOCKET = $ENV{MSFE_NG_SOCKET} || '/var/run/msfe-ng/msfe-ng.sock';
@@ -40,7 +41,7 @@ proxy( $method, $path, $body );
 sub proxy {
     my ( $method, $path, $body ) = @_;
     my $sock = IO::Socket::UNIX->new(
-        Type => IO::Socket::UNIX::SOCK_STREAM(),
+        Type => SOCK_STREAM,
         Peer => $SOCKET,
     );
     unless ($sock) {

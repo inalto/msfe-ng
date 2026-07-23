@@ -11,6 +11,7 @@ package Cpanel::API::MSFE_NG;
 use strict;
 use warnings;
 use IO::Socket::UNIX ();
+use Socket qw(SOCK_STREAM);
 
 our $VERSION = '0.0.1';
 
@@ -27,7 +28,7 @@ sub msDisplay {
 sub _proxy {
     my ($path) = @_;
     my $sock = IO::Socket::UNIX->new(
-        Type => IO::Socket::UNIX::SOCK_STREAM(),
+        Type => SOCK_STREAM,
         Peer => $SOCKET,
     );
     return _daemon_down() unless $sock;
