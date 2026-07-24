@@ -94,6 +94,44 @@ if [ "$DRY" != 1 ] && [ -x /usr/sbin/MailScanner ]; then
     fi
 fi
 
+# SpamAssassin: MailScanner drives Mail::SpamAssassin directly (cPanel's spamd
+# is a separate thing) — without the module every message goes unscored.
+if [ "$DRY" = 1 ]; then
+    info "would ensure Mail::SpamAssassin is installed (dnf spamassassin, cpanm fallback)"
+elif ! perl -MMail::SpamAssassin -e1 >/dev/null 2>&1; then
+    info "installing SpamAssassin (Mail::SpamAssassin)"
+    run "$PKG" -y install spamassassin || true
+    if ! perl -MMail::SpamAssassin -e1 >/dev/null 2>&1; then
+        command -v cpanm >/dev/null 2>&1 || run "$PKG" -y install perl-App-cpanminus
+        run cpanm --notest Mail::SpamAssassin \
+            || info "WARNING: Mail::SpamAssassin still missing — install it manually"
+    fi
+fi
+
+# ClamAV: install clamd + signatures unless opted out (MSFE_NG_NO_CLAMAV=1).
+# `engine configure` points MailScanner at the clamd socket once it exists.
+if [ "${MSFE_NG_NO_CLAMAV:-0}" != 1 ]; then
+    if [ "$DRY" = 1 ]; then
+        info "would ensure ClamAV (clamd + freshclam) is installed and running"
+    else
+        if ! command -v clamd >/dev/null 2>&1; then
+            info "installing ClamAV (set MSFE_NG_NO_CLAMAV=1 to skip)"
+            run "$PKG" -y install clamav clamd clamav-update \
+                || info "WARNING: clamav install failed (continuing without AV)"
+        fi
+        if command -v clamd >/dev/null 2>&1; then
+            # EL ships scan.conf with the socket commented out — enable it.
+            [ -f /etc/clamd.d/scan.conf ] \
+                && sed -i 's|^#\(LocalSocket /run/clamd.scan/clamd.sock\)|\1|' /etc/clamd.d/scan.conf
+            info "updating virus signatures (freshclam — first run downloads ~200MB)"
+            run systemctl enable --now clamav-freshclam 2>/dev/null || true
+            run freshclam --quiet 2>/dev/null || true
+            run systemctl enable --now clamd@scan 2>/dev/null \
+                || info "WARNING: clamd@scan did not start — check journalctl -u clamd@scan"
+        fi
+    fi
+fi
+
 # Mail flow must not change on install: the engine stays disabled until the
 # admin wires it into Exim and starts it deliberately.
 run systemctl disable --now mailscanner 2>/dev/null || true

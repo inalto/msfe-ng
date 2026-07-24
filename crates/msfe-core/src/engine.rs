@@ -33,28 +33,35 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
         "mailnull"
     };
     let (inc, out) = service::queue_dir_targets();
-    let inc_s = inc.display().to_string();
-    let out_s = out.display().to_string();
 
-    let directives: [(&str, &str); 11] = [
+    let mut directives: Vec<(String, String)> = [
         ("MTA", "exim"),
         ("Run As User", run_user),
         ("Run As Group", "mail"),
-        ("Incoming Queue Dir", &inc_s),
-        ("Outgoing Queue Dir", &out_s),
         ("Sendmail", "/usr/sbin/exim"),
         ("Sendmail2", "/usr/sbin/exim"),
         ("Incoming Work Group", "mail"),
         ("Incoming Work Permissions", "0640"),
         ("Quarantine Group", "mail"),
         ("Quarantine Permissions", "0660"),
-    ];
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect();
+    directives.push(("Incoming Queue Dir".into(), inc.display().to_string()));
+    directives.push(("Outgoing Queue Dir".into(), out.display().to_string()));
+    // Point MailScanner at clamd when its socket is present (the engine
+    // installer sets clamd up; without a scanner "auto" finds nothing).
+    if let Some(sock) = detect_clamd_socket() {
+        directives.push(("Virus Scanners".into(), "clamd".into()));
+        directives.push(("Clamd Socket".into(), sock));
+    }
 
     let conf_path = Path::new(&cfg.mailscanner_conf);
     let original = std::fs::read_to_string(conf_path)?;
     let mut text = original.clone();
     let mut set = Vec::new();
-    for (k, v) in directives {
+    for (k, v) in &directives {
         // Always normalize (set_directive is idempotent): comparing values via
         // get_directive would miss live duplicates that override the edit.
         let new_text = mailscanner::set_directive(&text, k, v);
@@ -83,11 +90,72 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
             }
         }
     }
+    // MailScanner work dirs, owned by the run-as user: created root-owned (by
+    // a pre-repair root run or the rpm), the mailnull children cannot write
+    // Processing.db and every message stalls in the scanning queue.
+    let work_base = ms_work_dir();
+    let quarantine = Path::new(&cfg.quarantine_dir).to_path_buf();
+    for (d, owner) in [
+        (&work_base, run_user),
+        (&work_base.join("incoming"), run_user),
+        (&quarantine, "root"),
+    ] {
+        if !d.exists() {
+            if std::fs::create_dir_all(d).is_err() {
+                chown_failed.push(format!("{} (create failed)", d.display()));
+                continue;
+            }
+            created.push(d.display().to_string());
+        }
+        set_perms_0750(d);
+        if !chown_deep(d, owner) {
+            chown_failed.push(d.display().to_string());
+        }
+    }
+
     Ok(ConfigureReport {
         set,
         created,
         chown_failed,
     })
+}
+
+/// MailScanner's work directory (`Incoming Work Dir` parent).
+fn ms_work_dir() -> std::path::PathBuf {
+    std::env::var("MSFE_NG_MS_WORK_DIR")
+        .unwrap_or_else(|_| "/var/spool/MailScanner".to_string())
+        .into()
+}
+
+/// Find a live clamd socket (env override, cPanel's, then EL's clamd@scan).
+fn detect_clamd_socket() -> Option<String> {
+    if let Ok(p) = std::env::var("MSFE_NG_CLAMD_SOCKET") {
+        return Path::new(&p).exists().then_some(p);
+    }
+    use std::os::unix::fs::FileTypeExt;
+    [
+        "/var/clamd",
+        "/run/clamd.scan/clamd.sock",
+        "/run/clamd.socket",
+    ]
+    .iter()
+    .find(|p| {
+        std::fs::metadata(p)
+            .map(|m| m.file_type().is_socket())
+            .unwrap_or(false)
+    })
+    .map(|p| p.to_string())
+}
+
+/// chown `path` (and its direct children) to `<user>:mail`; best-effort.
+fn chown_deep(path: &Path, user: &str) -> bool {
+    let mut ok = chown_user_mail(path, user);
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for e in entries.flatten() {
+            ok &= chown_user_mail(&e.path(), user);
+        }
+    }
+    ok
 }
 
 // ---- Exim wiring (named-queue method) ----------------------------------------
@@ -476,10 +544,12 @@ mod tests {
         let out = base.join("exim/input");
         std::env::set_var("MSFE_NG_INCOMING_QUEUE", &inc);
         std::env::set_var("MSFE_NG_OUTGOING_QUEUE", &out);
+        std::env::set_var("MSFE_NG_MS_WORK_DIR", base.join("work"));
 
         let cfg = Config {
             panel: "cpanel".into(),
             mailscanner_conf: conf.display().to_string(),
+            quarantine_dir: base.join("quarantine").display().to_string(),
             ..Default::default()
         };
         let r = configure(&cfg).unwrap();
@@ -507,6 +577,7 @@ mod tests {
 
         std::env::remove_var("MSFE_NG_INCOMING_QUEUE");
         std::env::remove_var("MSFE_NG_OUTGOING_QUEUE");
+        std::env::remove_var("MSFE_NG_MS_WORK_DIR");
         std::fs::remove_dir_all(&base).unwrap();
     }
 }
