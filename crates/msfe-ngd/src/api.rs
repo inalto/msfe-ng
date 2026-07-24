@@ -238,6 +238,7 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                         ("set".into(), arr(&r.set)),
                         ("created".into(), arr(&r.created)),
                         ("chown_failed".into(), arr(&r.chown_failed)),
+                        ("restarted".into(), Json::Bool(r.restarted)),
                     ])
                     .to_string(),
                 )
@@ -381,6 +382,28 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             )
         }
         ("POST", "/api/service/queue/fix") => service_queue_fix(cfg),
+        ("POST", "/api/service/queue/repair-spool") => {
+            let v = Json::parse(&req.body).unwrap_or(Json::Null);
+            let dry = matches!(v.get("dry_run"), Some(Json::Bool(true)));
+            let (_, outq) = service::queue_dirs(cfg);
+            match service::repair_spool(&outq, dry) {
+                Ok(r) => Response::json(
+                    200,
+                    &Json::Object(vec![
+                        ("ok".into(), Json::Bool(true)),
+                        ("dry_run".into(), Json::Bool(r.dry_run)),
+                        ("moved".into(), Json::Int(r.moved as i64)),
+                        ("flush_started".into(), Json::Bool(r.flush_started)),
+                        (
+                            "actions".into(),
+                            Json::Array(r.actions.iter().map(Json::str).collect()),
+                        ),
+                    ])
+                    .to_string(),
+                ),
+                Err(e) => Response::json(500, &format!("{{\"error\":\"spool repair: {e}\"}}")),
+            }
+        }
         ("GET", "/api/service/rules") => service_rules(cfg),
         ("GET", "/api/service/rules/view") => service_rules_view(req, cfg),
         ("GET", "/api/service/conf") => service_conf_read(req, cfg, config_file),

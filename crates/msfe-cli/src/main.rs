@@ -621,6 +621,9 @@ fn cmd_engine(sub: Option<&str>) -> ExitCode {
                     for f in &r.chown_failed {
                         println!("WARNING: could not set ownership on {f}");
                     }
+                    if r.restarted {
+                        println!("restarted MailScanner to apply the changes");
+                    }
                     if r.set.is_empty() && r.created.is_empty() {
                         println!("already configured — nothing to change");
                     } else {
@@ -841,6 +844,33 @@ fn cmd_service(sub: Option<&str>) -> ExitCode {
                 ExitCode::from(1)
             }
         }
+        Some("spool-repair") => {
+            let dry = std::env::args().any(|a| a == "--dry-run");
+            let (_, outq) = service::queue_dirs(&cfg);
+            match service::repair_spool(&outq, dry) {
+                Ok(r) => {
+                    for a in &r.actions {
+                        println!("{a}");
+                    }
+                    println!(
+                        "{} file(s) moved{}",
+                        r.moved,
+                        if r.dry_run {
+                            " (dry-run: nothing changed)"
+                        } else if r.flush_started {
+                            ", delivery run started"
+                        } else {
+                            ""
+                        }
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("msfe-ng service spool-repair: {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
         Some("queue-fix") => match service::queue_fix(&cfg) {
             Ok(r) => {
                 println!(
@@ -861,7 +891,9 @@ fn cmd_service(sub: Option<&str>) -> ExitCode {
             }
         },
         _ => {
-            eprintln!("usage: msfe-ng service <status|start|stop|reload|restart|queue-fix>");
+            eprintln!(
+                "usage: msfe-ng service <status|start|stop|reload|restart|queue-fix|spool-repair>"
+            );
             ExitCode::from(2)
         }
     }
@@ -1012,7 +1044,7 @@ COMMANDS:
     digest [--dry-run]  Email quarantine digests to digest-enabled domains
     housekeeping        Prune old mail-log rows (cleanmysql retention)
     exim <status|enable-scanning|disable-scanning>   Toggle MailScanner scanning
-    service <status|start|stop|reload|restart|queue-fix>   MailScanner service & queues
+    service <status|start|stop|reload|restart|queue-fix|spool-repair>   MailScanner service & queues
     doctor              Check every link of the scanning chain; names each fix
     rules lint          Check managed ruleset files for unparsable lines
     rules adopt [--from <dir>]   Borrow existing on-disk rules into the custom store

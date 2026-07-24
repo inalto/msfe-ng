@@ -888,10 +888,20 @@ async function renderQueues(){
   qauto.onchange=()=>{clearInterval(jrnTimer);jrnTimer=qauto.checked?setInterval(refreshQ,5000):null;};
   const qraw=el('input',{type:'checkbox',id:'qraw'});
   qraw.onchange=()=>{qpre.style.display=qraw.checked?'':'none';qtable.style.display=qraw.checked?'none':'';};
+  async function repairSpool(dry){
+    if(!dry&&!confirm('Move misplaced spool files into the subdirectories Exim expects, then force a delivery run?\n\nNothing is deleted. Messages Exim could not find become deliverable again.'))return;
+    qdetail.style.display='';qdetail.textContent='▶ '+(dry?'checking':'repairing')+' spool placement…';
+    const r=await api('/api/service/queue/repair-spool',{method:'POST',body:{dry_run:dry}});
+    qdetail.textContent=(r.actions||[r.error||'no response']).join('\n')+
+      (r.ok?`\n→ ${r.moved} file(s) moved${r.dry_run?' (dry-run)':(r.flush_started?', delivery run started':'')}`:'');
+    if(!dry)refreshQ();
+  }
   qctl.append(qsrc,
     Object.assign(el('button',{class:'act plain'},'Refresh'),{onclick:refreshQ}),
     qauto,el('label',{for:'qauto',class:'muted'},'follow (5s)'),
-    qraw,el('label',{for:'qraw',class:'muted'},'raw'));
+    qraw,el('label',{for:'qraw',class:'muted'},'raw'),
+    Object.assign(el('button',{class:'act plain',title:'Check whether queued files sit in the split-spool subdirectory Exim expects'},'Check spool placement'),{onclick:()=>repairSpool(true)}),
+    Object.assign(el('button',{class:'act'},'Fix misplaced spool files'),{onclick:()=>repairSpool(false)}));
   qc.append(qtable,qpre,qdetail);
   refreshQ();
 }

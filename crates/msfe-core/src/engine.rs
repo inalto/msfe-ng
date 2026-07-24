@@ -22,6 +22,8 @@ pub struct ConfigureReport {
     pub created: Vec<String>,
     /// Paths whose ownership could not be set (non-fatal; reported).
     pub chown_failed: Vec<String>,
+    /// MailScanner was restarted to apply changed directives.
+    pub restarted: bool,
 }
 
 /// Point MailScanner.conf at Exim and create the incoming spool skeleton.
@@ -141,10 +143,20 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
         }
     }
 
+    // MailScanner reads its config only at startup: leaving it running with
+    // stale directives is how misfiled spool files kept happening after the
+    // Exim Command fix was written to disk.
+    let restarted = if !set.is_empty() && service::status().active {
+        service::control("restart").ok
+    } else {
+        false
+    };
+
     Ok(ConfigureReport {
         set,
         created,
         chown_failed,
+        restarted,
     })
 }
 

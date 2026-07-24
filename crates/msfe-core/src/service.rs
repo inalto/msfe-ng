@@ -450,6 +450,136 @@ pub fn queue_listing(named: Option<&str>) -> String {
     "(exim binary not found)".into()
 }
 
+/// Exim's split-spool subdirectory for a message id: its sixth character.
+/// (Verified against Exim 4.99, which also files msglog under that letter.)
+pub fn expected_subdir(id: &str) -> Option<char> {
+    id.chars().nth(5)
+}
+
+pub struct MisplacedMsg {
+    pub id: String,
+    pub found_in: String,
+    pub expected: char,
+    pub files: Vec<PathBuf>,
+}
+
+/// Spool files sitting in the wrong split-spool subdirectory. Exim lists such
+/// messages in the queue but can never deliver them: it derives the path from
+/// the message id, so they wait forever. (MailScanner 5.5.3 misfiles them when
+/// its Exim version probe fails — see engine::configure's `Exim Command`.)
+/// Only messages older than a minute are reported, so in-flight writes are
+/// never touched.
+pub fn misplaced_spool(dir: &Path) -> Vec<MisplacedMsg> {
+    use std::collections::BTreeMap;
+    let mut by_id: BTreeMap<(String, String), Vec<PathBuf>> = BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    for sub in entries.filter_map(|e| e.ok()) {
+        let subname = sub.file_name().to_string_lossy().into_owned();
+        if !sub.path().is_dir() || subname.chars().count() != 1 {
+            continue;
+        }
+        let Ok(files) = std::fs::read_dir(sub.path()) else {
+            continue;
+        };
+        for f in files.filter_map(|e| e.ok()) {
+            let name = f.file_name().to_string_lossy().into_owned();
+            // <id>-<suffix>, e.g. 1wnE6V-00000004Oi2-3lJH-H
+            let Some(id) = name.rsplit_once('-').map(|(id, _)| id.to_string()) else {
+                continue;
+            };
+            if !valid_exim_id(&id) || !older_than(&f.path(), 60) {
+                continue;
+            }
+            by_id
+                .entry((id, subname.clone()))
+                .or_default()
+                .push(f.path());
+        }
+    }
+    by_id
+        .into_iter()
+        .filter_map(|((id, found_in), files)| {
+            let expected = expected_subdir(&id)?;
+            (!found_in.starts_with(expected)).then_some(MisplacedMsg {
+                id,
+                found_in,
+                expected,
+                files,
+            })
+        })
+        .collect()
+}
+
+pub struct SpoolRepairReport {
+    pub moved: usize,
+    pub actions: Vec<String>,
+    pub flush_started: bool,
+    pub dry_run: bool,
+}
+
+/// Move misplaced spool files into the subdirectory Exim looks in, then force
+/// a delivery run. Never deletes anything.
+pub fn repair_spool(dir: &Path, dry: bool) -> io::Result<SpoolRepairReport> {
+    let mut actions = Vec::new();
+    let mut moved = 0usize;
+    for m in misplaced_spool(dir) {
+        let target = dir.join(m.expected.to_string());
+        actions.push(format!(
+            "{} {} : {} → {}",
+            if dry { "would move" } else { "moving" },
+            m.id,
+            m.found_in,
+            m.expected
+        ));
+        if dry {
+            continue;
+        }
+        if !target.exists() {
+            std::fs::create_dir_all(&target)?;
+            set_perms_0750(&target);
+            chown_run_user(&target);
+        }
+        for f in &m.files {
+            if let Some(name) = f.file_name() {
+                match std::fs::rename(f, target.join(name)) {
+                    Ok(()) => moved += 1,
+                    Err(e) => actions.push(format!("  FAILED {}: {e}", name.to_string_lossy())),
+                }
+            }
+        }
+    }
+    if actions.is_empty() {
+        actions.push("no misplaced spool files".into());
+    }
+    let flush_started = if dry || moved == 0 {
+        false
+    } else {
+        force_queue_run()
+    };
+    Ok(SpoolRepairReport {
+        moved,
+        actions,
+        flush_started,
+        dry_run: dry,
+    })
+}
+
+fn chown_run_user(p: &Path) {
+    if let (Some(uid), Some(gid)) = (
+        crate::engine::uid_of("mailnull").or_else(|| crate::engine::uid_of("mail")),
+        crate::engine::gid_of("mail"),
+    ) {
+        let _ = std::os::unix::fs::chown(p, Some(uid), Some(gid));
+    }
+}
+
+fn set_perms_0750(p: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o750));
+}
+
 /// Age in seconds of the oldest queued message (-H file) in a queue input dir.
 pub fn oldest_queue_age(dir: &Path) -> Option<u64> {
     queue_files(dir)

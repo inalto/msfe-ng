@@ -158,6 +158,21 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
             fix,
         ));
     }
+    // Misplaced spool files are invisible to delivery: Exim lists them but
+    // computes their path from the message id, so they wait forever.
+    let (_, outq) = service::queue_dirs(cfg);
+    let misplaced = service::misplaced_spool(&outq).len();
+    out.push(check(
+        "spool files correctly placed",
+        misplaced == 0,
+        Level::Fail,
+        if misplaced == 0 {
+            "delivery queue files are in the subdirectories Exim expects".into()
+        } else {
+            format!("{misplaced} message(s) in the wrong split-spool subdirectory — Exim cannot deliver them")
+        },
+        "msfe-ng service spool-repair (or Queues tab → Fix misplaced spool files), then msfe-ng engine configure to stop it recurring",
+    ));
     let scanning = mailflow::scanning_enabled();
     out.push(check(
         "scanning kill switch",
