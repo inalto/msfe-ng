@@ -24,6 +24,7 @@ pub mod quarantine;
 pub mod rulefile;
 pub mod rules;
 pub mod service;
+pub mod setup;
 pub mod spambox;
 pub mod stats;
 pub mod sync;

@@ -132,7 +132,8 @@ async function renderDash(){
       el('div',{class:'lbl'},el('span',{class:'dot',style:'background:'+c}),lbl),
       el('div',{class:'val'},String(sum[k]??0)))));
   } else {
-    tiles.append(el('div',{class:'empty',html:'No data yet. Configure the database (<code>msfe-ng db-migrate</code>) and enable logging (<code>msfe-ng mailscanner enable-logging</code>).'}));
+    tiles.remove();
+    await renderSetupCard(v);
   }
 
   const rowc=el('div',{class:'row'});v.append(rowc);
@@ -149,6 +150,39 @@ async function renderDash(){
   if(top&&top.available&&top.items&&top.items.length)
     topCard.append(hbars(top.items.map(i=>({label:i.key,value:i.count}))));
   else topCard.append(el('div',{class:'empty'},'No sender data.'));
+}
+
+// First-run setup card: shown on the dashboard until stats flow.
+async function renderSetupCard(v){
+  const s=await api('/api/setup');
+  const card=el('div',{class:'card'},el('h2',{},'Finish setup'),
+    el('div',{class:'muted',style:'margin-bottom:.6rem;font-size:.8rem'},
+      'Two steps left before the dashboard fills with data. Both are safe to re-run.'));
+  const stateLine=(ok,okTxt,noTxt)=>el('div',{class:'statline'},
+    el('span',{},el('span',{class:'dot',style:'background:'+(ok?'var(--good)':'var(--warning)')}),ok?okTxt:noTxt));
+  const out=el('pre',{class:'log',style:'display:none;max-height:10rem'});
+  async function doStep(path,btn,confirmMsg){
+    if(confirmMsg&&!confirm(confirmMsg))return;
+    btn.disabled=true;
+    const r=await api(path,{method:'POST'});
+    btn.disabled=false;
+    out.style.display='';
+    out.textContent+=(out.textContent?'\n':'')+((r&&r.log)?r.log.join('\n'):(r.error||'failed'));
+    toast(r&&r.ok?'Done':'Failed — see details');
+    renderDash();
+  }
+  const dbBtn=el('button',{class:'act'},s.db_ready?'Database ready ✓ (re-check)':'1. Create database & apply schema');
+  dbBtn.onclick=()=>doStep('/api/setup/db',dbBtn,
+    s.db_ready?null:'Create the MySQL database and user?\n\nA database and user (default: msfe_ng) are created with a generated password, saved into MSFE-NG’s config, and the schema is applied. Nothing outside MSFE-NG’s own database is touched.');
+  const logBtn=el('button',{class:'act'},s.logging_enabled?'Logging enabled ✓':'2. Enable message logging');
+  logBtn.onclick=()=>doStep('/api/setup/logging',logBtn,
+    s.logging_enabled?null:'Enable per-message logging?\n\nInstalls the MSFE-NG logging plugin into MailScanner (a one-time backup of MailScanner.conf is kept) and restarts MailScanner so every scanned message is recorded for the dashboard, Messages tab and quarantine.');
+  card.append(
+    stateLine(s.db_ready,'Database: connected and ready','Database: not set up yet'),
+    stateLine(s.logging_enabled,'Message logging: enabled','Message logging: not enabled yet'),
+    el('div',{class:'ctl'},dbBtn,logBtn),out,
+    el('div',{class:'muted',style:'font-size:.8rem'},'Once both are done and mail flows, tiles and charts appear here (new messages only — history starts now).'));
+  v.append(card);
 }
 
 // vertical bar chart (single series) as inline SVG

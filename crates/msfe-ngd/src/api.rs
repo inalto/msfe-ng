@@ -115,6 +115,53 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             }
             Err(e) => Response::json(500, &format!("{{\"error\":\"configure: {e}\"}}")),
         },
+        // ---- first-run setup (dashboard) ------------------------------------
+        ("GET", "/api/setup") => {
+            let s = msfe_core::setup::status(cfg);
+            Response::json(
+                200,
+                &Json::Object(vec![
+                    ("db_configured".into(), Json::Bool(s.db_configured)),
+                    ("db_ready".into(), Json::Bool(s.db_ready)),
+                    ("logging_enabled".into(), Json::Bool(s.logging_enabled)),
+                ])
+                .to_string(),
+            )
+        }
+        ("POST", "/api/setup/db") => match msfe_core::setup::setup_database(cfg, config_file) {
+            Ok(log) => Response::json(
+                200,
+                &Json::Object(vec![
+                    ("ok".into(), Json::Bool(true)),
+                    (
+                        "log".into(),
+                        Json::Array(log.iter().map(Json::str).collect()),
+                    ),
+                ])
+                .to_string(),
+            ),
+            Err(e) => Response::json(
+                500,
+                &Json::Object(vec![("error".into(), Json::str(e.to_string()))]).to_string(),
+            ),
+        },
+        ("POST", "/api/setup/logging") => match msfe_core::setup::enable_logging(cfg) {
+            Ok(log) => Response::json(
+                200,
+                &Json::Object(vec![
+                    ("ok".into(), Json::Bool(true)),
+                    (
+                        "log".into(),
+                        Json::Array(log.iter().map(Json::str).collect()),
+                    ),
+                ])
+                .to_string(),
+            ),
+            Err(e) => Response::json(
+                500,
+                &Json::Object(vec![("error".into(), Json::str(e.to_string()))]).to_string(),
+            ),
+        },
         ("POST", "/api/service/lint") => {
             let r = service::lint();
             Response::json(
