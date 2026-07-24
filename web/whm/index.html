@@ -556,22 +556,25 @@ async function renderService(){
       refreshQueue();
     }}));
 
-  // Maillog card
-  const lc=el('div',{class:'card'},el('h2',{},'Mail log'));v.append(lc);
+  // Logs card (mail log + exim mainlog, tail with follow)
+  const lc=el('div',{class:'card'},el('h2',{},'Logs'));v.append(lc);
   const lctl=el('div',{class:'ctl'});lc.append(lctl);
+  const lsrc=el('select');[['mail','Mail log (MailScanner/syslog)'],['exim','Exim mainlog (deliveries)']].forEach(([val,lbl])=>lsrc.append(el('option',{value:val},lbl)));
   const lsel=el('select');[100,300,1000].forEach(n=>lsel.append(el('option',{value:n},n+' lines')));
   const pre=el('pre',{class:'log'},'Loading…');
   async function refreshLog(){
-    const text=await api('/api/service/maillog?lines='+lsel.value,{raw:true});
+    const which=lsrc.value==='exim'?'&which=exim':'';
+    const text=await api('/api/service/maillog?lines='+lsel.value+which,{raw:true});
     const stick=pre.scrollTop+pre.clientHeight>=pre.scrollHeight-4;
     pre.textContent=text||'(empty)';
     if(stick)pre.scrollTop=pre.scrollHeight;
   }
+  lsrc.onchange=()=>{pre.textContent='Loading…';refreshLog();};
   const auto=el('input',{type:'checkbox',id:'logauto'});
   auto.onchange=()=>{clearInterval(logTimer);logTimer=auto.checked?setInterval(refreshLog,5000):null;};
-  lctl.append(lsel,
+  lctl.append(lsrc,lsel,
     Object.assign(el('button',{class:'act plain'},'Refresh'),{onclick:refreshLog}),
-    auto,el('label',{for:'logauto',class:'muted'},'auto-refresh (5s)'));
+    auto,el('label',{for:'logauto',class:'muted'},'follow (5s)'));
   lc.append(pre);
 
   // User view + update card

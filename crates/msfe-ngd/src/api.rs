@@ -498,9 +498,13 @@ fn service_sync(cfg: &Config, config_file: &Path) -> Response {
 
 fn service_maillog(req: &Request, cfg: &Config) -> Response {
     let lines = stats::clamp_int(req.query_param("lines").as_deref(), 200, 10, 2000);
-    match service::tail_file(Path::new(&cfg.maillog_path), lines as usize) {
+    let path = match req.query_param("which").as_deref() {
+        Some("exim") => &cfg.exim_mainlog_path,
+        _ => &cfg.maillog_path,
+    };
+    match service::tail_file(Path::new(path), lines as usize) {
         Ok(text) => Response::text(200, &text),
-        Err(e) => Response::text(200, &format!("(cannot read {}: {e})", cfg.maillog_path)),
+        Err(e) => Response::text(200, &format!("(cannot read {path}: {e})")),
     }
 }
 

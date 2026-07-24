@@ -84,8 +84,9 @@ db_pass = ""
 mailscanner_conf = "/etc/MailScanner/MailScanner.conf"
 mailscanner_custom_dir = "/etc/MailScanner/custom"
 
-# Mail log watched by the WHM Service tab
+# Logs watched by the WHM Service tab
 maillog_path = "/var/log/maillog"
+exim_mainlog_path = "/var/log/exim_mainlog"
 EOF
     chmod 0640 "$CONFDIR/config.toml"
 fi
