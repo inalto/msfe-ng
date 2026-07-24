@@ -655,17 +655,69 @@ async function renderLogs(){
   v.append(qc);
   const qctl=el('div',{class:'ctl'});qc.append(qctl);
   const qsrc=el('select');[['mailscanner','MailScanner queue (waiting for scan)'],['main','Main queue (delivery)']].forEach(([val,lbl])=>qsrc.append(el('option',{value:val},lbl)));
-  const qpre=el('pre',{class:'log'},'Loading…');
-  async function refreshQ(){
-    qpre.textContent=await api('/api/service/queue/listing?which='+qsrc.value,{raw:true});
+  const qtable=el('table');
+  const qpre=el('pre',{class:'log',style:'display:none'},'');
+  const qdetail=el('pre',{class:'log',style:'display:none;max-height:20rem'});
+  // exim -bp: " 25m  5.3K 1wnE6V-00000004Oi2-3lJH <sender>" then indented recipients
+  function parseListing(text){
+    const msgs=[];let cur=null;
+    text.split('\n').forEach(l=>{
+      const m=l.match(/^\s*(\S+)\s+(\S+)\s+([A-Za-z0-9-]{10,30})\s+<(.*?)>(.*)$/);
+      if(m){cur={age:m[1],size:m[2],id:m[3],from:m[4]||'(bounce)',frozen:/frozen/.test(m[5]),to:[]};msgs.push(cur);}
+      else if(cur&&l.trim()&&!/^\d+ matches out of/.test(l)){const t=l.trim();if(/^[^\s<>]+@[^\s<>]+$/.test(t.replace(/^D\s+/,'')))cur.to.push(t);}
+    });
+    return msgs;
   }
-  qsrc.onchange=()=>{qpre.textContent='Loading…';refreshQ();};
+  async function msgView(id,what){
+    qdetail.style.display='';
+    qdetail.textContent='Loading '+what+'…';
+    qdetail.textContent=await api(`/api/service/queue/msg?which=${qsrc.value}&id=${encodeURIComponent(id)}&what=${what}`,{raw:true});
+  }
+  async function msgAction(id,action){
+    const warn=action==='delete'
+      ?`Delete ${id} from the queue?\n\nThe message is removed permanently.`
+      :(qsrc.value==='mailscanner'
+        ?`Deliver ${id} NOW from the scanning queue?\n\nThis BYPASSES MailScanner scanning for this message.`
+        :`Force delivery of ${id} now (works for frozen messages too)?\n\nThis can take a while if the remote server is slow.`);
+    if(!confirm(warn))return;
+    qdetail.style.display='';qdetail.textContent=`▶ ${action} ${id}…`;
+    const r=await api('/api/service/queue/action',{method:'POST',body:{which:qsrc.value,id,action}});
+    qdetail.textContent=(r.transcript||[r.error||'no response']).join('\n');
+    toast(r&&r.ok?`${action}: ok`:`${action} failed — see output`);
+    refreshQ();
+  }
+  async function refreshQ(){
+    const text=await api('/api/service/queue/listing?which='+qsrc.value,{raw:true});
+    qpre.textContent=text;
+    const msgs=parseListing(text);
+    qtable.innerHTML='';
+    if(!msgs.length){
+      qtable.append(el('tr',{},el('td',{class:'muted'},text.startsWith('(')?text:'Queue is empty.')));
+      return;
+    }
+    qtable.append(el('tr',{},...['Age','Size','Message','From','To','',''].map(h=>el('th',{},h))));
+    msgs.forEach(m=>{
+      qtable.append(el('tr',{},
+        el('td',{},m.age),el('td',{},m.size),
+        el('td',{style:'font-family:ui-monospace,monospace;font-size:.75rem'},m.id,
+          m.frozen?el('span',{class:'badge',style:'background:var(--serious);margin-left:.4rem'},'frozen'):''),
+        el('td',{},m.from),el('td',{},m.to.join(', ')),
+        el('td',{},...['headers','body','log'].map(w=>Object.assign(el('button',{class:'act plain',style:'margin-right:.25rem'},w),{onclick:()=>msgView(m.id,w)}))),
+        el('td',{},
+          Object.assign(el('button',{class:'act',style:'margin-right:.25rem'},'Deliver now'),{onclick:()=>msgAction(m.id,'deliver')}),
+          Object.assign(el('button',{class:'act danger'},'Delete'),{onclick:()=>msgAction(m.id,'delete')}))));
+    });
+  }
+  qsrc.onchange=()=>{qdetail.style.display='none';refreshQ();};
   const qauto=el('input',{type:'checkbox',id:'qauto'});
   qauto.onchange=()=>{clearInterval(jrnTimer);jrnTimer=qauto.checked?setInterval(refreshQ,5000):null;};
+  const qraw=el('input',{type:'checkbox',id:'qraw'});
+  qraw.onchange=()=>{qpre.style.display=qraw.checked?'':'none';qtable.style.display=qraw.checked?'none':'';};
   qctl.append(qsrc,
     Object.assign(el('button',{class:'act plain'},'Refresh'),{onclick:refreshQ}),
-    qauto,el('label',{for:'qauto',class:'muted'},'follow (5s)'));
-  qc.append(qpre);
+    qauto,el('label',{for:'qauto',class:'muted'},'follow (5s)'),
+    qraw,el('label',{for:'qraw',class:'muted'},'raw'));
+  qc.append(qtable,qpre,qdetail);
 
   refreshLog();refreshQ();
 }

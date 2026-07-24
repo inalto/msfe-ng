@@ -195,6 +195,34 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             };
             Response::text(200, &service::queue_listing(named))
         }
+        ("GET", "/api/service/queue/msg") => {
+            let named = match req.query_param("which").as_deref() {
+                Some("main") => None,
+                _ => Some("mailscanner"),
+            };
+            let id = req.query_param("id").unwrap_or_default();
+            let what = req.query_param("what").unwrap_or_else(|| "headers".into());
+            Response::text(200, &service::queue_msg_view(cfg, named, &id, &what))
+        }
+        ("POST", "/api/service/queue/action") => {
+            let v = Json::parse(&req.body).unwrap_or(Json::Null);
+            let named = match v.str_field("which").as_str() {
+                "main" => None,
+                _ => Some("mailscanner"),
+            };
+            let o = service::queue_msg_action(named, &v.str_field("id"), &v.str_field("action"));
+            Response::json(
+                200,
+                &Json::Object(vec![
+                    ("ok".into(), Json::Bool(o.ok)),
+                    (
+                        "transcript".into(),
+                        Json::Array(o.transcript.iter().map(Json::str).collect()),
+                    ),
+                ])
+                .to_string(),
+            )
+        }
         ("POST", "/api/service/queue/fix") => service_queue_fix(cfg),
         ("GET", "/api/service/rules") => service_rules(cfg),
         ("GET", "/api/service/rules/view") => service_rules_view(req, cfg),

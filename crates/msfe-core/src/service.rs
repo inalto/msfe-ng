@@ -450,6 +450,115 @@ pub fn queue_listing(named: Option<&str>) -> String {
     "(exim binary not found)".into()
 }
 
+/// Valid Exim message id (old or new format): word chars and dashes only.
+pub fn valid_exim_id(id: &str) -> bool {
+    (10..=30).contains(&id.len())
+        && id.contains('-')
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+fn exim_cmd(named: Option<&str>) -> Command {
+    let bin = if Path::new("/usr/sbin/exim").exists() {
+        "/usr/sbin/exim"
+    } else {
+        "exim"
+    };
+    let mut c = Command::new(bin);
+    if let Some(q) = named {
+        c.arg(format!("-qG{q}"));
+    }
+    c
+}
+
+/// View a queued message: its headers, body, or delivery-log history.
+pub fn queue_msg_view(cfg: &Config, named: Option<&str>, id: &str, what: &str) -> String {
+    if !valid_exim_id(id) {
+        return "invalid message id".into();
+    }
+    let out = match what {
+        "headers" => exim_cmd(named).args(["-Mvh", id]).output(),
+        "body" => exim_cmd(named).args(["-Mvb", id]).output(),
+        "log" => {
+            // delivery history from the mainlog (exigrep threads it; plain
+            // grep as fallback)
+            let ex = Command::new("/usr/sbin/exigrep")
+                .args([id, &cfg.exim_mainlog_path])
+                .output();
+            match ex {
+                Ok(o) if o.status.success() => Ok(o),
+                _ => Command::new("grep")
+                    .args([id, &cfg.exim_mainlog_path])
+                    .output(),
+            }
+        }
+        _ => return "unknown view".into(),
+    };
+    match out {
+        Ok(o) => {
+            let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+            s.push_str(&String::from_utf8_lossy(&o.stderr));
+            let s = s.trim();
+            if s.is_empty() {
+                "(no output)".into()
+            } else {
+                s.to_string()
+            }
+        }
+        Err(e) => format!("cannot run exim: {e}"),
+    }
+}
+
+/// Act on a queued message: force delivery now (`-v -M`, frozen included) or
+/// delete it (`-v -Mrm`). Returns a transcript like `control()`.
+pub fn queue_msg_action(named: Option<&str>, id: &str, action: &str) -> ControlOutcome {
+    if !valid_exim_id(id) {
+        return ControlOutcome {
+            ok: false,
+            transcript: vec!["invalid message id".into()],
+        };
+    }
+    let args: &[&str] = match action {
+        "deliver" => &["-v", "-M"],
+        "delete" => &["-v", "-Mrm"],
+        _ => {
+            return ControlOutcome {
+                ok: false,
+                transcript: vec![format!("unknown action '{action}'")],
+            }
+        }
+    };
+    let mut transcript = vec![format!(
+        "$ exim {}{} {id}",
+        named.map(|q| format!("-qG{q} ")).unwrap_or_default(),
+        args.join(" ")
+    )];
+    match exim_cmd(named).args(args).arg(id).output() {
+        Ok(o) => {
+            for stream in [&o.stdout, &o.stderr] {
+                for l in String::from_utf8_lossy(stream).lines() {
+                    if !l.trim().is_empty() {
+                        transcript.push(l.to_string());
+                    }
+                }
+            }
+            let ok = o.status.success();
+            transcript.push(if ok {
+                "→ ok".into()
+            } else {
+                format!("→ exit {}", o.status.code().unwrap_or(-1))
+            });
+            ControlOutcome { ok, transcript }
+        }
+        Err(e) => {
+            transcript.push(format!("→ cannot run: {e}"));
+            ControlOutcome {
+                ok: false,
+                transcript,
+            }
+        }
+    }
+}
+
 // ---- maillog tail ------------------------------------------------------------
 
 /// Read the last `lines` lines of `path`, scanning at most the final 1 MiB.
