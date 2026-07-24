@@ -77,6 +77,7 @@
     <button data-tab="messages" aria-selected="false">Messages</button>
     <button data-tab="rules" aria-selected="false">Rules</button>
     <button data-tab="service" aria-selected="false">Service</button>
+    <button data-tab="logs" aria-selected="false">Logs</button>
     <button data-tab="config" aria-selected="false">Config</button>
   </nav>
   <main id="view"></main>
@@ -103,7 +104,7 @@ function toast(msg){const t=$('#toast');t.textContent=msg;t.classList.add('show'
 let policy=null; // {settings:{}, whitelist:[], blacklist:[]}
 let days=7;
 
-const tabs={dash:renderDash,settings:renderSettings,lists:renderLists,messages:renderMessages,rules:renderRules,service:renderService,config:renderConfig};
+const tabs={dash:renderDash,settings:renderSettings,lists:renderLists,messages:renderMessages,rules:renderRules,service:renderService,logs:renderLogs,config:renderConfig};
 let logTimer=null; // maillog auto-refresh; cleared on every tab switch
 let jrnTimer=null; // restart-console journal polling; cleared on every tab switch
 $('#tabs').addEventListener('click',e=>{
@@ -590,27 +591,6 @@ async function renderService(){
       refreshQueue();
     }}));
 
-  // Logs card (mail log + exim mainlog, tail with follow)
-  const lc=el('div',{class:'card'},el('h2',{},'Logs'));v.append(lc);
-  const lctl=el('div',{class:'ctl'});lc.append(lctl);
-  const lsrc=el('select');[['mail','Mail log (MailScanner/syslog)'],['exim','Exim mainlog (deliveries)']].forEach(([val,lbl])=>lsrc.append(el('option',{value:val},lbl)));
-  const lsel=el('select');[100,300,1000].forEach(n=>lsel.append(el('option',{value:n},n+' lines')));
-  const pre=el('pre',{class:'log'},'Loading…');
-  async function refreshLog(){
-    const which=lsrc.value==='exim'?'&which=exim':'';
-    const text=await api('/api/service/maillog?lines='+lsel.value+which,{raw:true});
-    const stick=pre.scrollTop+pre.clientHeight>=pre.scrollHeight-4;
-    pre.textContent=text||'(empty)';
-    if(stick)pre.scrollTop=pre.scrollHeight;
-  }
-  lsrc.onchange=()=>{pre.textContent='Loading…';refreshLog();};
-  const auto=el('input',{type:'checkbox',id:'logauto'});
-  auto.onchange=()=>{clearInterval(logTimer);logTimer=auto.checked?setInterval(refreshLog,5000):null;};
-  lctl.append(lsrc,lsel,
-    Object.assign(el('button',{class:'act plain'},'Refresh'),{onclick:refreshLog}),
-    auto,el('label',{for:'logauto',class:'muted'},'follow (5s)'));
-  lc.append(pre);
-
   // User view + update card
   const uc=el('div',{class:'row'});v.append(uc);
   if(!DIRECT){
@@ -640,7 +620,54 @@ async function renderService(){
   };
   up.append(upline,upBtn);uc.append(up);
 
-  refreshStatus();refreshQueue();refreshLog();
+  refreshStatus();refreshQueue();
+}
+
+// ---- Logs & queue contents ---------------------------------------------------
+async function renderLogs(){
+  const v=$('#view');v.innerHTML='';
+
+  // Log viewer (mail log + exim mainlog) with follow
+  const lc=el('div',{class:'card'},el('h2',{},'Logs'));v.append(lc);
+  const lctl=el('div',{class:'ctl'});lc.append(lctl);
+  const lsrc=el('select');[['mail','Mail log (MailScanner/syslog)'],['exim','Exim mainlog (deliveries)']].forEach(([val,lbl])=>lsrc.append(el('option',{value:val},lbl)));
+  const lsel=el('select');[100,300,1000].forEach(n=>lsel.append(el('option',{value:n},n+' lines')));
+  const pre=el('pre',{class:'log',style:'max-height:30rem'},'Loading…');
+  async function refreshLog(){
+    const which=lsrc.value==='exim'?'&which=exim':'';
+    const text=await api('/api/service/maillog?lines='+lsel.value+which,{raw:true});
+    const stick=pre.scrollTop+pre.clientHeight>=pre.scrollHeight-4;
+    pre.textContent=text||'(empty)';
+    if(stick)pre.scrollTop=pre.scrollHeight;
+  }
+  lsrc.onchange=()=>{pre.textContent='Loading…';refreshLog();};
+  const auto=el('input',{type:'checkbox',id:'logauto'});
+  auto.onchange=()=>{clearInterval(logTimer);logTimer=auto.checked?setInterval(refreshLog,5000):null;};
+  lctl.append(lsrc,lsel,
+    Object.assign(el('button',{class:'act plain'},'Refresh'),{onclick:refreshLog}),
+    auto,el('label',{for:'logauto',class:'muted'},'follow (5s)'));
+  lc.append(pre);
+
+  // Queue contents (exim -bp): what is waiting where
+  const qc=el('div',{class:'card'},el('h2',{},'Queue contents'),
+    el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},
+      'Live listing (exim -bp): age, size, message id, sender and recipients. Messages sit in the MailScanner queue only for the seconds between arrival and scanning — anything older means MailScanner is not processing.'));
+  v.append(qc);
+  const qctl=el('div',{class:'ctl'});qc.append(qctl);
+  const qsrc=el('select');[['mailscanner','MailScanner queue (waiting for scan)'],['main','Main queue (delivery)']].forEach(([val,lbl])=>qsrc.append(el('option',{value:val},lbl)));
+  const qpre=el('pre',{class:'log'},'Loading…');
+  async function refreshQ(){
+    qpre.textContent=await api('/api/service/queue/listing?which='+qsrc.value,{raw:true});
+  }
+  qsrc.onchange=()=>{qpre.textContent='Loading…';refreshQ();};
+  const qauto=el('input',{type:'checkbox',id:'qauto'});
+  qauto.onchange=()=>{clearInterval(jrnTimer);jrnTimer=qauto.checked?setInterval(refreshQ,5000):null;};
+  qctl.append(qsrc,
+    Object.assign(el('button',{class:'act plain'},'Refresh'),{onclick:refreshQ}),
+    qauto,el('label',{for:'qauto',class:'muted'},'follow (5s)'));
+  qc.append(qpre);
+
+  refreshLog();refreshQ();
 }
 
 // ---- Config files & rulesets -------------------------------------------------

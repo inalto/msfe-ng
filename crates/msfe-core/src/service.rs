@@ -419,6 +419,37 @@ fn force_queue_run() -> bool {
     false
 }
 
+/// Human-readable queue listing (`exim -bp`), optionally for a named queue
+/// (e.g. the `mailscanner` scanning queue). Shows age, size, id, sender and
+/// recipients per message — what admins expect from mailq.
+pub fn queue_listing(named: Option<&str>) -> String {
+    for exim in ["/usr/sbin/exim", "exim"] {
+        let mut c = Command::new(exim);
+        if let Some(q) = named {
+            c.arg(format!("-qG{q}"));
+        }
+        c.arg("-bp");
+        match c.output() {
+            Ok(o) if o.status.success() => {
+                let s = String::from_utf8_lossy(&o.stdout).trim_end().to_string();
+                return if s.is_empty() {
+                    "(queue is empty)".into()
+                } else {
+                    s
+                };
+            }
+            Ok(o) => {
+                return format!(
+                    "exim -bp failed: {}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                )
+            }
+            Err(_) => continue,
+        }
+    }
+    "(exim binary not found)".into()
+}
+
 // ---- maillog tail ------------------------------------------------------------
 
 /// Read the last `lines` lines of `path`, scanning at most the final 1 MiB.

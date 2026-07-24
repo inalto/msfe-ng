@@ -188,6 +188,13 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             )
         }
         ("GET", "/api/service/queue") => service_queue(cfg),
+        ("GET", "/api/service/queue/listing") => {
+            let named = match req.query_param("which").as_deref() {
+                Some("main") => None,
+                _ => Some("mailscanner"),
+            };
+            Response::text(200, &service::queue_listing(named))
+        }
         ("POST", "/api/service/queue/fix") => service_queue_fix(cfg),
         ("GET", "/api/service/rules") => service_rules(cfg),
         ("GET", "/api/service/rules/view") => service_rules_view(req, cfg),
