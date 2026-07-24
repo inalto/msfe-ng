@@ -113,6 +113,7 @@ $('#tabs').addEventListener('click',e=>{
   const b=e.target.closest('button');if(!b)return;
   clearInterval(logTimer);logTimer=null;
   clearInterval(jrnTimer);jrnTimer=null;
+  clearInterval(msgTimer);msgTimer=null;
   document.querySelectorAll('#tabs button').forEach(x=>x.setAttribute('aria-selected',x===b));
   tabs[b.dataset.tab]();
 });
@@ -275,25 +276,111 @@ async function renderLists(){
   v.append(row,save);
 }
 
-// ---- Messages ---------------------------------------------------------------
+// ---- Messages (MailControl-style: filters, search, pagination, detail) -------
+const msgF={status:'all',field:'from',text:'',offset:0,limit:50};
+let msgTimer=null;
 async function renderMessages(){
   const v=$('#view');v.innerHTML='';
-  const card=el('div',{class:'card'},el('h2',{},'Recent messages'));v.append(card);
-  const data=await api('/api/messages?limit=100');
-  if(!data||!data.available||!data.items||!data.items.length){card.append(el('div',{class:'empty'},'No messages logged yet.'));return;}
+  clearInterval(msgTimer);msgTimer=null;
+  const card=el('div',{class:'card'},el('h2',{},'Messages'));v.append(card);
+
+  // status filter buttons
+  const FILTERS=[['all','All','var(--accent)'],['clean','Clean','var(--good)'],['lowspam','Low Spam','var(--warning)'],
+    ['highspam','High Spam','var(--serious)'],['infected','Infected','var(--critical)'],
+    ['wl','Whitelist','var(--good)'],['bl','Blacklist','var(--ink2)'],['quarantined','Quarantined','var(--muted)']];
+  const fbar=el('div',{class:'ctl',style:'flex-wrap:wrap'});
+  FILTERS.forEach(([key,lbl,color])=>{
+    const b=el('button',{class:'act plain',style:msgF.status===key?`border-color:${color};color:${color};font-weight:700`:''},lbl);
+    b.onclick=()=>{msgF.status=key;msgF.offset=0;renderMessages();};
+    fbar.append(b);
+  });
+  card.append(fbar);
+
+  // search + refresh controls
+  const sbar=el('div',{class:'ctl'});
+  const fsel=el('select');[['from','From'],['to','To'],['subject','Subject'],['id','Message ID'],['ip','Client IP']].forEach(([val,lbl])=>fsel.append(el('option',{value:val,...(val===msgF.field?{selected:'selected'}:{})},lbl)));
+  const stxt=el('input',{placeholder:'search…',value:msgF.text,style:'width:16rem'});
+  stxt.onkeydown=e=>{if(e.key==='Enter')doSearch();};
+  function doSearch(){msgF.field=fsel.value;msgF.text=stxt.value.trim();msgF.offset=0;renderMessages();}
+  const auto=el('input',{type:'checkbox',id:'msgauto',...(msgTimer?{checked:'checked'}:{})});
+  auto.onchange=()=>{clearInterval(msgTimer);msgTimer=auto.checked?setInterval(loadList,10000):null;};
+  sbar.append(fsel,stxt,
+    Object.assign(el('button',{class:'act plain'},'Search'),{onclick:doSearch}),
+    Object.assign(el('button',{class:'act plain'},'Refresh'),{onclick:()=>loadList()}),
+    auto,el('label',{for:'msgauto',class:'muted'},'auto-refresh (10s)'));
+  card.append(sbar);
+
+  const info=el('div',{class:'muted',style:'margin:.3rem 0'});
   const t=el('table');
-  t.append(el('tr',{},...['Time','From','To','Subject','Score','Status'].map(h=>el('th',{},h))));
-  data.items.forEach(m=>{
-    let badge='',col='var(--good)',lbl='clean';
-    if(m.virus){col='var(--critical)';lbl='virus';}
+  const detail=el('div',{class:'card',style:'display:none'});
+  card.append(info,t);v.append(detail);
+
+  const fmtSize=b=>{b=+b||0;return b>1048576?(b/1048576).toFixed(1)+'MB':b>1024?Math.round(b/1024)+'KB':b+'B';};
+  function badgeFor(m){
+    let col='var(--good)',lbl='clean';
+    if(m.virus)      {col='var(--critical)';lbl='infected';}
     else if(m.ishighspam){col='var(--serious)';lbl='high spam';}
     else if(m.isspam){col='var(--warning)';lbl='spam';}
-    badge=el('span',{class:'badge',style:'background:'+col},lbl);
-    t.append(el('tr',{},
-      el('td',{class:'muted'},m.ts),el('td',{},m.from),el('td',{},m.to),
-      el('td',{},m.subject),el('td',{class:'num'},m.score||'0'),el('td',{},badge)));
-  });
-  card.append(t);
+    else if(m.wl)    {col='var(--good)';lbl='whitelist';}
+    else if(m.bl)    {col='var(--ink2)';lbl='blacklist';}
+    return el('span',{class:'badge',style:'background:'+col},lbl+(m.quarantined?' 🔒':''));
+  }
+  async function loadList(){
+    const q=`status=${msgF.status}&field=${msgF.field}&text=${encodeURIComponent(msgF.text)}&offset=${msgF.offset}&limit=${msgF.limit}`;
+    const data=await api('/api/messages?'+q);
+    t.innerHTML='';info.innerHTML='';
+    if(!data||!data.available){t.append(el('tr',{},el('td',{class:'empty'},'No data yet — check the setup card on the Dashboard.')));return;}
+    const total=data.total||0,page=Math.floor(msgF.offset/msgF.limit)+1,pages=Math.max(1,Math.ceil(total/msgF.limit));
+    info.append(`Results: ${total} — page ${page}/${pages}  `);
+    const nav=(lbl,off,dis)=>Object.assign(el('button',{class:'act plain',style:'margin-left:.3rem',...(dis?{disabled:'disabled'}:{})},lbl),{onclick:()=>{msgF.offset=off;loadList();}});
+    info.append(nav('⟨ prev',Math.max(0,msgF.offset-msgF.limit),msgF.offset===0),
+                nav('next ⟩',msgF.offset+msgF.limit,msgF.offset+msgF.limit>=total));
+    const jump=el('input',{type:'number',min:1,max:pages,value:page,style:'width:4.5rem;margin-left:.5rem'});
+    jump.onchange=()=>{msgF.offset=(Math.min(pages,Math.max(1,+jump.value))-1)*msgF.limit;loadList();};
+    info.append(' jump: ',jump);
+    if(!data.items||!data.items.length){t.append(el('tr',{},el('td',{class:'empty'},'No messages match.')));return;}
+    t.append(el('tr',{},...['Time','Score','From / To','Subject','Size','Status'].map(h=>el('th',{},h))));
+    data.items.forEach(m=>{
+      const tr=el('tr',{style:'cursor:pointer'},
+        el('td',{class:'muted',style:'white-space:nowrap'},m.ts),
+        el('td',{class:'num'},m.score||'0'),
+        el('td',{},el('div',{},m.from),el('div',{class:'muted'},m.to)),
+        el('td',{},m.subject),
+        el('td',{class:'num'},fmtSize(m.size)),
+        el('td',{},badgeFor(m)));
+      tr.onclick=()=>showDetail(m.id);
+      t.append(tr);
+    });
+  }
+  async function showDetail(id){
+    detail.style.display='';detail.innerHTML='';
+    detail.append(el('h2',{},'Message '+id),el('div',{class:'muted'},'Loading…'));
+    const d=await api('/api/messages/detail?id='+encodeURIComponent(id));
+    detail.innerHTML='';
+    if(!d||!d.available){detail.append(el('div',{class:'empty'},'No detail available.'));return;}
+    detail.append(el('h2',{},'Message '+d.id,' ',badgeFor(d)));
+    const dt=el('table');
+    const row=(k,val)=>{if(val!=null&&String(val).trim()!=='')dt.append(el('tr',{},el('th',{style:'width:11rem'},k),el('td',{},String(val))));};
+    row('Date',d.ts);row('From',d.from);row('To',d.to);row('Subject',d.subject);
+    row('Size',fmtSize(d.size));row('Client IP',d.clientip);row('Scanned on',d.hostname);
+    row('SpamAssassin score',d.score);row('Spam report',d.spamreport);row('RBL report',d.rblreport);row('Scanner report',d.report);
+    detail.append(dt);
+    if(d.headers)detail.append(el('h2',{style:'margin-top:.8rem'},'Headers'),el('pre',{class:'log',style:'max-height:16rem'},d.headers));
+    if(d.content)detail.append(el('h2',{style:'margin-top:.8rem'},'Content (first 10KB — quarantined copy)'),el('pre',{class:'log',style:'max-height:16rem'},d.content));
+    if(d.quarantined){
+      const rto=el('input',{placeholder:'recipient (empty = original To:)',style:'width:20rem'});
+      const rel=Object.assign(el('button',{class:'act'},'Release'),{onclick:async()=>{
+        if(!confirm('Release this message'+(rto.value?` to ${rto.value}`:' to its original recipients')+'?\n\nIt is re-sent through Exim.'))return;
+        rel.disabled=true;
+        const r=await api('/api/messages/release',{method:'POST',body:{id:d.id,to:rto.value.trim()}});
+        rel.disabled=false;
+        toast(r&&r.ok?'Released — the message is on its way':(r.error||'release failed'));
+      }});
+      detail.append(el('h2',{style:'margin-top:.8rem'},'Actions'),el('div',{class:'ctl'},rto,rel));
+    }
+    detail.scrollIntoView({behavior:'smooth'});
+  }
+  loadList();
 }
 
 // ---- Rules (structured editor, no raw tabs/spaces) ---------------------------

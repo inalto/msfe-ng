@@ -90,9 +90,52 @@ pub fn release(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Forward a quarantined message to an explicit recipient (envelope-to that
+/// address, original message unchanged) — the legacy "Release (forward)".
+pub fn release_to(path: &Path, recipient: &str) -> io::Result<()> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    if !valid_recipient(recipient) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "bad recipient"));
+    }
+    let bytes = read_message(path)?;
+    let mut child = Command::new("sendmail")
+        .arg("--")
+        .arg(recipient)
+        .stdin(Stdio::piped())
+        .spawn()?;
+    child.stdin.take().expect("stdin piped").write_all(&bytes)?;
+    if child.wait()?.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other("sendmail failed"))
+    }
+}
+
+/// A single safe email address (no spaces, no option injection).
+pub fn valid_recipient(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 254
+        && !s.starts_with('-')
+        && s.contains('@')
+        && s.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'@' | b'.' | b'_' | b'-' | b'+' | b'=')
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recipient_validation() {
+        assert!(valid_recipient("user@example.com"));
+        assert!(valid_recipient("a.b+tag@ex-ample.co"));
+        assert!(!valid_recipient("-oQ/tmp@x.com"));
+        assert!(!valid_recipient("two words@x.com"));
+        assert!(!valid_recipient("noat.example.com"));
+        assert!(!valid_recipient(""));
+    }
 
     #[test]
     fn id_validation() {

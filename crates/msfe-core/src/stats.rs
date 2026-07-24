@@ -121,12 +121,60 @@ pub fn top(cfg: &Config, days: u32, field: &str, limit: u32) -> io::Result<Json>
     ]))
 }
 
-/// Most recent `limit` messages for the message list.
-pub fn messages(cfg: &Config, limit: u32) -> io::Result<Json> {
+/// Message-list filter (MailControl-style): status buttons, field search,
+/// pagination. All inputs are allow-listed or SQL-quoted.
+pub struct MessageFilter {
+    pub status: String,
+    pub field: String,
+    pub text: String,
+    pub offset: u32,
+    pub limit: u32,
+}
+
+fn status_where(status: &str) -> &'static str {
+    match status {
+        "clean" => "isspam=0 AND virusinfected=0 AND nameinfected=0 AND otherinfected=0",
+        "lowspam" => "isspam=1 AND ishighspam=0",
+        "highspam" => "ishighspam=1",
+        "infected" => "(virusinfected=1 OR nameinfected=1 OR otherinfected=1)",
+        "wl" => "spamwhitelisted=1",
+        "bl" => "spamblacklisted=1",
+        "quarantined" => "quarantined=1",
+        _ => "1=1",
+    }
+}
+
+/// Filtered, searchable, paginated message list with a total count.
+pub fn messages(cfg: &Config, f: &MessageFilter) -> io::Result<Json> {
+    let mut wheres = vec![status_where(&f.status).to_string()];
+    if !f.text.is_empty() {
+        let col = match f.field.as_str() {
+            "to" => "to_address",
+            "subject" => "subject",
+            "id" => "message_id",
+            "ip" => "clientip",
+            _ => "from_address",
+        };
+        let like = sql_quote(&format!("%{}%", f.text));
+        wheres.push(format!("{col} LIKE {like}"));
+    }
+    let where_sql = wheres.join(" AND ");
+    let total: i64 = db::query(
+        cfg,
+        &format!("SELECT COUNT(*) FROM maillog WHERE {where_sql}"),
+    )?
+    .first()
+    .and_then(|r| r.first())
+    .and_then(|v| v.parse().ok())
+    .unwrap_or(0);
+    let limit = f.limit.clamp(1, 500);
+    let offset = f.offset;
     let sql = format!(
         "SELECT msg_ts, from_address, to_address, subject, sascore, \
-                isspam, ishighspam, virusinfected, quarantined \
-         FROM maillog ORDER BY msg_ts DESC LIMIT {limit}"
+                isspam, ishighspam, virusinfected, quarantined, message_id, size, \
+                spamwhitelisted, spamblacklisted \
+         FROM maillog WHERE {where_sql} \
+         ORDER BY msg_ts DESC LIMIT {limit} OFFSET {offset}"
     );
     let rows = db::query(cfg, &sql)?;
     let items = rows
@@ -143,12 +191,62 @@ pub fn messages(cfg: &Config, limit: u32) -> io::Result<Json> {
                 ("ishighspam".into(), count(&f(6))),
                 ("virus".into(), count(&f(7))),
                 ("quarantined".into(), count(&f(8))),
+                ("id".into(), Json::str(f(9))),
+                ("size".into(), Json::str(f(10))),
+                ("wl".into(), count(&f(11))),
+                ("bl".into(), count(&f(12))),
             ])
         })
         .collect();
     Ok(Json::Object(vec![
         ("available".into(), Json::Bool(true)),
+        ("total".into(), Json::Int(total)),
+        ("offset".into(), Json::Int(offset as i64)),
         ("items".into(), Json::Array(items)),
+    ]))
+}
+
+/// Everything recorded about one message, for the detail view.
+pub fn message_detail(cfg: &Config, message_id: &str) -> io::Result<Json> {
+    if !crate::service::valid_exim_id(message_id) {
+        return Ok(Json::Object(vec![("available".into(), Json::Bool(false))]));
+    }
+    let sql = format!(
+        "SELECT msg_ts, message_id, from_address, to_address, subject, size, clientip, \
+                sascore, spamreport, rblspamreport, report, isspam, ishighspam, \
+                spamwhitelisted, spamblacklisted, virusinfected, nameinfected, \
+                otherinfected, quarantined, hostname, headers \
+         FROM maillog WHERE message_id = {} ORDER BY msg_ts DESC LIMIT 1",
+        sql_quote(message_id)
+    );
+    let rows = db::query(cfg, &sql)?;
+    let Some(r) = rows.first() else {
+        return Ok(Json::Object(vec![("available".into(), Json::Bool(false))]));
+    };
+    let f = |i: usize| r.get(i).cloned().unwrap_or_default();
+    Ok(Json::Object(vec![
+        ("available".into(), Json::Bool(true)),
+        ("ts".into(), Json::str(f(0))),
+        ("id".into(), Json::str(f(1))),
+        ("from".into(), Json::str(f(2))),
+        ("to".into(), Json::str(f(3))),
+        ("subject".into(), Json::str(f(4))),
+        ("size".into(), Json::str(f(5))),
+        ("clientip".into(), Json::str(f(6))),
+        ("score".into(), Json::str(f(7))),
+        ("spamreport".into(), Json::str(f(8))),
+        ("rblreport".into(), Json::str(f(9))),
+        ("report".into(), Json::str(f(10))),
+        ("isspam".into(), count(&f(11))),
+        ("ishighspam".into(), count(&f(12))),
+        ("wl".into(), count(&f(13))),
+        ("bl".into(), count(&f(14))),
+        ("virus".into(), count(&f(15))),
+        ("nameinfected".into(), count(&f(16))),
+        ("otherinfected".into(), count(&f(17))),
+        ("quarantined".into(), count(&f(18))),
+        ("hostname".into(), Json::str(f(19))),
+        ("headers".into(), Json::str(f(20))),
     ]))
 }
 

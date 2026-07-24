@@ -40,8 +40,61 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             stat_response(stats::top(cfg, days, &field, limit))
         }
         ("GET", "/api/messages") => {
-            let limit = stats::clamp_int(req.query_param("limit").as_deref(), 50, 1, 500);
-            stat_response(stats::messages(cfg, limit))
+            let f = stats::MessageFilter {
+                status: req.query_param("status").unwrap_or_else(|| "all".into()),
+                field: req.query_param("field").unwrap_or_else(|| "from".into()),
+                text: req.query_param("text").unwrap_or_default(),
+                offset: stats::clamp_int(req.query_param("offset").as_deref(), 0, 0, 10_000_000)
+                    as u32,
+                limit: stats::clamp_int(req.query_param("limit").as_deref(), 50, 1, 500) as u32,
+            };
+            stat_response(stats::messages(cfg, &f))
+        }
+        ("GET", "/api/messages/detail") => {
+            let id = req.query_param("id").unwrap_or_default();
+            let mut detail = match stats::message_detail(cfg, &id) {
+                Ok(d) => d,
+                Err(_) => return Response::json(200, r#"{"available":false}"#),
+            };
+            // quarantined content preview (first 10 KB), when the file exists
+            if let Json::Object(fields) = &mut detail {
+                let quarantined = fields
+                    .iter()
+                    .any(|(k, v)| k == "quarantined" && matches!(v, Json::Int(1)));
+                if quarantined {
+                    if let Some(p) = quarantine::find_message(Path::new(&cfg.quarantine_dir), &id) {
+                        if let Ok(bytes) = quarantine::read_message(&p) {
+                            let body = String::from_utf8_lossy(&bytes[..bytes.len().min(10240)])
+                                .into_owned();
+                            fields.push(("content".into(), Json::str(body)));
+                        }
+                    }
+                }
+            }
+            Response::json(200, &detail.to_string())
+        }
+        ("POST", "/api/messages/release") => {
+            let v = Json::parse(&req.body).unwrap_or(Json::Null);
+            let id = v.str_field("id");
+            let to = v.str_field("to");
+            if !service::valid_exim_id(&id) {
+                return Response::json(400, r#"{"error":"bad message id"}"#);
+            }
+            let Some(p) = quarantine::find_message(Path::new(&cfg.quarantine_dir), &id) else {
+                return Response::json(
+                    404,
+                    r#"{"error":"message not found in quarantine (only quarantined messages can be released)"}"#,
+                );
+            };
+            let result = if to.is_empty() {
+                quarantine::release(&p)
+            } else {
+                quarantine::release_to(&p, &to)
+            };
+            match result {
+                Ok(()) => Response::json(200, r#"{"ok":true}"#),
+                Err(e) => Response::json(500, &format!("{{\"error\":\"release failed: {e}\"}}")),
+            }
         }
 
         // ---- MailScanner service operations (root-only admin surface) -------
