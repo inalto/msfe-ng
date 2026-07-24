@@ -453,7 +453,7 @@ fn chown_user_mail(path: &Path, user: &str) -> bool {
     std::os::unix::fs::chown(path, Some(uid), Some(gid)).is_ok()
 }
 
-fn uid_of(name: &str) -> Option<u32> {
+pub(crate) fn uid_of(name: &str) -> Option<u32> {
     let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
     passwd.lines().find_map(|l| {
         let mut f = l.split(':');
@@ -465,7 +465,7 @@ fn uid_of(name: &str) -> Option<u32> {
     })
 }
 
-fn gid_of(name: &str) -> Option<u32> {
+pub(crate) fn gid_of(name: &str) -> Option<u32> {
     let group = std::fs::read_to_string("/etc/group").ok()?;
     group.lines().find_map(|l| {
         let mut f = l.split(':');

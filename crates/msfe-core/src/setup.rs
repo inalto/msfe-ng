@@ -107,6 +107,7 @@ pub fn setup_database(cfg: &Config, config_file: &Path) -> io::Result<Vec<String
         ];
         let (new_text, _) = conffile::apply(&text, &changes, conffile::Style::Toml);
         service::save_conf(config_file, &new_text)?;
+        secure_config(config_file, &mut log);
         log.push(format!("credentials saved to {}", config_file.display()));
         eff.db_host = "localhost".into();
         eff.db_pass = pass;
@@ -131,9 +132,56 @@ pub fn setup_database(cfg: &Config, config_file: &Path) -> io::Result<Vec<String
     Ok(log)
 }
 
+/// Make the credentials file root:mail 0640 — the logging plugin runs inside
+/// MailScanner as the run-as user (group `mail`) and must read db_pass, while
+/// ordinary users must not.
+fn secure_config(config_file: &Path, log: &mut Vec<String>) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(config_file, std::fs::Permissions::from_mode(0o640));
+    if let Some(gid) = crate::engine::gid_of("mail") {
+        if std::os::unix::fs::chown(config_file, Some(0), Some(gid)).is_ok() {
+            log.push(format!(
+                "secured {} (root:mail 0640, readable by the logging plugin)",
+                config_file.display()
+            ));
+            return;
+        }
+    }
+    log.push(format!(
+        "WARNING: could not set group 'mail' on {} — the logging plugin may be unable to read the DB credentials",
+        config_file.display()
+    ));
+}
+
+fn perl_module_ok(module: &str) -> bool {
+    Command::new("perl")
+        .arg(format!("-M{module}"))
+        .arg("-e1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 /// Install the logging plugin, hook the directive, restart MailScanner.
 pub fn enable_logging(cfg: &Config) -> io::Result<Vec<String>> {
     let mut log = Vec::new();
+    // The plugin's forked logger needs DBI + DBD::mysql at runtime; missing
+    // modules fail silently from the operator's viewpoint (errors only in the
+    // mail log), so surface — and try to fix — them here.
+    for (module, pkg) in [("DBI", "perl-DBI"), ("DBD::mysql", "perl-DBD-MySQL")] {
+        if !perl_module_ok(module) {
+            let _ = Command::new("dnf").args(["-y", "install", pkg]).output();
+            if perl_module_ok(module) {
+                log.push(format!("installed missing perl module {module} ({pkg})"));
+            } else {
+                log.push(format!(
+                    "WARNING: perl module {module} is missing and could not be installed — messages will NOT be recorded until it is (dnf install {pkg} or cpanm {module})"
+                ));
+            }
+        }
+    }
     let dst = Path::new(&cfg.mailscanner_custom_dir).join(msfe_api::MS_PLUGIN_FILENAME);
     let src = std::env::var("MSFE_NG_MS_PLUGIN_SRC")
         .unwrap_or_else(|_| msfe_api::DEFAULT_MS_PLUGIN_SRC.to_string());
@@ -156,6 +204,12 @@ pub fn enable_logging(cfg: &Config) -> io::Result<Vec<String>> {
             mailscanner::LOGGING_VALUE
         ));
     }
+    // Credentials must be readable by the plugin (see secure_config).
+    if let Ok(cf) = std::env::var("MSFE_NG_CONFIG") {
+        secure_config(Path::new(&cf), &mut log);
+    } else {
+        secure_config(Path::new(msfe_api::DEFAULT_CONFIG_FILE), &mut log);
+    }
     let o = service::control("restart");
     log.push(format!(
         "restarted MailScanner: {}",
@@ -165,6 +219,10 @@ pub fn enable_logging(cfg: &Config) -> io::Result<Vec<String>> {
             "FAILED (restart it manually)"
         }
     ));
+    log.push(
+        "watch for 'MSFE-NG: connected to maillog database' in the mail log after the next message"
+            .into(),
+    );
     Ok(log)
 }
 

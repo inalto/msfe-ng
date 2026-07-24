@@ -108,6 +108,15 @@ elif ! perl -MMail::SpamAssassin -e1 >/dev/null 2>&1; then
     fi
 fi
 
+# Perl DBI + DBD::mysql: needed by the MSFE-NG logging plugin to record
+# scanned messages into the database.
+if [ "$DRY" = 1 ]; then
+    info "would ensure perl DBI + DBD::mysql are installed"
+else
+    perl -MDBI -e1 >/dev/null 2>&1 || run "$PKG" -y install perl-DBI || true
+    perl -MDBD::mysql -e1 >/dev/null 2>&1 || run "$PKG" -y install perl-DBD-MySQL || true
+fi
+
 # ClamAV: install clamd + signatures unless opted out (MSFE_NG_NO_CLAMAV=1).
 # `engine configure` points MailScanner at the clamd socket once it exists.
 if [ "${MSFE_NG_NO_CLAMAV:-0}" != 1 ]; then

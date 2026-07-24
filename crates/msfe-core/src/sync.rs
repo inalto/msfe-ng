@@ -167,10 +167,17 @@ pub fn read_domains(path: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Write `data` to `path` atomically (temp file + rename in the same dir).
+/// Write `data` to `path` atomically (temp file + rename in the same dir),
+/// preserving the target's existing permissions and ownership — without this a
+/// rewrite of a 0640 credentials file would come out world-readable.
 pub fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
     let tmp = path.with_extension("tmp.msfe-ng");
     std::fs::write(&tmp, data)?;
+    if let Ok(meta) = std::fs::metadata(path) {
+        use std::os::unix::fs::MetadataExt;
+        let _ = std::fs::set_permissions(&tmp, meta.permissions());
+        let _ = std::os::unix::fs::chown(&tmp, Some(meta.uid()), Some(meta.gid()));
+    }
     std::fs::rename(&tmp, path)
 }
 
@@ -313,4 +320,22 @@ pub fn reload_mailscanner() -> bool {
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn atomic_write_preserves_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let p = std::env::temp_dir().join(format!("msfe-aw-{}.conf", std::process::id()));
+        std::fs::write(&p, "secret = 1\n").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+        atomic_write(&p, b"secret = 2\n").unwrap();
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640, "rewrite must not widen credential file perms");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "secret = 2\n");
+        std::fs::remove_file(&p).unwrap();
+    }
 }
