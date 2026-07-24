@@ -403,6 +403,14 @@ async function renderService(){
           refreshStatus();
         }}));
     }
+    if(s.engine!==false){
+      stat.append(el('span',{style:'font-weight:600'},
+        el('span',{class:'dot',style:'background:'+(s.wired?'var(--good)':'var(--warning)')}),
+        s.wired?'Mail is routed through MailScanner':'Mail is delivered directly (not scanned)'));
+      wireBtn.textContent=s.wired?'Unwire (stop scanning mail)':'Wire Exim → MailScanner';
+      wireBtn.dataset.wired=s.wired?'1':'0';
+      wireBtn.className=s.wired?'act danger':'act';
+    }
     stat.append(
       el('span',{},el('span',{class:'dot',style:'background:'+(s.active?'var(--good)':'var(--critical)')}),
         s.active?'Running':'Stopped',s.procs?` (${s.procs} processes)`:''),
@@ -477,6 +485,29 @@ async function renderService(){
     toast(r&&r.ok?`Rules updated — ${r.files} files, reload ${r.reloaded?'ok':'failed'}`:(r.error||'sync failed'));
   };
   btns.append(cfgBtn,mfBtn,syncBtn);
+
+  // Exim wiring: route mail through MailScanner (named queue), or undo it.
+  const wireBtn=el('button',{class:'act'},'Wire Exim → MailScanner');
+  async function runWire(enable,dry){
+    con.style.display='';
+    conCmd.textContent+=(conCmd.textContent?'\n':'')+`▶ ${dry?'preview ':''}${enable?'wire':'unwire'} — ${new Date().toLocaleTimeString()}`;
+    const r=await api('/api/service/engine-wire',{method:'POST',body:{enable,dry_run:dry}});
+    (r.actions||[r.error||'no response from daemon']).forEach(l=>{conCmd.textContent+='\n  '+l;});
+    conCmd.textContent+='\n  result: '+(r&&r.ok?(dry?'dry-run, nothing changed':(r.wired?'WIRED — incoming mail is being scanned':'unwired — direct delivery restored')):'FAILED '+(r.error||''));
+    conCmd.scrollTop=conCmd.scrollHeight;
+    if(!dry){toast(r&&r.ok?(r.wired?'Mail is now routed through MailScanner':'Direct delivery restored'):(r.error||'wiring failed'));refreshStatus();pollJournal();}
+  }
+  wireBtn.onclick=async()=>{
+    const wired=wireBtn.dataset.wired==='1';
+    const msg=wired
+      ?'Stop routing mail through MailScanner?\n\nMail will be delivered directly again, WITHOUT scanning. MailScanner keeps running idle and this can be re-wired at any time.'
+      :'Route ALL incoming mail through MailScanner?\n\nExim will hold each incoming message in a scanning queue; MailScanner scans it and hands it back for delivery. Undo at any time with Unwire — and the mailflow toggle stays an instant kill switch.';
+    if(!confirm(msg))return;
+    wireBtn.disabled=true;await runWire(!wired,false);wireBtn.disabled=false;
+  };
+  const previewBtn=el('button',{class:'act plain'},'Preview wiring (dry-run)');
+  previewBtn.onclick=()=>runWire(wireBtn.dataset.wired!=='1',true);
+  svc.append(el('div',{class:'ctl'},wireBtn,previewBtn));
   v.append(con);
 
   // Health check: MailScanner's own self-test, with a plain verdict.
@@ -586,24 +617,84 @@ async function renderConfig(){
   const fsel=el('select');
   [['mailscanner','MailScanner.conf'],['msfe','MSFE-NG config.toml']].forEach(([val,lbl])=>fsel.append(el('option',{value:val},lbl)));
   const pathLbl=el('span',{class:'muted'});
-  const ta=el('textarea',{spellcheck:'false',style:'min-height:22rem'});
-  async function loadConf(){
+  let mode='visual';
+  const modeBtn=el('button',{class:'act plain'},'Raw text');
+
+  // --- raw mode (full-file textarea) ---
+  const ta=el('textarea',{spellcheck:'false',style:'min-height:22rem;display:none'});
+  const rawSave=el('button',{class:'act',style:'display:none'},'Save raw');
+  rawSave.onclick=async()=>{
+    if(!confirm('Save the whole file '+pathLbl.textContent+'?'))return;
+    rawSave.disabled=true;
+    const r=await api('/api/service/conf',{method:'PUT',body:{which:fsel.value,content:ta.value}});
+    rawSave.disabled=false;
+    if(r&&r.ok){toast(fsel.value==='mailscanner'?'Saved — reload MailScanner to apply':'Saved');}
+    else toast(r.error||'save failed');
+  };
+
+  // --- visual mode (key/value fields, comments shown and preserved) ---
+  const filter=el('input',{placeholder:'filter settings…',style:'flex:1;max-width:20rem'});
+  const vwrap=el('div');
+  const rows=el('div',{style:'max-height:32rem;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:.5rem .7rem'});
+  const vSave=el('button',{class:'act'},'Save changes');
+  let ORIG={};
+  async function loadVisual(){
+    rows.innerHTML='';ORIG={};pathLbl.textContent='loading…';
+    const d=await api('/api/service/conf/parsed?which='+fsel.value);
+    if(d.error){pathLbl.textContent='';rows.append(el('div',{class:'muted'},d.error));return;}
+    pathLbl.textContent=d.path;
+    (d.lines||[]).forEach(l=>{
+      if(l.t==='comment'||l.t==='other')
+        rows.append(el('div',{class:'muted',style:'font:.74rem/1.4 ui-monospace,monospace;white-space:pre-wrap'},l.text));
+      else if(l.t==='entry'){
+        ORIG[l.key]=l.value;
+        const inp=el('input',{value:l.value,'data-k':l.key,style:'flex:1;font-size:.8rem'});
+        inp.oninput=()=>{inp.style.borderColor=inp.value!==ORIG[l.key]?'var(--accent)':'';};
+        rows.append(el('div',{style:'display:flex;gap:.6rem;align-items:center;margin:.15rem 0'},
+          el('div',{style:'width:17rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.8rem;font-weight:600',title:l.key},l.key),inp));
+      }
+    });
+  }
+  filter.oninput=()=>{
+    const q=filter.value.toLowerCase();
+    [...rows.children].forEach(r=>{
+      if(!q){r.style.display='';return;}
+      const inp=r.querySelector?r.querySelector('[data-k]'):null;
+      r.style.display=(inp&&(inp.dataset.k.toLowerCase().includes(q)||inp.value.toLowerCase().includes(q)))?'':'none';
+    });
+  };
+  vSave.onclick=async()=>{
+    const changes={};
+    rows.querySelectorAll('[data-k]').forEach(i=>{if(i.value!==ORIG[i.dataset.k])changes[i.dataset.k]=i.value;});
+    const n=Object.keys(changes).length;
+    if(!n){toast('No changes to save');return;}
+    if(!confirm(`Apply ${n} change(s) to ${pathLbl.textContent}?\n\n`+Object.entries(changes).map(([k,v])=>`${k} = ${v}`).join('\n')+'\n\nOnly these lines are rewritten — comments and everything else stay untouched.'))return;
+    vSave.disabled=true;
+    const r=await api('/api/service/conf/apply',{method:'POST',body:{which:fsel.value,changes}});
+    vSave.disabled=false;
+    if(r&&r.ok){toast(`${r.applied} setting(s) saved`+(fsel.value==='mailscanner'?' — reload MailScanner to apply':''));loadVisual();}
+    else toast(r.error||'save failed');
+  };
+  vwrap.append(rows);
+
+  function applyMode(){
+    const vis=mode==='visual';
+    vwrap.style.display=vis?'':'none';filter.style.display=vis?'':'none';vSave.style.display=vis?'':'none';
+    ta.style.display=vis?'none':'';rawSave.style.display=vis?'none':'';
+    modeBtn.textContent=vis?'Raw text':'Visual editor';
+  }
+  modeBtn.onclick=()=>{mode=mode==='visual'?'raw':'visual';applyMode();loadAny();};
+  async function loadAny(){
+    if(mode==='visual')return loadVisual();
     ta.value='';pathLbl.textContent='loading…';
     const r=await api('/api/service/conf?which='+fsel.value);
     if(r.error){pathLbl.textContent=r.error;return;}
     ta.value=r.content;pathLbl.textContent=r.path;
   }
-  fsel.onchange=loadConf;
-  const saveBtn=el('button',{class:'act'},'Save');
-  saveBtn.onclick=async()=>{
-    if(!confirm('Save changes to '+pathLbl.textContent+'?'))return;
-    saveBtn.disabled=true;
-    const r=await api('/api/service/conf',{method:'PUT',body:{which:fsel.value,content:ta.value}});
-    saveBtn.disabled=false;
-    if(r&&r.ok){toast(fsel.value==='mailscanner'?'Saved — reload MailScanner to apply':'Saved');}
-    else toast(r.error||'save failed');
-  };
-  ec.append(el('div',{class:'ctl'},fsel,saveBtn,pathLbl),ta);
+  fsel.onchange=loadAny;
+  ec.append(el('div',{class:'ctl'},fsel,modeBtn,filter,vSave,rawSave,pathLbl),vwrap,ta);
+  applyMode();
+  const loadConf=loadAny;
 
   const rc=el('div',{class:'card'},el('h2',{},'Generated rulesets'),
     el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},

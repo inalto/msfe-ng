@@ -261,6 +261,8 @@ pub fn queue_dirs(cfg: &Config) -> (PathBuf, PathBuf) {
         mailscanner::get_directive(&conf, key)
             .filter(|v| !v.is_empty())
             .unwrap_or(fallback)
+            // named-queue/split configs use a `/*` glob — counts want the dir
+            .trim_end_matches("/*")
             .into()
     };
     (

@@ -23,6 +23,11 @@ pub fn scanning_enabled() -> bool {
 }
 
 /// Enable (`true`) or disable (`false`) MailScanner scanning.
+///
+/// Besides the legacy flag file, this toggles the real kill switch when the
+/// Exim wiring is present: the named-queue ACL fragment is renamed to
+/// `.disabled` (its include is `include_if_exists`, so mail immediately flows
+/// direct again) and Exim is rebuilt.
 pub fn set_scanning(enabled: bool) -> io::Result<()> {
     let path = exiscandisable_path();
     if enabled {
@@ -30,13 +35,39 @@ pub fn set_scanning(enabled: bool) -> io::Result<()> {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e),
-        }
+        }?;
     } else {
         if let Some(dir) = Path::new(&path).parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(&path, b"MailScanner scanning disabled by MSFE-NG\n")
+        std::fs::write(&path, b"MailScanner scanning disabled by MSFE-NG\n")?;
     }
+    toggle_wiring_fragment(enabled)
+}
+
+/// Rename the wiring ACL fragment live↔disabled to match the scanning state,
+/// rebuilding Exim when something actually changed. No-op when unwired.
+fn toggle_wiring_fragment(enabled: bool) -> io::Result<()> {
+    let frag = PathBuf::from(
+        std::env::var("MSFE_NG_MAILSCANNERQ")
+            .unwrap_or_else(|_| "/etc/msfe-ng/mailscannerq.conf".to_string()),
+    );
+    let disabled = frag.with_extension("conf.disabled");
+    let (from, to) = if enabled {
+        (&disabled, &frag)
+    } else {
+        (&frag, &disabled)
+    };
+    if !from.exists() {
+        return Ok(());
+    }
+    std::fs::rename(from, to)?;
+    if std::env::var("MSFE_NG_SKIP_EXIM_CMDS").is_err() {
+        for cmd in ["/scripts/buildeximconf", "/scripts/restartsrv_exim"] {
+            let _ = std::process::Command::new(cmd).status();
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

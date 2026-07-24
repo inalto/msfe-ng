@@ -8,6 +8,7 @@
 //! of the original `msbe.pl` / `msrules.pl` / `mschange.pl` and on MailWatch,
 //! but no original code is copied. See CONTRIBUTING.md.
 
+pub mod conffile;
 pub mod config;
 pub mod db;
 pub mod digest;

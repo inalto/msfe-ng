@@ -607,6 +607,34 @@ fn cmd_engine(sub: Option<&str>) -> ExitCode {
                 }
             }
         }
+        Some(a @ ("wire" | "unwire")) => {
+            let dry = std::env::args().any(|x| x == "--dry-run");
+            let cfg = Config::load(&config_path());
+            let res = if a == "wire" {
+                msfe_core::engine::wire(&cfg, dry)
+            } else {
+                msfe_core::engine::unwire(&cfg, dry)
+            };
+            match res {
+                Ok(r) => {
+                    for l in &r.actions {
+                        println!("{l}");
+                    }
+                    if r.dry_run {
+                        println!("dry-run: nothing was changed");
+                    } else if a == "wire" {
+                        println!("WIRED: incoming mail is now routed through MailScanner");
+                    } else {
+                        println!("UNWIRED: direct delivery restored (mail is not scanned)");
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("msfe-ng engine {a}: {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
         Some(a @ ("enable" | "disable")) => {
             let on = a == "enable";
             match service::set_engine_run(on) {
@@ -635,7 +663,7 @@ fn cmd_engine(sub: Option<&str>) -> ExitCode {
             }
         }
         _ => {
-            eprintln!("usage: msfe-ng engine <status|install|configure|enable|disable|lint>");
+            eprintln!("usage: msfe-ng engine <status|install|configure|enable|disable|lint|wire|unwire> [--dry-run]");
             ExitCode::from(2)
         }
     }
@@ -961,6 +989,7 @@ COMMANDS:
     rules lint          Check managed ruleset files for unparsable lines
     rules adopt [--from <dir>]   Borrow existing on-disk rules into the custom store
     engine <status|install|configure|enable|disable|lint>   Manage the MailScanner engine itself
+    engine <wire|unwire> [--dry-run]   Route mail through MailScanner via Exim (or undo)
     backup <file.tgz>   Back up config + policy to a tarball
     restore <file.tgz>  Restore config + policy from a tarball
     db-migrate          Apply pending SQL migrations

@@ -71,6 +71,34 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                 ),
             }
         }
+        ("POST", "/api/service/engine-wire") => {
+            let v = Json::parse(&req.body).unwrap_or(Json::Null);
+            let enable = !matches!(v.get("enable"), Some(Json::Bool(false)));
+            let dry = matches!(v.get("dry_run"), Some(Json::Bool(true)));
+            let result = if enable {
+                msfe_core::engine::wire(cfg, dry)
+            } else {
+                msfe_core::engine::unwire(cfg, dry)
+            };
+            match result {
+                Ok(r) => Response::json(
+                    200,
+                    &Json::Object(vec![
+                        ("ok".into(), Json::Bool(true)),
+                        ("dry_run".into(), Json::Bool(r.dry_run)),
+                        (
+                            "actions".into(),
+                            Json::Array(r.actions.iter().map(Json::str).collect()),
+                        ),
+                        ("wired".into(), Json::Bool(msfe_core::engine::is_wired(cfg))),
+                    ])
+                    .to_string(),
+                ),
+                Err(e) => Response::json(500, &format!("{{\"error\":\"wiring: {e}\"}}")),
+            }
+        }
+        ("GET", "/api/service/conf/parsed") => conf_parsed(req, cfg, config_file),
+        ("POST", "/api/service/conf/apply") => conf_apply(req, cfg, config_file),
         ("POST", "/api/service/engine-configure") => match msfe_core::engine::configure(cfg) {
             Ok(r) => {
                 let arr = |v: &[String]| Json::Array(v.iter().map(Json::str).collect());
@@ -394,6 +422,7 @@ fn service_status(cfg: &Config) -> Response {
                     .map(Json::Bool)
                     .unwrap_or(Json::Null),
             ),
+            ("wired".into(), Json::Bool(msfe_core::engine::is_wired(cfg))),
             ("active".into(), Json::Bool(st.active)),
             ("procs".into(), Json::Int(st.procs as i64)),
             ("scanning".into(), Json::Bool(mailflow::scanning_enabled())),
@@ -551,6 +580,85 @@ fn service_rules_view(req: &Request, cfg: &Config) -> Response {
     match service::read_rule(cfg, &name) {
         Ok(text) => Response::text(200, &text),
         Err(_) => Response::json(404, r#"{"error":"no such ruleset"}"#),
+    }
+}
+
+/// Parsed view of an editable conf file for the visual editor: ordered lines,
+/// comments preserved, entries addressable by key.
+fn conf_parsed(req: &Request, cfg: &Config, config_file: &Path) -> Response {
+    let which = req.query_param("which").unwrap_or_default();
+    let Some(path) = conf_target(&which, cfg, config_file) else {
+        return Response::json(400, r#"{"error":"which must be mailscanner|msfe"}"#);
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) => return Response::json(500, &format!("{{\"error\":\"cannot read: {e}\"}}")),
+    };
+    use msfe_core::conffile::{parse, ConfLine};
+    let lines: Vec<Json> = parse(&text)
+        .into_iter()
+        .map(|l| match l {
+            ConfLine::Blank => Json::Object(vec![("t".into(), Json::str("blank"))]),
+            ConfLine::Comment(c) => Json::Object(vec![
+                ("t".into(), Json::str("comment")),
+                ("text".into(), Json::str(c)),
+            ]),
+            ConfLine::Other(o) => Json::Object(vec![
+                ("t".into(), Json::str("other")),
+                ("text".into(), Json::str(o)),
+            ]),
+            ConfLine::Entry { key, value } => Json::Object(vec![
+                ("t".into(), Json::str("entry")),
+                ("key".into(), Json::str(key)),
+                ("value".into(), Json::str(value)),
+            ]),
+        })
+        .collect();
+    Response::json(
+        200,
+        &Json::Object(vec![
+            ("path".into(), Json::str(path.display().to_string())),
+            ("which".into(), Json::str(&which)),
+            ("lines".into(), Json::Array(lines)),
+        ])
+        .to_string(),
+    )
+}
+
+/// Apply key→value changes from the visual editor onto the original file text
+/// (comments and untouched lines survive byte-for-byte), with backup.
+fn conf_apply(req: &Request, cfg: &Config, config_file: &Path) -> Response {
+    let v = match Json::parse(&req.body) {
+        Ok(v) => v,
+        Err(e) => return Response::json(400, &format!("{{\"error\":\"bad json: {e}\"}}")),
+    };
+    let which = v.str_field("which");
+    let Some(path) = conf_target(&which, cfg, config_file) else {
+        return Response::json(400, r#"{"error":"which must be mailscanner|msfe"}"#);
+    };
+    let changes: Vec<(String, String)> = match v.get("changes") {
+        Some(Json::Object(f)) => f
+            .iter()
+            .filter_map(|(k, val)| val.as_str().map(|s| (k.clone(), s.to_string())))
+            .collect(),
+        _ => Vec::new(),
+    };
+    if changes.is_empty() {
+        return Response::json(200, r#"{"ok":true,"applied":0}"#);
+    }
+    let style = if which == "msfe" {
+        msfe_core::conffile::Style::Toml
+    } else {
+        msfe_core::conffile::Style::Plain
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) => return Response::json(500, &format!("{{\"error\":\"cannot read: {e}\"}}")),
+    };
+    let (new_text, applied) = msfe_core::conffile::apply(&text, &changes, style);
+    match service::save_conf(&path, &new_text) {
+        Ok(()) => Response::json(200, &format!("{{\"ok\":true,\"applied\":{applied}}}")),
+        Err(e) => Response::json(500, &format!("{{\"error\":\"cannot save: {e}\"}}")),
     }
 }
 

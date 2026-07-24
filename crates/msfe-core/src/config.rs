@@ -28,6 +28,9 @@ pub struct Config {
     pub quarantine_dir: String,
     /// Mail log file watched by the admin Service tab.
     pub maillog_path: String,
+    /// Exim ACL fragment that routes mail into the MailScanner named queue
+    /// (written by `engine wire`; its absence = direct delivery).
+    pub mailscannerq_conf: String,
 }
 
 impl Default for Config {
@@ -47,6 +50,7 @@ impl Default for Config {
             spambox_conf: "/etc/msfe-ng/spambox.exim".into(),
             quarantine_dir: "/var/spool/MailScanner/quarantine".into(),
             maillog_path: "/var/log/maillog".into(),
+            mailscannerq_conf: "/etc/msfe-ng/mailscannerq.conf".into(),
         }
     }
 }
@@ -80,6 +84,7 @@ impl Config {
                 "spambox_conf" => c.spambox_conf = v,
                 "quarantine_dir" => c.quarantine_dir = v,
                 "maillog_path" => c.maillog_path = v,
+                "mailscannerq_conf" => c.mailscannerq_conf = v,
                 _ => {} // unknown keys ignored
             }
         }

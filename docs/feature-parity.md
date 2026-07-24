@@ -26,7 +26,8 @@ listed only to name the *behavior* being matched — no code is reused.
 | Upgrade check button | on-demand `/api/service/update` (GitHub releases redirect via curl; no automatic phone-home) | M7 |
 | Rule handling (`msrules.pl` line splicing, tab-fragile) | `msfe-core::rulefile` structured parser (any whitespace) + canonical TAB serializer; custom rules store merged by sync; WHM Rules tab with stray-rule adoption and "borrow all current rules"; `msfe-ng rules lint` / `rules adopt [--from <legacy dir>]` | M8 |
 | MailScanner engine installation (`msinstall` download/deps part) | `packaging/engine-install.sh`: official MailScanner v5 rpm + sha256 verify + unattended ms-configure (cPanel-safe: no MTA, no ClamAV, no SELinux changes; service left disabled). `install.sh --with-engine` / `MSFE_NG_WITH_ENGINE=1` / `msfe-ng engine install` | M9 |
-| Exim split-spool wiring (`mschange.pl` queue-method switch) | **planned — `msfe-ng engine wire` (dry-run + backup + rollback)** | M9 |
+| Exim wiring (`mschange.pl` queue-method switch, "new method") | `msfe-ng engine wire|unwire [--dry-run]` + Service tab: named-queue ACL via cPanel `custom_begin_mail_pre` (survives buildeximconf), `include_if_exists` fragment = instant rollback; mailflow toggle renames the fragment (real kill switch) | M9 |
+| Conf file editing UI | Config tab visual editor: comment-preserving parser (`msfe-core::conffile`), per-key apply, filter; raw mode retained | M9 |
 | ConfigServer OutGoing Spam Monitor (osm) integration | **out of scope — separate proprietary ConfigServer product** | — |
 | Phone-home licensing (`servers`, base64 blobs) | **dropped — intentionally not reimplemented** | — |
 
