@@ -48,7 +48,27 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
     .into_iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect();
-    directives.push(("Incoming Queue Dir".into(), inc.display().to_string()));
+    // When the Exim wiring is active, the queue dirs belong to it: re-assert
+    // the named-queue values instead of resetting them to the unwired defaults
+    // (which would leave MailScanner watching an empty directory while the
+    // ACL queues mail where nothing scans it).
+    let wired = is_wired(cfg);
+    if wired {
+        let split = exim_split_spool();
+        let input = named_queue_base().join("input");
+        let incoming = if split {
+            format!("{}/*", input.display())
+        } else {
+            input.display().to_string()
+        };
+        directives.push(("Incoming Queue Dir".into(), incoming));
+        directives.push((
+            "Split Exim Spool".into(),
+            if split { "yes" } else { "no" }.into(),
+        ));
+    } else {
+        directives.push(("Incoming Queue Dir".into(), inc.display().to_string()));
+    }
     directives.push(("Outgoing Queue Dir".into(), out.display().to_string()));
     // Point MailScanner at clamd when its socket is present (the engine
     // installer sets clamd up; without a scanner "auto" finds nothing).
@@ -74,11 +94,14 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
         service::save_conf(conf_path, &text)?;
     }
 
-    // Incoming split-spool skeleton (ours to create and own). The outgoing dir
-    // is the MTA's real spool — never created or chowned here.
+    // Incoming split-spool skeleton (ours to create and own; pointless when the
+    // named-queue wiring owns the incoming path). The outgoing dir is the
+    // MTA's real spool — never created or chowned here.
     let mut created = Vec::new();
     let mut chown_failed = Vec::new();
-    if let Some(base) = inc.parent() {
+    if wired {
+        // named-queue dirs are managed by wire()
+    } else if let Some(base) = inc.parent() {
         for d in [base, &inc, &base.join("msglog"), &base.join("db")] {
             if !d.exists() {
                 std::fs::create_dir_all(d)?;
@@ -506,6 +529,20 @@ mod tests {
         wire(&cfg, false).unwrap();
         let hook = std::fs::read_to_string(base.join("hook")).unwrap();
         assert_eq!(hook.matches(".include_if_exists").count(), 1);
+
+        // regression: configure while wired must NOT revert the queue dirs —
+        // it re-asserts the named-queue values instead.
+        std::env::set_var("MSFE_NG_MS_WORK_DIR", base.join("work"));
+        let cfg_q = Config {
+            quarantine_dir: base.join("quarantine").display().to_string(),
+            ..cfg.clone()
+        };
+        configure(&cfg_q).unwrap();
+        let text = std::fs::read_to_string(&msconf).unwrap();
+        assert!(mailscanner::get_directive(&text, "Incoming Queue Dir")
+            .unwrap()
+            .ends_with("msqueue/input/*"));
+        std::env::remove_var("MSFE_NG_MS_WORK_DIR");
 
         // unwire restores direct delivery
         unwire(&cfg, false).unwrap();
