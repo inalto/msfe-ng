@@ -129,19 +129,33 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
         ));
         let age = service::oldest_queue_age(&inc);
         let stuck = age.map(|a| a > 600).unwrap_or(false);
+        // Engine down → the whole queue is blocked (fix the engine); engine up
+        // but a message is old → that one message is stuck (deal with it in
+        // the Queues tab), which shouldn't read as "the scanner is dead".
+        let (detail, fix): (String, &str) = match age {
+            Some(a) if stuck && st.active => (
+                format!(
+                    "a message has waited {} min while MailScanner is running — it is stuck on that message",
+                    a / 60
+                ),
+                "Queues tab → the message → Deliver now (reads the error) or Delete; MailScanner --lint",
+            ),
+            Some(a) if stuck => (
+                format!(
+                    "oldest message has waited {} min and MailScanner is not running",
+                    a / 60
+                ),
+                "start MailScanner (Service tab / msfe-ng service start)",
+            ),
+            Some(a) => (format!("oldest message {a}s old — flowing"), ""),
+            None => ("queue is empty".into(), ""),
+        };
         out.push(check(
             "scanning queue flowing",
             !stuck,
             Level::Fail,
-            match age {
-                Some(a) if stuck => format!(
-                    "oldest message has waited {} min — MailScanner is not processing",
-                    a / 60
-                ),
-                Some(a) => format!("oldest message {}s old", a),
-                None => "queue is empty".into(),
-            },
-            "check MailScanner is running; see the Queues tab and MailScanner --lint",
+            detail,
+            fix,
         ));
     }
     let scanning = mailflow::scanning_enabled();
