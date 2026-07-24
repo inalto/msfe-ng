@@ -230,10 +230,14 @@ const SETTINGS_FIELDS=[
   ['def_hspam','High-spam action',['deliver','delete','spambox','forward']],
   ['def_dvirus','Deliver disinfected',['yes','no']],
   ['store','Store copies (quarantine)',['yes','no']],
+  ['cleanmysql','Keep message log for (days)','number'],
+  ['bodydays','Keep message bodies for (days, 0 = forever)','number'],
 ];
 async function renderSettings(){
   const v=$('#view');v.innerHTML='';await ensurePolicy();
-  const card=el('div',{class:'card'},el('h2',{},'Global scanning policy'));
+  const card=el('div',{class:'card'},el('h2',{},'Global scanning policy'),
+    el('div',{class:'muted',style:'margin-bottom:.6rem;font-size:.8rem'},
+      'Retention: the message log keeps entries, scores and reports; message bodies are the quarantined copies that back the source/rendered view, release and Bayes training — they use the most disk, so they are usually kept for fewer days. Pruning runs nightly.'));
   const grid=el('div',{class:'grid2'});
   SETTINGS_FIELDS.forEach(([k,lbl,type])=>{
     const cur=policy.settings[k]??'';

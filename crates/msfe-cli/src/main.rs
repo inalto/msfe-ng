@@ -502,9 +502,23 @@ fn cmd_housekeeping() -> ExitCode {
     let cfg = Config::load(&config_path());
     let (settings, _, _) = sync::load_policy(&sync::policy_dir(&config_path()));
     let days = msfe_core::housekeeping::retention_days(&settings);
+    let body_days = msfe_core::housekeeping::body_retention_days(&settings);
     match msfe_core::housekeeping::prune(&cfg, days) {
         Ok(()) => {
             println!("housekeeping: pruned maillog/quarantine rows older than {days} days");
+            match msfe_core::housekeeping::prune_bodies(&cfg, body_days) {
+                Ok(r) if body_days == 0 => {
+                    println!("housekeeping: message bodies kept forever (bodydays=0)");
+                    let _ = r;
+                }
+                Ok(r) => println!(
+                    "housekeeping: removed {} message bodies older than {body_days} days ({} KB freed, {} checked)",
+                    r.removed,
+                    r.bytes / 1024,
+                    r.scanned
+                ),
+                Err(e) => eprintln!("msfe-ng housekeeping: body prune: {e}"),
+            }
             ExitCode::SUCCESS
         }
         Err(e) => {
