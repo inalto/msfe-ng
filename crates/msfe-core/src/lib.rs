@@ -12,6 +12,7 @@ pub mod conffile;
 pub mod config;
 pub mod db;
 pub mod digest;
+pub mod doctor;
 pub mod engine;
 pub mod housekeeping;
 pub mod json;

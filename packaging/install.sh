@@ -151,6 +151,29 @@ case "$panel" in
     none)        warn "no panel detected — skipping plugin registration (daemon still installed)" ;;
 esac
 
+# ---- converge opted-in state on upgrade --------------------------------------
+# Whatever the admin already enabled must keep working after an update: refresh
+# the logging plugin copy, re-assert the engine configuration (wiring-aware),
+# and keep the credentials file locked down.
+if [ -n "$PREV_VER" ]; then
+    if [ -f /etc/MailScanner/MailScanner.conf ]; then
+        if grep -q '^Always Looked Up Last = &MSFENGLogging' /etc/MailScanner/MailScanner.conf 2>/dev/null; then
+            MS_CUSTOM_DIR="$(grep -oP '(?<=^mailscanner_custom_dir = ")[^"]*' "$CONFDIR/config.toml" 2>/dev/null)"
+            install -m 0644 "$REPO/panel/mailscanner/MSFENG.pm" "${MS_CUSTOM_DIR:-/etc/MailScanner/custom}/MSFENG.pm" \
+                && info "refreshed the message-logging plugin"
+        fi
+        if grep -q '^MTA = exim' /etc/MailScanner/MailScanner.conf 2>/dev/null; then
+            "$BINDIR/msfe-ng" engine configure >/dev/null 2>&1 \
+                && info "re-asserted MailScanner engine configuration" \
+                || warn "engine configure failed — run: msfe-ng engine configure"
+        fi
+    fi
+    if grep -q '^db_pass = "..*"' "$CONFDIR/config.toml" 2>/dev/null; then
+        chown root:mail "$CONFDIR/config.toml" 2>/dev/null || true
+        chmod 640 "$CONFDIR/config.toml" 2>/dev/null || true
+    fi
+fi
+
 # ---- cron (schedule disabled until M2) ---------------------------------------
 install -m 0644 "$REPO/packaging/cron/msfe-ng" /etc/cron.d/msfe-ng
 
@@ -185,6 +208,14 @@ done
 
 echo
 ok "MSFE-NG installed."
+
+# ---- system check ------------------------------------------------------------
+# Notify about anything in the scanning chain that is not up; every line names
+# its fix. Never fails the install.
+echo
+info "system check (msfe-ng doctor)"
+"$BINDIR/msfe-ng" doctor || warn "the checks above reported problems — each line includes its fix"
+echo
 case "$panel" in
     cpanel)      info "Open WHM > Plugins > 'MSFE-NG MailScanner Front-End'." ;;
     directadmin) info "Open DirectAdmin > Admin/User level > MSFE-NG." ;;

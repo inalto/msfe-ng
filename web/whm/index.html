@@ -81,6 +81,7 @@
     <button data-tab="queues" aria-selected="false">Queues</button>
     <button data-tab="config" aria-selected="false">Config</button>
   </nav>
+  <div id="doctorbar" style="display:none;padding:.5rem 1.25rem;border-bottom:1px solid var(--line);font-size:.85rem"></div>
   <main id="view"></main>
   <div class="toast" id="toast"></div>
 
@@ -833,6 +834,27 @@ async function renderConfig(){
 
   loadConf();
 }
+
+// Doctor banner: shown on every tab whenever any chain link is unhealthy.
+async function refreshDoctor(){
+  const bar=$('#doctorbar');
+  const d=await api('/api/doctor');
+  const probs=(d.checks||[]).filter(c=>c.level!=='ok');
+  if(!probs.length){bar.style.display='none';return;}
+  const fails=probs.filter(c=>c.level==='fail').length;
+  bar.style.display='';bar.innerHTML='';
+  bar.style.background=fails?'color-mix(in srgb, var(--critical) 12%, var(--surface))':'color-mix(in srgb, var(--warning) 14%, var(--surface))';
+  const det=el('details',{},
+    el('summary',{style:'cursor:pointer;font-weight:600;color:'+(fails?'var(--critical)':'var(--ink)')},
+      (fails?`⚠ ${fails} problem(s) need attention`:`${probs.length} notice(s)`)+' — click for details and fixes'),
+    ...probs.map(c=>el('div',{style:'margin:.3rem 0 0 .5rem'},
+      el('span',{class:'badge',style:'background:'+(c.level==='fail'?'var(--critical)':'var(--warning)')},c.level),
+      ' ',el('b',{},c.name),' — ',c.detail,
+      c.fix?el('div',{class:'muted',style:'margin-left:2.6rem'},'fix: '+c.fix):'')));
+  bar.append(det);
+}
+refreshDoctor();
+setInterval(refreshDoctor,60000);
 
 renderDash();
 </script>

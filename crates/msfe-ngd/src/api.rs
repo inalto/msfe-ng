@@ -115,6 +115,34 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             }
             Err(e) => Response::json(500, &format!("{{\"error\":\"configure: {e}\"}}")),
         },
+        ("GET", "/api/doctor") => {
+            let checks = msfe_core::doctor::run(cfg, config_file);
+            let items: Vec<Json> = checks
+                .iter()
+                .map(|c| {
+                    Json::Object(vec![
+                        ("name".into(), Json::str(c.name)),
+                        ("level".into(), Json::str(c.level.as_str())),
+                        ("detail".into(), Json::str(&c.detail)),
+                        (
+                            "fix".into(),
+                            c.fix.clone().map(Json::Str).unwrap_or(Json::Null),
+                        ),
+                    ])
+                })
+                .collect();
+            Response::json(
+                200,
+                &Json::Object(vec![
+                    (
+                        "healthy".into(),
+                        Json::Bool(msfe_core::doctor::healthy(&checks)),
+                    ),
+                    ("checks".into(), Json::Array(items)),
+                ])
+                .to_string(),
+            )
+        }
         // ---- first-run setup (dashboard) ------------------------------------
         ("GET", "/api/setup") => {
             let s = msfe_core::setup::status(cfg);

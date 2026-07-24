@@ -54,6 +54,7 @@ fn main() -> ExitCode {
         "service" => cmd_service(args.get(1).map(String::as_str)),
         "rules" => cmd_rules(args.get(1).map(String::as_str)),
         "engine" => cmd_engine(args.get(1).map(String::as_str)),
+        "doctor" => cmd_doctor(),
         "backup" => cmd_backup(args.get(1).map(String::as_str)),
         "restore" => cmd_restore(args.get(1).map(String::as_str)),
         "help" | "--help" | "-h" => {
@@ -538,6 +539,32 @@ fn cmd_digest(flag: Option<&str>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// One pass over every link of the scanning chain; each problem names its fix.
+/// Exit code 1 when anything FAILS (warnings alone stay 0).
+fn cmd_doctor() -> ExitCode {
+    use msfe_core::doctor::{self, Level};
+    let cfg = Config::load(&config_path());
+    let checks = doctor::run(&cfg, &config_path());
+    for c in &checks {
+        let tag = match c.level {
+            Level::Ok => " OK ",
+            Level::Warn => "WARN",
+            Level::Fail => "FAIL",
+        };
+        println!("[{tag}] {} — {}", c.name, c.detail);
+        if let Some(fix) = &c.fix {
+            println!("       fix: {fix}");
+        }
+    }
+    if doctor::healthy(&checks) {
+        println!("doctor: no failures");
+        ExitCode::SUCCESS
+    } else {
+        println!("doctor: FAILURES found — see fixes above");
+        ExitCode::from(1)
+    }
+}
+
 /// MailScanner engine management: `status` reports whether the engine is
 /// installed and running; `install` runs the bundled unattended installer
 /// (official MailScanner v5 rpm + dependencies; never touches Exim).
@@ -986,6 +1013,7 @@ COMMANDS:
     housekeeping        Prune old mail-log rows (cleanmysql retention)
     exim <status|enable-scanning|disable-scanning>   Toggle MailScanner scanning
     service <status|start|stop|reload|restart|queue-fix>   MailScanner service & queues
+    doctor              Check every link of the scanning chain; names each fix
     rules lint          Check managed ruleset files for unparsable lines
     rules adopt [--from <dir>]   Borrow existing on-disk rules into the custom store
     engine <status|install|configure|enable|disable|lint>   Manage the MailScanner engine itself

@@ -450,6 +450,21 @@ pub fn queue_listing(named: Option<&str>) -> String {
     "(exim binary not found)".into()
 }
 
+/// Age in seconds of the oldest queued message (-H file) in a queue input dir.
+pub fn oldest_queue_age(dir: &Path) -> Option<u64> {
+    queue_files(dir)
+        .iter()
+        .filter(|p| p.to_string_lossy().ends_with("-H"))
+        .filter_map(|p| {
+            std::fs::metadata(p)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+        })
+        .map(|d| d.as_secs())
+        .max()
+}
+
 /// Valid Exim message id (old or new format): word chars and dashes only.
 pub fn valid_exim_id(id: &str) -> bool {
     (10..=30).contains(&id.len())

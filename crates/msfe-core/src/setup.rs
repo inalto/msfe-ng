@@ -153,7 +153,7 @@ fn secure_config(config_file: &Path, log: &mut Vec<String>) {
     ));
 }
 
-fn perl_module_ok(module: &str) -> bool {
+pub(crate) fn perl_module_ok(module: &str) -> bool {
     Command::new("perl")
         .arg(format!("-M{module}"))
         .arg("-e1")
