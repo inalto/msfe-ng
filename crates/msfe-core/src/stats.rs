@@ -127,6 +127,8 @@ pub struct MessageFilter {
     pub status: String,
     pub field: String,
     pub text: String,
+    /// Only messages from the last N days (0 = no limit).
+    pub days: u32,
     pub offset: u32,
     pub limit: u32,
 }
@@ -140,6 +142,9 @@ fn status_where(status: &str) -> &'static str {
         "wl" => "spamwhitelisted=1",
         "bl" => "spamblacklisted=1",
         "quarantined" => "quarantined=1",
+        // "blocked" = held rather than delivered, i.e. we still have a copy to
+        // release: quarantined spam/virus mail.
+        "blocked" => "quarantined=1",
         _ => "1=1",
     }
 }
@@ -157,6 +162,10 @@ pub fn messages(cfg: &Config, f: &MessageFilter) -> io::Result<Json> {
         };
         let like = sql_quote(&format!("%{}%", f.text));
         wheres.push(format!("{col} LIKE {like}"));
+    }
+    if f.days > 0 {
+        let days = f.days.clamp(1, 3650);
+        wheres.push(format!("msg_ts >= (NOW() - INTERVAL {days} DAY)"));
     }
     let where_sql = wheres.join(" AND ");
     let total: i64 = db::query(

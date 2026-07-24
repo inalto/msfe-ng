@@ -281,7 +281,7 @@ async function renderLists(){
 }
 
 // ---- Messages (MailControl-style: filters, search, pagination, detail) -------
-const msgF={status:'all',field:'from',text:'',offset:0,limit:50};
+const msgF={status:'all',field:'from',text:'',days:0,offset:0,limit:50};
 let msgTimer=null;
 // shared by the list and the single-message view (which is a top-level render)
 const fmtSize=b=>{b=+b||0;return b>1048576?(b/1048576).toFixed(1)+'MB':b>1024?Math.round(b/1024)+'KB':b+'B';};
@@ -300,7 +300,8 @@ async function renderMessages(){
   const card=el('div',{class:'card'},el('h2',{},'Messages'));v.append(card);
 
   // status filter buttons
-  const FILTERS=[['all','All','var(--accent)'],['clean','Clean','var(--good)'],['lowspam','Low Spam','var(--warning)'],
+  const FILTERS=[['all','All','var(--accent)'],['blocked','Blocked (releasable)','var(--critical)'],
+    ['clean','Clean','var(--good)'],['lowspam','Low Spam','var(--warning)'],
     ['highspam','High Spam','var(--serious)'],['infected','Infected','var(--critical)'],
     ['wl','Whitelist','var(--good)'],['bl','Blacklist','var(--ink2)'],['quarantined','Quarantined','var(--muted)']];
   const fbar=el('div',{class:'ctl',style:'flex-wrap:wrap'});
@@ -319,11 +320,44 @@ async function renderMessages(){
   function doSearch(){msgF.field=fsel.value;msgF.text=stxt.value.trim();msgF.offset=0;renderMessages();}
   const auto=el('input',{type:'checkbox',id:'msgauto',...(msgTimer?{checked:'checked'}:{})});
   auto.onchange=()=>{clearInterval(msgTimer);msgTimer=auto.checked?setInterval(loadList,10000):null;};
+  const dsel=el('select');
+  [[0,'any time'],[1,'last 24 hours'],[3,'last 3 days'],[7,'last 7 days'],[14,'last 14 days'],[30,'last 30 days'],[90,'last 90 days']]
+    .forEach(([val,lbl])=>dsel.append(el('option',{value:val,...(val===msgF.days?{selected:'selected'}:{})},lbl)));
+  dsel.onchange=()=>{msgF.days=+dsel.value;msgF.offset=0;loadList();};
   sbar.append(fsel,stxt,
     Object.assign(el('button',{class:'act plain'},'Search'),{onclick:doSearch}),
+    dsel,
     Object.assign(el('button',{class:'act plain'},'Refresh'),{onclick:()=>loadList()}),
     auto,el('label',{for:'msgauto',class:'muted'},'auto-refresh (10s)'));
   card.append(sbar);
+
+  // Bulk release / forward of blocked (quarantined) messages
+  const bulk=el('div',{class:'ctl',style:'display:none;flex-wrap:wrap'});
+  const bcount=el('span',{class:'muted'});
+  const bto=el('input',{placeholder:'forward to (empty = original recipients)',style:'width:20rem'});
+  async function bulkRelease(){
+    const ids=[...t.querySelectorAll('input.sel:checked')].map(c=>c.dataset.id);
+    if(!ids.length){toast('Select messages first');return;}
+    const to=bto.value.trim();
+    if(to&&!/^[^\s@]+@[^\s@]+$/.test(to)){toast('Enter a valid forward address');return;}
+    if(!confirm(`Release ${ids.length} message(s)`+(to?` (forward) to ${to}`:' to their original recipients')+'?\n\nThey are re-sent through Exim. Only messages whose body is still kept can be released.'))return;
+    const r=await api('/api/messages/release-bulk',{method:'POST',body:{ids,to}});
+    if(r&&typeof r.released==='number'){
+      toast(`${r.released}/${r.total} released`);
+      const failed=(r.results||[]).filter(x=>x.result!=='released');
+      if(failed.length)alert('Not released:\n\n'+failed.map(x=>`${x.id}: ${x.result}`).join('\n'));
+      loadList();
+    } else toast(r.error||'bulk release failed');
+  }
+  bulk.append(bcount,bto,
+    Object.assign(el('button',{class:'act'},'Release selected'),{onclick:bulkRelease}),
+    Object.assign(el('button',{class:'act plain'},'Clear selection'),{onclick:()=>{t.querySelectorAll('input.sel').forEach(c=>c.checked=false);updateBulk();}}));
+  card.append(bulk);
+  function updateBulk(){
+    const n=t.querySelectorAll('input.sel:checked').length;
+    bcount.textContent=`${n} selected`;
+    bulk.style.display=t.querySelector('input.sel')?'':'none';
+  }
 
   const info=el('div',{class:'muted',style:'margin:.3rem 0'});
   const t=el('table');
@@ -331,7 +365,7 @@ async function renderMessages(){
   card.append(info,t);v.append(detail);
 
   async function loadList(){
-    const q=`status=${msgF.status}&field=${msgF.field}&text=${encodeURIComponent(msgF.text)}&offset=${msgF.offset}&limit=${msgF.limit}`;
+    const q=`status=${msgF.status}&field=${msgF.field}&text=${encodeURIComponent(msgF.text)}&days=${msgF.days}&offset=${msgF.offset}&limit=${msgF.limit}`;
     const data=await api('/api/messages?'+q);
     t.innerHTML='';info.innerHTML='';
     if(!data||!data.available){t.append(el('tr',{},el('td',{class:'empty'},'No data yet — check the setup card on the Dashboard.')));return;}
@@ -344,9 +378,13 @@ async function renderMessages(){
     jump.onchange=()=>{msgF.offset=(Math.min(pages,Math.max(1,+jump.value))-1)*msgF.limit;loadList();};
     info.append(' jump: ',jump);
     if(!data.items||!data.items.length){t.append(el('tr',{},el('td',{class:'empty'},'No messages match.')));return;}
-    t.append(el('tr',{},...['Time','Score','From / To','Subject','Size','Status'].map(h=>el('th',{},h))));
+    t.append(el('tr',{},el('th',{}),...['Time','Score','From / To','Subject','Size','Status'].map(h=>el('th',{},h))));
     data.items.forEach(m=>{
+      // only quarantined messages still have a body to re-deliver
+      const pick=m.quarantined?el('input',{type:'checkbox',class:'sel','data-id':m.id,title:'select for release/forward'}):el('span',{});
+      if(m.quarantined)pick.onclick=e=>{e.stopPropagation();updateBulk();};
       const tr=el('tr',{style:'cursor:pointer'},
+        el('td',{},pick),
         el('td',{class:'muted',style:'white-space:nowrap'},m.ts),
         el('td',{class:'num'},m.score||'0'),
         el('td',{},el('div',{},m.from),el('div',{class:'muted'},m.to)),
@@ -356,6 +394,7 @@ async function renderMessages(){
       tr.onclick=()=>showDetail(m.id);
       t.append(tr);
     });
+    updateBulk();
   }
   function showDetail(id){ location.hash='#msg='+encodeURIComponent(id); renderMessageView(id); }
   loadList();

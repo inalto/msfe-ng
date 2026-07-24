@@ -44,6 +44,7 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                 status: req.query_param("status").unwrap_or_else(|| "all".into()),
                 field: req.query_param("field").unwrap_or_else(|| "from".into()),
                 text: req.query_param("text").unwrap_or_default(),
+                days: stats::clamp_int(req.query_param("days").as_deref(), 0, 0, 3650) as u32,
                 offset: stats::clamp_int(req.query_param("offset").as_deref(), 0, 0, 10_000_000)
                     as u32,
                 limit: stats::clamp_int(req.query_param("limit").as_deref(), 50, 1, 500) as u32,
@@ -145,6 +146,65 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                         "transcript".into(),
                         Json::Array(o.transcript.iter().map(Json::str).collect()),
                     ),
+                ])
+                .to_string(),
+            )
+        }
+        ("POST", "/api/messages/release-bulk") => {
+            let v = Json::parse(&req.body).unwrap_or(Json::Null);
+            let to = v.str_field("to");
+            let ids: Vec<String> = v
+                .get("ids")
+                .and_then(Json::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|j| j.as_str().map(str::to_string))
+                        .take(200)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if ids.is_empty() {
+                return Response::json(400, r#"{"error":"no messages selected"}"#);
+            }
+            if !to.is_empty() && !quarantine::valid_recipient(&to) {
+                return Response::json(400, r#"{"error":"invalid forward recipient"}"#);
+            }
+            let mut released = 0usize;
+            let mut results = Vec::new();
+            for id in &ids {
+                let outcome = if !service::valid_exim_id(id) {
+                    "invalid id".to_string()
+                } else {
+                    match quarantine::find_message(Path::new(&cfg.quarantine_dir), id) {
+                        None => "body no longer available (past the retention window)".into(),
+                        Some(p) => {
+                            let r = if to.is_empty() {
+                                quarantine::release(&p)
+                            } else {
+                                quarantine::release_to(&p, &to)
+                            };
+                            match r {
+                                Ok(()) => {
+                                    released += 1;
+                                    "released".into()
+                                }
+                                Err(e) => format!("failed: {e}"),
+                            }
+                        }
+                    }
+                };
+                results.push(Json::Object(vec![
+                    ("id".into(), Json::str(id)),
+                    ("result".into(), Json::str(outcome)),
+                ]));
+            }
+            Response::json(
+                200,
+                &Json::Object(vec![
+                    ("ok".into(), Json::Bool(released > 0)),
+                    ("released".into(), Json::Int(released as i64)),
+                    ("total".into(), Json::Int(ids.len() as i64)),
+                    ("results".into(), Json::Array(results)),
                 ])
                 .to_string(),
             )
