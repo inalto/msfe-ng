@@ -12,14 +12,28 @@ pub const LOGGING_VALUE: &str = "&MSFENGLogging";
 
 /// Set `key = value` in a MailScanner.conf body, idempotently.
 ///
-/// Replaces the first existing (possibly `#`-commented) `key = ...` line,
-/// preserving surrounding lines; if the key is absent, appends it. MailScanner
-/// directive keys contain spaces, so we match on the text before `=`.
+/// Live (uncommented) directives always win: the first live `key = ...` line
+/// is replaced and any later live duplicates are commented out (MailScanner
+/// takes the last occurrence, so a surviving duplicate would silently
+/// override the edit). Only when the key has no live line at all is the first
+/// `#`-commented mention taken over — stock MailScanner.conf is full of
+/// commented examples (`#Run As User = mail`) sitting *above* the real
+/// directive, and touching those instead of the live line leaves the stock
+/// value in effect. If the key appears nowhere, it is appended.
 pub fn set_directive(text: &str, key: &str, value: &str) -> String {
+    let live = |l: &str| !l.trim_start().starts_with('#') && line_key_matches(l, key);
+    let has_live = text.lines().any(live);
     let mut out = Vec::new();
     let mut done = false;
     for line in text.lines() {
-        if !done && line_key_matches(line, key) {
+        if live(line) {
+            if done {
+                out.push(format!("#{line}")); // duplicate would win — disable it
+            } else {
+                out.push(format!("{key} = {value}"));
+                done = true;
+            }
+        } else if !has_live && !done && line_key_matches(line, key) {
             out.push(format!("{key} = {value}"));
             done = true;
         } else {
@@ -101,6 +115,32 @@ mod tests {
         let once = set_directive(conf, LOGGING_DIRECTIVE, LOGGING_VALUE);
         let twice = set_directive(&once, LOGGING_DIRECTIVE, LOGGING_VALUE);
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn live_line_wins_over_commented_example() {
+        // stock MailScanner.conf has doc examples like "#	Incoming Queue Dir = …"
+        // far above the real directive — the live line must be the one edited.
+        let conf = "#\tIncoming Queue Dir = /var/spool/mqueue.in\nFoo = bar\nIncoming Queue Dir = /var/spool/mqueue.in\n";
+        let out = set_directive(
+            conf,
+            "Incoming Queue Dir",
+            "/var/spool/exim/mailscanner/input/*",
+        );
+        assert_eq!(
+            out,
+            "#\tIncoming Queue Dir = /var/spool/mqueue.in\nFoo = bar\nIncoming Queue Dir = /var/spool/exim/mailscanner/input/*\n"
+        );
+    }
+
+    #[test]
+    fn later_live_duplicates_are_disabled() {
+        // MailScanner takes the last occurrence, so duplicates must not survive.
+        let conf = "Run As User = old\nMiddle = x\nRun As User =\n";
+        let out = set_directive(conf, "Run As User", "mailnull");
+        assert_eq!(out, "Run As User = mailnull\nMiddle = x\n#Run As User =\n");
+        assert_eq!(set_directive(&out, "Run As User", "mailnull"), out); // idempotent
+        assert_eq!(get_directive(&out, "Run As User"), Some("mailnull"));
     }
 
     #[test]

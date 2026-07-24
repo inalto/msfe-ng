@@ -55,8 +55,11 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
     let mut text = original.clone();
     let mut set = Vec::new();
     for (k, v) in directives {
-        if mailscanner::get_directive(&text, k) != Some(v) {
-            text = mailscanner::set_directive(&text, k, v);
+        // Always normalize (set_directive is idempotent): comparing values via
+        // get_directive would miss live duplicates that override the edit.
+        let new_text = mailscanner::set_directive(&text, k, v);
+        if new_text != text {
+            text = new_text;
             set.push(format!("{k} = {v}"));
         }
     }
@@ -236,8 +239,10 @@ pub fn wire(cfg: &Config, dry: bool) -> io::Result<WireReport> {
     if let Ok(original) = std::fs::read_to_string(conf_path) {
         let mut text = original.clone();
         for (k, v) in directives {
-            if mailscanner::get_directive(&text, k) != Some(v) {
-                text = mailscanner::set_directive(&text, k, v);
+            // always normalize — repairs live duplicates too (last one wins)
+            let new_text = mailscanner::set_directive(&text, k, v);
+            if new_text != text {
+                text = new_text;
                 actions.push(format!(
                     "{} MailScanner.conf: {k} = {v}",
                     if dry { "would set" } else { "set" }

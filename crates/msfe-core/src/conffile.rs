@@ -80,10 +80,13 @@ fn render_value(v: &str, style: Style) -> String {
 }
 
 /// Apply `changes` (key → new value) to the original text, replacing only the
-/// first live line of each key and preserving every other byte. Keys not
-/// present in the file are appended at the end. Returns (new_text, applied).
+/// first live line of each key and preserving every other byte. Later live
+/// duplicates of a changed key are commented out (MailScanner-style files take
+/// the last occurrence, so a surviving duplicate would override the edit).
+/// Keys not present in the file are appended. Returns (new_text, applied).
 pub fn apply(text: &str, changes: &[(String, String)], style: Style) -> (String, usize) {
     let mut remaining: Vec<(String, String)> = changes.to_vec();
+    let mut applied_keys: Vec<String> = Vec::new();
     let mut out: Vec<String> = Vec::new();
     for raw in text.lines() {
         let line = raw.trim_end();
@@ -95,6 +98,10 @@ pub fn apply(text: &str, changes: &[(String, String)], style: Style) -> (String,
                 if let Some(pos) = remaining.iter().position(|(ck, _)| ck == key) {
                     let (ck, cv) = remaining.remove(pos);
                     out.push(format!("{ck} = {}", render_value(&cv, style)));
+                    applied_keys.push(ck);
+                    replaced = true;
+                } else if applied_keys.iter().any(|a| a == key) {
+                    out.push(format!("#{raw}")); // duplicate would win — disable
                     replaced = true;
                 }
             }
@@ -183,6 +190,16 @@ Run As User = mailnull
         assert!(t.contains("db_port = 3307"));
         assert!(t.contains("db_host = \"db.example\""));
         assert!(t.contains("# keep me"));
+    }
+
+    #[test]
+    fn duplicate_live_keys_are_disabled_on_apply() {
+        let (t, _) = apply(
+            "A = 1\nB = 2\nA = 3\n",
+            &[("A".into(), "9".into())],
+            Style::Plain,
+        );
+        assert_eq!(t, "A = 9\nB = 2\n#A = 3\n");
     }
 
     #[test]
