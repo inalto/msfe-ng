@@ -78,6 +78,7 @@
     <button data-tab="rules" aria-selected="false">Rules</button>
     <button data-tab="service" aria-selected="false">Service</button>
     <button data-tab="logs" aria-selected="false">Logs</button>
+    <button data-tab="queues" aria-selected="false">Queues</button>
     <button data-tab="config" aria-selected="false">Config</button>
   </nav>
   <main id="view"></main>
@@ -104,7 +105,7 @@ function toast(msg){const t=$('#toast');t.textContent=msg;t.classList.add('show'
 let policy=null; // {settings:{}, whitelist:[], blacklist:[]}
 let days=7;
 
-const tabs={dash:renderDash,settings:renderSettings,lists:renderLists,messages:renderMessages,rules:renderRules,service:renderService,logs:renderLogs,config:renderConfig};
+const tabs={dash:renderDash,settings:renderSettings,lists:renderLists,messages:renderMessages,rules:renderRules,service:renderService,logs:renderLogs,queues:renderQueues,config:renderConfig};
 let logTimer=null; // maillog auto-refresh; cleared on every tab switch
 let jrnTimer=null; // restart-console journal polling; cleared on every tab switch
 $('#tabs').addEventListener('click',e=>{
@@ -647,8 +648,12 @@ async function renderLogs(){
     Object.assign(el('button',{class:'act plain'},'Refresh'),{onclick:refreshLog}),
     auto,el('label',{for:'logauto',class:'muted'},'follow (5s)'));
   lc.append(pre);
+  refreshLog();
+}
 
-  // Queue contents (exim -bp): what is waiting where
+// ---- Queues (contents + per-message management) ------------------------------
+async function renderQueues(){
+  const v=$('#view');v.innerHTML='';
   const qc=el('div',{class:'card'},el('h2',{},'Queue contents'),
     el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},
       'Live listing (exim -bp): age, size, message id, sender and recipients. Messages sit in the MailScanner queue only for the seconds between arrival and scanning — anything older means MailScanner is not processing.'));
@@ -718,8 +723,7 @@ async function renderLogs(){
     qauto,el('label',{for:'qauto',class:'muted'},'follow (5s)'),
     qraw,el('label',{for:'qraw',class:'muted'},'raw'));
   qc.append(qtable,qpre,qdetail);
-
-  refreshLog();refreshQ();
+  refreshQ();
 }
 
 // ---- Config files & rulesets -------------------------------------------------
