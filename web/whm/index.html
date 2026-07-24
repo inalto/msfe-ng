@@ -352,35 +352,117 @@ async function renderMessages(){
       t.append(tr);
     });
   }
-  async function showDetail(id){
-    detail.style.display='';detail.innerHTML='';
-    detail.append(el('h2',{},'Message '+id),el('div',{class:'muted'},'Loading…'));
-    const d=await api('/api/messages/detail?id='+encodeURIComponent(id));
-    detail.innerHTML='';
-    if(!d||!d.available){detail.append(el('div',{class:'empty'},'No detail available.'));return;}
-    detail.append(el('h2',{},'Message '+d.id,' ',badgeFor(d)));
-    const dt=el('table');
-    const row=(k,val)=>{if(val!=null&&String(val).trim()!=='')dt.append(el('tr',{},el('th',{style:'width:11rem'},k),el('td',{},String(val))));};
-    row('Date',d.ts);row('From',d.from);row('To',d.to);row('Subject',d.subject);
-    row('Size',fmtSize(d.size));row('Client IP',d.clientip);row('Scanned on',d.hostname);
-    row('SpamAssassin score',d.score);row('Spam report',d.spamreport);row('RBL report',d.rblreport);row('Scanner report',d.report);
-    detail.append(dt);
-    if(d.headers)detail.append(el('h2',{style:'margin-top:.8rem'},'Headers'),el('pre',{class:'log',style:'max-height:16rem'},d.headers));
-    if(d.content)detail.append(el('h2',{style:'margin-top:.8rem'},'Content (first 10KB — quarantined copy)'),el('pre',{class:'log',style:'max-height:16rem'},d.content));
-    if(d.quarantined){
-      const rto=el('input',{placeholder:'recipient (empty = original To:)',style:'width:20rem'});
-      const rel=Object.assign(el('button',{class:'act'},'Release'),{onclick:async()=>{
-        if(!confirm('Release this message'+(rto.value?` to ${rto.value}`:' to its original recipients')+'?\n\nIt is re-sent through Exim.'))return;
-        rel.disabled=true;
-        const r=await api('/api/messages/release',{method:'POST',body:{id:d.id,to:rto.value.trim()}});
-        rel.disabled=false;
-        toast(r&&r.ok?'Released — the message is on its way':(r.error||'release failed'));
-      }});
-      detail.append(el('h2',{style:'margin-top:.8rem'},'Actions'),el('div',{class:'ctl'},rto,rel));
-    }
-    detail.scrollIntoView({behavior:'smooth'});
-  }
+  function showDetail(id){ location.hash='#msg='+encodeURIComponent(id); renderMessageView(id); }
   loadList();
+}
+
+// Full single-message view (its own screen).
+async function renderMessageView(id){
+  const v=$('#view');v.innerHTML='';
+  const back=Object.assign(el('button',{class:'act plain'},'← Back to messages'),{onclick:()=>{location.hash='';renderMessages();}});
+  v.append(el('div',{class:'ctl'},back));
+  const card=el('div',{class:'card'},el('h2',{},'Message '+id),el('div',{class:'muted'},'Loading…'));v.append(card);
+  const d=await api('/api/messages/detail?id='+encodeURIComponent(id));
+  card.innerHTML='';
+  if(!d||!d.available){card.append(el('div',{class:'empty'},'No detail available (the message may have aged out of the log).'));return;}
+
+  let lbl='Clean';
+  if(d.virus||d.nameinfected||d.otherinfected)lbl='Infected';
+  else if(d.ishighspam)lbl='High Scoring Spam';else if(d.isspam)lbl='Low Scoring Spam';
+  else if(d.wl)lbl='Whitelisted';else if(d.bl)lbl='Blacklisted';
+  card.append(el('h2',{},'Message '+d.id,' ',badgeFor(d)));
+
+  const dt=el('table');
+  const row=(k,val)=>{if(val!=null&&String(val).trim()!=='')dt.append(el('tr',{},el('th',{style:'width:12rem'},k),el('td',{style:'word-break:break-word'},String(val))));};
+  row('Scan status',lbl);row('Message ID',d.id);row('Date received',d.ts);
+  row('From',d.from);row('To',d.to);row('Subject',d.subject);
+  row('Size',fmtSize(d.size)+` (${d.size} bytes)`);row('Client IP',d.clientip);row('Scanned on',d.hostname);
+  row('Spam report',d.spamreport);row('RBL report',d.rblreport);
+  card.append(dt);
+
+  if((d.components||[]).length){
+    const sc=el('div',{class:'card'},el('h2',{},'Spam report (components)'));v.append(sc);
+    const ct=el('table');ct.append(el('tr',{},...['Rule','Score','Description'].map(h=>el('th',{},h))));
+    (d.components||[]).forEach(c=>ct.append(el('tr',{},
+      el('td',{style:'font-family:ui-monospace,monospace'},c.rule),
+      el('td',{class:'num',style:'color:'+(+c.score>0?'var(--serious)':'var(--good)')},c.score),
+      el('td',{class:'muted'},c.desc||''))));
+    ct.append(el('tr',{},el('th',{},'SpamAssassin score'),el('td',{class:'num'},d.score),el('td',{})));
+    sc.append(ct);
+  }
+
+  if((d.header_ips||[]).length){
+    const hc=el('div',{class:'card'},el('h2',{},'Header IPs'),
+      el('div',{class:'muted',style:'font-size:.8rem;margin-bottom:.4rem'},'Only the last IP outside your network in the Received: chain can be trusted — the others can be spoofed.'));
+    v.append(hc);
+    const ht=el('table');ht.append(el('tr',{},...['IP','HELO / Hostname'].map(h=>el('th',{},h))));
+    (d.header_ips||[]).forEach(h=>ht.append(el('tr',{},el('td',{style:'font-family:ui-monospace,monospace'},h.ip),el('td',{},h.host||''))));
+    hc.append(ht);
+  }
+
+  if(d.headers){const hc=el('div',{class:'card'},el('h2',{},'Headers'),el('pre',{class:'log',style:'max-height:20rem'},d.headers));v.append(hc);}
+
+  // Source + rendered views (quarantined only — the body isn't stored otherwise)
+  const vc=el('div',{class:'card'},el('h2',{},'Message content'));v.append(vc);
+  if(d.quarantined){
+    vc.append(el('div',{class:'ctl'},
+      Object.assign(el('button',{class:'act plain'},'View source'),{onclick:()=>openRaw(d.id,'source')}),
+      Object.assign(el('button',{class:'act plain'},'View rendered'),{onclick:()=>openRaw(d.id,'rendered')})));
+    if(d.content)vc.append(el('div',{class:'muted',style:'font-size:.8rem;margin:.4rem 0'},'Preview (first 10KB):'),el('pre',{class:'log',style:'max-height:18rem'},d.content));
+  } else {
+    vc.append(el('div',{class:'muted'},'Full content and rendering are available only for quarantined messages (the body of a delivered message is not stored).'));
+  }
+
+  // Actions: SpamAssassin Bayes training + release (quarantined only)
+  if(d.quarantined){
+    const ac=el('div',{class:'card'},el('h2',{},'Actions'),
+      el('div',{class:'muted',style:'font-size:.8rem;margin-bottom:.5rem'},'Bayes training uses the quarantined copy. Release re-sends the message through Exim.'));
+    v.append(ac);
+    const out=el('pre',{class:'log',style:'display:none;max-height:12rem'});
+    async function learn(action,warn){
+      if(warn&&!confirm(warn))return;
+      out.style.display='';out.textContent='▶ '+action+'…';
+      const r=await api('/api/messages/learn',{method:'POST',body:{id:d.id,action}});
+      out.textContent=(r.transcript||[r.error||'no response']).join('\n');
+      toast(r&&r.ok?action+': done':(action+' failed — see output'));
+    }
+    ac.append(el('div',{class:'ctl',style:'flex-wrap:wrap'},
+      Object.assign(el('button',{class:'act plain'},'Learn as ham'),{onclick:()=>learn('ham')}),
+      Object.assign(el('button',{class:'act plain'},'Learn as spam'),{onclick:()=>learn('spam')}),
+      Object.assign(el('button',{class:'act plain'},'Learn as spam & report'),{onclick:()=>learn('report','Learn as spam AND report to the collaborative networks (Razor/Pyzor/DCC)?')}),
+      Object.assign(el('button',{class:'act plain'},'Forget'),{onclick:()=>learn('forget','Make SpamAssassin forget this message from its Bayes database?')})));
+    const rto=el('input',{placeholder:'recipient (empty = original To:)',style:'width:22rem'});
+    ac.append(el('div',{class:'ctl'},rto,
+      Object.assign(el('button',{class:'act'},'Release (resend)'),{onclick:()=>release(d.id,'',rto)}),
+      Object.assign(el('button',{class:'act'},'Release (forward)'),{onclick:()=>release(d.id,rto.value.trim(),rto)})));
+    ac.append(out);
+  }
+  window.scrollTo(0,0);
+
+  async function release(id,to,inp){
+    if(to&&!/^[^\s@]+@[^\s@]+$/.test(to)){toast('Enter a valid recipient to forward');return;}
+    if(!confirm('Release this message'+(to?` (forward) to ${to}`:' (resend) to its original recipients')+'?'))return;
+    const r=await api('/api/messages/release',{method:'POST',body:{id,to}});
+    toast(r&&r.ok?'Released — on its way':(r.error||'release failed'));
+  }
+}
+
+// Open a quarantined message's raw source or rendered HTML in a new tab.
+async function openRaw(id,mode){
+  const raw=await api('/api/messages/raw?id='+encodeURIComponent(id),{raw:true});
+  const w=window.open('','_blank');
+  if(!w){toast('Pop-up blocked — allow pop-ups to view');return;}
+  if(mode==='source'){
+    w.document.write('<pre style="white-space:pre-wrap;word-break:break-word;font:13px ui-monospace,monospace;padding:1rem">'+
+      raw.replace(/[&<>]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]))+'</pre>');
+  } else {
+    // split headers/body; render the body sandboxed (no scripts, no network by CSP)
+    const i=raw.search(/\r?\n\r?\n/);
+    const body=i>=0?raw.slice(i).replace(/^\s+/,''):raw;
+    w.document.write('<!doctype html><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; img-src data:">'+
+      '<div style="font:13px system-ui;padding:.5rem;background:#fffbe6;border-bottom:1px solid #e5c07b">Rendered preview — scripts and remote content are blocked for safety.</div>'+body);
+  }
+  w.document.close();
 }
 
 // ---- Rules (structured editor, no raw tabs/spaces) ---------------------------
@@ -943,6 +1025,12 @@ async function refreshDoctor(){
 refreshDoctor();
 setInterval(refreshDoctor,60000);
 
-renderDash();
+// deep link: #msg=<id> opens the full message view directly
+if(location.hash.startsWith('#msg=')){
+  document.querySelectorAll('#tabs button').forEach(x=>x.setAttribute('aria-selected',x.dataset.tab==='messages'));
+  renderMessageView(decodeURIComponent(location.hash.slice(5)));
+} else {
+  renderDash();
+}
 </script>
 </body></html>

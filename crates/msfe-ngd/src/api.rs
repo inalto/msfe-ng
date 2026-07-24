@@ -56,11 +56,44 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                 Ok(d) => d,
                 Err(_) => return Response::json(200, r#"{"available":false}"#),
             };
-            // quarantined content preview (first 10 KB), when the file exists
             if let Json::Object(fields) = &mut detail {
-                let quarantined = fields
+                let get = |k: &str| {
+                    fields
+                        .iter()
+                        .find(|(kk, _)| kk == k)
+                        .and_then(|(_, v)| v.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                };
+                // spam-report component rows (rule / score / description)
+                let report = format!("{} {}", get("spamreport"), get("report"));
+                let comps: Vec<Json> = msfe_core::sa::parse_report(&report)
                     .iter()
-                    .any(|(k, v)| k == "quarantined" && matches!(v, Json::Int(1)));
+                    .map(|c| {
+                        Json::Object(vec![
+                            ("rule".into(), Json::str(&c.rule)),
+                            ("score".into(), Json::Num(format!("{:.2}", c.score))),
+                            ("desc".into(), c.desc.map(Json::str).unwrap_or(Json::Null)),
+                        ])
+                    })
+                    .collect();
+                // header IP hops (no geolocation)
+                let ips: Vec<Json> = msfe_core::sa::header_ips(&get("headers"))
+                    .iter()
+                    .map(|h| {
+                        Json::Object(vec![
+                            ("ip".into(), Json::str(&h.ip)),
+                            ("host".into(), Json::str(&h.host)),
+                        ])
+                    })
+                    .collect();
+                let quarantined = get("quarantined") == "1"
+                    || fields
+                        .iter()
+                        .any(|(k, v)| k == "quarantined" && matches!(v, Json::Int(1)));
+                fields.push(("components".into(), Json::Array(comps)));
+                fields.push(("header_ips".into(), Json::Array(ips)));
+                // quarantined content preview (first 10 KB)
                 if quarantined {
                     if let Some(p) = quarantine::find_message(Path::new(&cfg.quarantine_dir), &id) {
                         if let Ok(bytes) = quarantine::read_message(&p) {
@@ -72,6 +105,49 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                 }
             }
             Response::json(200, &detail.to_string())
+        }
+        ("GET", "/api/messages/raw") => {
+            let id = req.query_param("id").unwrap_or_default();
+            if !service::valid_exim_id(&id) {
+                return Response::text(200, "bad message id");
+            }
+            match quarantine::find_message(Path::new(&cfg.quarantine_dir), &id)
+                .and_then(|p| quarantine::read_message(&p).ok())
+            {
+                Some(bytes) => Response::text(200, &String::from_utf8_lossy(&bytes)),
+                None => Response::text(
+                    200,
+                    "(full source is only available for quarantined messages)",
+                ),
+            }
+        }
+        ("POST", "/api/messages/learn") => {
+            let v = Json::parse(&req.body).unwrap_or(Json::Null);
+            let id = v.str_field("id");
+            let action = v.str_field("action");
+            if !service::valid_exim_id(&id) {
+                return Response::json(400, r#"{"error":"bad message id"}"#);
+            }
+            let Some(bytes) = quarantine::find_message(Path::new(&cfg.quarantine_dir), &id)
+                .and_then(|p| quarantine::read_message(&p).ok())
+            else {
+                return Response::json(
+                    404,
+                    r#"{"error":"Bayes training needs the message body, which is only kept for quarantined messages"}"#,
+                );
+            };
+            let o = msfe_core::sa::learn(&bytes, &action);
+            Response::json(
+                200,
+                &Json::Object(vec![
+                    ("ok".into(), Json::Bool(o.ok)),
+                    (
+                        "transcript".into(),
+                        Json::Array(o.transcript.iter().map(Json::str).collect()),
+                    ),
+                ])
+                .to_string(),
+            )
         }
         ("POST", "/api/messages/release") => {
             let v = Json::parse(&req.body).unwrap_or(Json::Null);
