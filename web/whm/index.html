@@ -279,6 +279,17 @@ async function renderLists(){
 // ---- Messages (MailControl-style: filters, search, pagination, detail) -------
 const msgF={status:'all',field:'from',text:'',offset:0,limit:50};
 let msgTimer=null;
+// shared by the list and the single-message view (which is a top-level render)
+const fmtSize=b=>{b=+b||0;return b>1048576?(b/1048576).toFixed(1)+'MB':b>1024?Math.round(b/1024)+'KB':b+'B';};
+function badgeFor(m){
+  let col='var(--good)',lbl='clean';
+  if(m.virus)      {col='var(--critical)';lbl='infected';}
+  else if(m.ishighspam){col='var(--serious)';lbl='high spam';}
+  else if(m.isspam){col='var(--warning)';lbl='spam';}
+  else if(m.wl)    {col='var(--good)';lbl='whitelist';}
+  else if(m.bl)    {col='var(--ink2)';lbl='blacklist';}
+  return el('span',{class:'badge',style:'background:'+col},lbl+(m.quarantined?' 🔒':''));
+}
 async function renderMessages(){
   const v=$('#view');v.innerHTML='';
   clearInterval(msgTimer);msgTimer=null;
@@ -315,16 +326,6 @@ async function renderMessages(){
   const detail=el('div',{class:'card',style:'display:none'});
   card.append(info,t);v.append(detail);
 
-  const fmtSize=b=>{b=+b||0;return b>1048576?(b/1048576).toFixed(1)+'MB':b>1024?Math.round(b/1024)+'KB':b+'B';};
-  function badgeFor(m){
-    let col='var(--good)',lbl='clean';
-    if(m.virus)      {col='var(--critical)';lbl='infected';}
-    else if(m.ishighspam){col='var(--serious)';lbl='high spam';}
-    else if(m.isspam){col='var(--warning)';lbl='spam';}
-    else if(m.wl)    {col='var(--good)';lbl='whitelist';}
-    else if(m.bl)    {col='var(--ink2)';lbl='blacklist';}
-    return el('span',{class:'badge',style:'background:'+col},lbl+(m.quarantined?' 🔒':''));
-  }
   async function loadList(){
     const q=`status=${msgF.status}&field=${msgF.field}&text=${encodeURIComponent(msgF.text)}&offset=${msgF.offset}&limit=${msgF.limit}`;
     const data=await api('/api/messages?'+q);
