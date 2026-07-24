@@ -10,6 +10,7 @@
 
 pub mod conffile;
 pub mod config;
+pub mod csf;
 pub mod db;
 pub mod digest;
 pub mod doctor;

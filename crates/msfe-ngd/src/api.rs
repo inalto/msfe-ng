@@ -107,6 +107,65 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             }
             Response::json(200, &detail.to_string())
         }
+        // ---- client IP: intel + firewall (csf) ------------------------------
+        ("GET", "/api/ip/info") => {
+            let ip = req.query_param("ip").unwrap_or_default();
+            let days = stats::clamp_int(req.query_param("days").as_deref(), 30, 0, 3650) as u32;
+            let activity = stats::ip_activity(cfg, &ip, days)
+                .unwrap_or(Json::Object(vec![("available".into(), Json::Bool(false))]));
+            Response::json(
+                200,
+                &Json::Object(vec![
+                    ("ip".into(), Json::str(&ip)),
+                    ("rdns".into(), Json::str(msfe_core::csf::reverse_dns(&ip))),
+                    ("activity".into(), activity),
+                    (
+                        "csf_available".into(),
+                        Json::Bool(msfe_core::csf::available()),
+                    ),
+                    ("csf".into(), Json::str(msfe_core::csf::lookup(&ip))),
+                ])
+                .to_string(),
+            )
+        }
+        ("POST", "/api/ip/ban") => {
+            let v = Json::parse(&req.body).unwrap_or(Json::Null);
+            let target = v.str_field("target");
+            let comment = v.str_field("comment");
+            let force = matches!(v.get("force"), Some(Json::Bool(true)));
+            let restart = matches!(v.get("restart"), Some(Json::Bool(true)));
+            let hours = match v.get("hours") {
+                Some(Json::Int(h)) if *h > 0 => Some(*h as u32),
+                _ => None,
+            };
+            let o = msfe_core::csf::ban(&target, &comment, hours, restart, force);
+            Response::json(
+                200,
+                &Json::Object(vec![
+                    ("ok".into(), Json::Bool(o.ok)),
+                    (
+                        "transcript".into(),
+                        Json::Array(o.transcript.iter().map(Json::str).collect()),
+                    ),
+                ])
+                .to_string(),
+            )
+        }
+        ("POST", "/api/ip/unban") => {
+            let v = Json::parse(&req.body).unwrap_or(Json::Null);
+            let o = msfe_core::csf::unban(&v.str_field("target"));
+            Response::json(
+                200,
+                &Json::Object(vec![
+                    ("ok".into(), Json::Bool(o.ok)),
+                    (
+                        "transcript".into(),
+                        Json::Array(o.transcript.iter().map(Json::str).collect()),
+                    ),
+                ])
+                .to_string(),
+            )
+        }
         ("GET", "/api/messages/raw") => {
             let id = req.query_param("id").unwrap_or_default();
             if !service::valid_exim_id(&id) {

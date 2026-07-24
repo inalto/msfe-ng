@@ -215,6 +215,71 @@ pub fn messages(cfg: &Config, f: &MessageFilter) -> io::Result<Json> {
     ]))
 }
 
+/// What this server has seen from one client IP: volume, verdict mix, when it
+/// first and last appeared, and its most frequent senders/recipients.
+pub fn ip_activity(cfg: &Config, ip: &str, days: u32) -> io::Result<Json> {
+    let q = sql_quote(ip);
+    let window = if days > 0 {
+        format!(
+            " AND msg_ts >= (NOW() - INTERVAL {} DAY)",
+            days.clamp(1, 3650)
+        )
+    } else {
+        String::new()
+    };
+    let sql = format!(
+        "SELECT COUNT(*), \
+                COALESCE(SUM(isspam=1),0), COALESCE(SUM(ishighspam=1),0), \
+                COALESCE(SUM(virusinfected=1 OR nameinfected=1 OR otherinfected=1),0), \
+                COALESCE(SUM(quarantined=1),0), \
+                COALESCE(MIN(msg_ts),''), COALESCE(MAX(msg_ts),''), \
+                COALESCE(ROUND(AVG(sascore),2),0) \
+         FROM maillog WHERE clientip = {q}{window}"
+    );
+    let rows = db::query(cfg, &sql)?;
+    let r = rows.first().cloned().unwrap_or_default();
+    let g = |i: usize| r.get(i).cloned().unwrap_or_default();
+    let top = |col: &str| -> Json {
+        let sql = format!(
+            "SELECT {col}, COUNT(*) FROM maillog WHERE clientip = {q}{window} AND {col} <> '' \
+             GROUP BY {col} ORDER BY COUNT(*) DESC LIMIT 5"
+        );
+        Json::Array(
+            db::query(cfg, &sql)
+                .unwrap_or_default()
+                .iter()
+                .map(|row| {
+                    Json::Object(vec![
+                        (
+                            "key".into(),
+                            Json::str(row.first().cloned().unwrap_or_default()),
+                        ),
+                        (
+                            "count".into(),
+                            count(row.get(1).map(String::as_str).unwrap_or("0")),
+                        ),
+                    ])
+                })
+                .collect(),
+        )
+    };
+    Ok(Json::Object(vec![
+        ("available".into(), Json::Bool(true)),
+        ("ip".into(), Json::str(ip)),
+        ("days".into(), Json::Int(days as i64)),
+        ("total".into(), count(&g(0))),
+        ("spam".into(), count(&g(1))),
+        ("highspam".into(), count(&g(2))),
+        ("infected".into(), count(&g(3))),
+        ("quarantined".into(), count(&g(4))),
+        ("first_seen".into(), Json::str(g(5))),
+        ("last_seen".into(), Json::str(g(6))),
+        ("avg_score".into(), Json::str(g(7))),
+        ("top_senders".into(), top("from_address")),
+        ("top_recipients".into(), top("to_address")),
+    ]))
+}
+
 /// Everything recorded about one message, for the detail view.
 pub fn message_detail(cfg: &Config, message_id: &str) -> io::Result<Json> {
     if !crate::service::valid_exim_id(message_id) {

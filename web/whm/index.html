@@ -60,6 +60,11 @@
   button.act.plain{background:var(--surface);color:var(--ink);border:1px solid var(--line);font-weight:500}
   .statline{display:flex;gap:1.2rem;flex-wrap:wrap;align-items:center;margin-bottom:.8rem}
   .statline .dot{width:9px;height:9px;border-radius:50%;display:inline-block;margin-right:.35rem}
+  .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.45);display:grid;place-items:center;z-index:50;padding:1rem}
+  .modal{background:var(--surface);border:1px solid var(--line);border-radius:12px;max-width:52rem;width:100%;max-height:88vh;overflow:auto;padding:1.1rem 1.25rem;box-shadow:0 10px 40px rgba(0,0,0,.3)}
+  .modal h2{margin-top:0}
+  .modal .close{float:right;cursor:pointer;border:0;background:none;font-size:1.3rem;color:var(--ink2);line-height:1}
+  a.iplink{color:var(--accent);cursor:pointer;text-decoration:underline}
   .toast{position:fixed;bottom:1rem;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--page);padding:.5rem 1rem;border-radius:8px;opacity:0;transition:opacity .2s;pointer-events:none}
   .toast.show{opacity:1}
   .muted{color:var(--muted)}
@@ -102,6 +107,99 @@ const $=(s,r=document)=>r.querySelector(s);
 const el=(t,a={},...c)=>{const n=document.createElement(t);for(const k in a){if(k==='html')n.innerHTML=a[k];else n.setAttribute(k,a[k]);}c.flat().forEach(x=>n.append(x));return n;};
 const esc=s=>String(s??'').replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));
 function toast(msg){const t=$('#toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2200);}
+
+// ---- modal -------------------------------------------------------------------
+function modal(title){
+  const body=el('div',{});
+  const box=el('div',{class:'modal'},
+    Object.assign(el('button',{class:'close',title:'Close'},'✕'),{onclick:close}),
+    el('h2',{},title),body);
+  const bg=el('div',{class:'modal-bg'},box);
+  bg.onclick=e=>{if(e.target===bg)close();};
+  function close(){bg.remove();document.removeEventListener('keydown',esc);}
+  function esc(e){if(e.key==='Escape')close();}
+  document.addEventListener('keydown',esc);
+  document.body.append(bg);
+  return {body,close};
+}
+
+// ---- client IP: activity, reverse DNS, csf status and blocking ---------------
+function ipLink(ip){
+  if(!ip)return el('span',{});
+  return Object.assign(el('a',{class:'iplink',title:'IP details, history and firewall actions'},ip),{onclick:()=>showIp(ip)});
+}
+async function showIp(ip){
+  const m=modal('Client IP '+ip);
+  m.body.append(el('div',{class:'muted'},'Loading…'));
+  const d=await api('/api/ip/info?ip='+encodeURIComponent(ip)+'&days=30');
+  m.body.innerHTML='';
+  const a=d.activity||{};
+  const t=el('table');
+  const row=(k,v)=>{if(v!=null&&String(v).trim()!=='')t.append(el('tr',{},el('th',{style:'width:12rem'},k),el('td',{},String(v))));};
+  row('IP address',d.ip);row('Reverse DNS',d.rdns||'(none)');
+  if(a.available){
+    row('Messages (last 30 days)',a.total);
+    row('Spam / high spam',`${a.spam} / ${a.highspam}`);
+    row('Infected',a.infected);row('Quarantined',a.quarantined);
+    row('Average spam score',a.avg_score);
+    row('First seen',a.first_seen);row('Last seen',a.last_seen);
+  }
+  m.body.append(t);
+  if(a.available&&(a.top_senders||[]).length){
+    m.body.append(el('h2',{style:'font-size:.9rem;margin:.8rem 0 .3rem'},'Top senders from this IP'));
+    const st=el('table');(a.top_senders||[]).forEach(s=>st.append(el('tr',{},el('td',{},s.key),el('td',{class:'num'},s.count))));
+    m.body.append(st);
+  }
+  if(a.available&&(a.top_recipients||[]).length){
+    m.body.append(el('h2',{style:'font-size:.9rem;margin:.8rem 0 .3rem'},'Top recipients'));
+    const rt=el('table');(a.top_recipients||[]).forEach(s=>rt.append(el('tr',{},el('td',{},s.key),el('td',{class:'num'},s.count))));
+    m.body.append(rt);
+  }
+
+  m.body.append(el('h2',{style:'font-size:.9rem;margin:.9rem 0 .3rem'},'Firewall (ConfigServer csf)'));
+  const out=el('pre',{class:'log',style:'max-height:12rem'},d.csf||'');
+  m.body.append(out);
+  if(!d.csf_available)return;
+
+  const msel=el('select');
+  const base=ip.includes(':')?null:ip.split('.');
+  [['32','this address only'],['24','/24 network ('+(base?base.slice(0,3).join('.')+'.0/24':'…')+')'],
+   ['16','/16 network ('+(base?base.slice(0,2).join('.')+'.0.0/16':'…')+')']]
+    .forEach(([v,l])=>msel.append(el('option',{value:v},l)));
+  const hsel=el('select');
+  [['0','permanent'],['1','1 hour'],['24','24 hours'],['168','7 days']].forEach(([v,l])=>hsel.append(el('option',{value:v},l)));
+  const cin=el('input',{placeholder:'reason (goes into csf.deny)',style:'flex:1;min-width:14rem'});
+  const rchk=el('input',{type:'checkbox',id:'csfrestart'});
+  function target(){
+    const m=msel.value;
+    if(m==='32'||ip.includes(':'))return ip;
+    const p=ip.split('.');
+    return m==='24'?`${p[0]}.${p[1]}.${p[2]}.0/24`:`${p[0]}.${p[1]}.0.0/16`;
+  }
+  async function doBan(force){
+    const tgt=target();
+    if(!confirm(`Block ${tgt} in the firewall?\n\n`+
+      (tgt.endsWith('/16')?'⚠ A /16 covers 65,536 addresses — legitimate senders may be cut off.\n\n':'')+
+      (hsel.value==='0'?'This is a permanent entry in csf.deny.':`Temporary ban for ${hsel.value} hour(s).`)))return;
+    out.textContent='▶ blocking '+tgt+'…';
+    const r=await api('/api/ip/ban',{method:'POST',body:{target:tgt,comment:cin.value,hours:+hsel.value,restart:rchk.checked,force}});
+    out.textContent=(r.transcript||[r.error||'no response']).join('\n');
+    if(!r.ok&&(r.transcript||[]).some(l=>/force to confirm/.test(l))){
+      if(confirm('This network is wider than /24. Block it anyway?'))return doBan(true);
+    }
+    toast(r&&r.ok?'Blocked '+tgt:'Block failed — see output');
+  }
+  const ban=Object.assign(el('button',{class:'act danger'},'Block in firewall'),{onclick:()=>doBan(false)});
+  const unban=Object.assign(el('button',{class:'act plain'},'Unblock'),{onclick:async()=>{
+    const tgt=target();
+    if(!confirm('Remove '+tgt+' from the csf deny lists?'))return;
+    const r=await api('/api/ip/unban',{method:'POST',body:{target:tgt}});
+    out.textContent=(r.transcript||[r.error||'no response']).join('\n');
+    toast(r&&r.ok?'Unblocked':'Nothing removed');
+  }});
+  m.body.append(el('div',{class:'ctl',style:'flex-wrap:wrap;margin-top:.5rem'},msel,hsel,cin),
+    el('div',{class:'ctl'},ban,unban,rchk,el('label',{for:'csfrestart',class:'muted'},'restart csf after the change')));
+}
 
 let policy=null; // {settings:{}, whitelist:[], blacklist:[]}
 let days=7;
@@ -420,7 +518,10 @@ async function renderMessageView(id){
   const row=(k,val)=>{if(val!=null&&String(val).trim()!=='')dt.append(el('tr',{},el('th',{style:'width:12rem'},k),el('td',{style:'word-break:break-word'},String(val))));};
   row('Scan status',lbl);row('Message ID',d.id);row('Date received',d.ts);
   row('From',d.from);row('To',d.to);row('Subject',d.subject);
-  row('Size',fmtSize(d.size)+` (${d.size} bytes)`);row('Client IP',d.clientip);row('Scanned on',d.hostname);
+  row('Size',fmtSize(d.size)+` (${d.size} bytes)`);
+  if(d.clientip&&String(d.clientip).trim()!=='')
+    dt.append(el('tr',{},el('th',{style:'width:12rem'},'Client IP'),el('td',{},ipLink(d.clientip),el('span',{class:'muted'},'  (click for details and firewall actions)'))));
+  row('Scanned on',d.hostname);
   row('Spam report',d.spamreport);row('RBL report',d.rblreport);
   card.append(dt);
 
@@ -440,7 +541,7 @@ async function renderMessageView(id){
       el('div',{class:'muted',style:'font-size:.8rem;margin-bottom:.4rem'},'Only the last IP outside your network in the Received: chain can be trusted — the others can be spoofed.'));
     v.append(hc);
     const ht=el('table');ht.append(el('tr',{},...['IP','HELO / Hostname'].map(h=>el('th',{},h))));
-    (d.header_ips||[]).forEach(h=>ht.append(el('tr',{},el('td',{style:'font-family:ui-monospace,monospace'},h.ip),el('td',{},h.host||''))));
+    (d.header_ips||[]).forEach(h=>ht.append(el('tr',{},el('td',{style:'font-family:ui-monospace,monospace'},ipLink(h.ip)),el('td',{},h.host||''))));
     hc.append(ht);
   }
 
