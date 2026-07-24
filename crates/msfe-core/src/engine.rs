@@ -40,6 +40,11 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
         ("Run As Group", "mail"),
         ("Sendmail", "/usr/sbin/exim"),
         ("Sendmail2", "/usr/sbin/exim"),
+        // Without an explicit path, MailScanner 5.5.3's `which exim` fallback
+        // leaves a trailing newline, its exim version probe silently fails,
+        // and it assumes short message IDs — placing outgoing spool files in
+        // the wrong split subdirectory, where Exim never finds them.
+        ("Exim Command", "/usr/sbin/exim"),
         ("Incoming Work Group", "mail"),
         ("Incoming Work Permissions", "0640"),
         ("Quarantine Group", "mail"),
@@ -325,6 +330,9 @@ pub fn wire(cfg: &Config, dry: bool) -> io::Result<WireReport> {
         ("Split Exim Spool", if split { "yes" } else { "no" }),
         ("Sendmail", "/usr/sbin/exim"),
         ("Sendmail2", "/usr/sbin/exim"),
+        // See configure(): required for MailScanner's long-message-ID
+        // detection on Exim >= 4.97 (wrong split subdir otherwise).
+        ("Exim Command", "/usr/sbin/exim"),
     ];
     let conf_path = Path::new(&cfg.mailscanner_conf);
     if let Ok(original) = std::fs::read_to_string(conf_path) {
