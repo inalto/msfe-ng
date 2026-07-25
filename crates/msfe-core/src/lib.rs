@@ -15,6 +15,7 @@ pub mod db;
 pub mod digest;
 pub mod doctor;
 pub mod engine;
+pub mod geoip;
 pub mod housekeeping;
 pub mod json;
 pub mod legacy;

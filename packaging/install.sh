@@ -84,6 +84,10 @@ db_pass = ""
 mailscanner_conf = "/etc/MailScanner/MailScanner.conf"
 mailscanner_custom_dir = "/etc/MailScanner/custom"
 
+# IP geolocation for the client-IP modal ({ip} is substituted).
+# The address being looked up is sent to this provider; leave empty to disable.
+geoip_url = "https://ipwho.is/{ip}"
+
 # Logs watched by the WHM Service tab
 maillog_path = "/var/log/maillog"
 exim_mainlog_path = "/var/log/exim_mainlog"

@@ -69,18 +69,50 @@ impl Request {
         })
     }
 
-    /// Look up a query-string parameter (no percent-decoding needed for our
-    /// numeric/identifier params).
+    /// Look up a query-string parameter, percent-decoded (search text, IPv6
+    /// addresses and bracketed client addresses all arrive encoded).
     pub fn query_param(&self, key: &str) -> Option<String> {
         self.query.split('&').find_map(|kv| {
             let (k, v) = kv.split_once('=')?;
             if k == key {
-                Some(v.to_string())
+                Some(percent_decode(v))
             } else {
                 None
             }
         })
     }
+}
+
+/// Decode `%XX` escapes and `+` in a query-string value.
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'%' if i + 2 < b.len() => {
+                match u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or(""), 16) {
+                    Ok(byte) => {
+                        out.push(byte);
+                        i += 3;
+                    }
+                    Err(_) => {
+                        out.push(b'%');
+                        i += 1;
+                    }
+                }
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 pub struct Response {
@@ -135,5 +167,41 @@ impl Response {
         stream.write_all(head.as_bytes())?;
         stream.write_all(self.body.as_bytes())?;
         stream.flush()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req(query: &str) -> Request {
+        Request {
+            method: "GET".into(),
+            path: "/x".into(),
+            query: query.into(),
+            body: String::new(),
+            user: String::new(),
+        }
+    }
+
+    #[test]
+    fn decodes_query_values() {
+        // the bracketed client address MailScanner records, URL-encoded
+        assert_eq!(
+            req("ip=%5B35.247.160.179%5D%3A45570")
+                .query_param("ip")
+                .unwrap(),
+            "[35.247.160.179]:45570"
+        );
+        // search text with spaces and @
+        assert_eq!(
+            req("text=user%40example.com+test")
+                .query_param("text")
+                .unwrap(),
+            "user@example.com test"
+        );
+        assert_eq!(req("days=30").query_param("days").unwrap(), "30");
+        assert_eq!(req("a=1&b=2").query_param("b").unwrap(), "2");
+        assert!(req("a=1").query_param("zz").is_none());
     }
 }

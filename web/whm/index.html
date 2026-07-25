@@ -172,11 +172,20 @@ async function showSaLint(){
 }
 
 // ---- client IP: activity, reverse DNS, csf status and blocking ---------------
-function ipLink(ip){
-  if(!ip)return el('span',{});
-  return Object.assign(el('a',{class:'iplink',title:'IP details, history and firewall actions'},ip),{onclick:()=>showIp(ip)});
+// MailScanner records "[ip]:port" / "ip:port" — show and query the bare address
+function bareIp(raw){
+  const s=String(raw||'').trim();
+  const br=s.match(/^\[([^\]]+)\]/); if(br)return br[1];
+  const v4=s.match(/^(\d+\.\d+\.\d+\.\d+):\d+$/); if(v4)return v4[1];
+  return s;
 }
-async function showIp(ip){
+function ipLink(ip){
+  const bare=bareIp(ip);
+  if(!bare)return el('span',{});
+  return Object.assign(el('a',{class:'iplink',title:'IP details, location, history and firewall actions'},bare),{onclick:()=>showIp(bare)});
+}
+async function showIp(raw){
+  const ip=bareIp(raw);
   const m=modal('Client IP '+ip);
   m.body.append(el('div',{class:'muted'},'Loading…'));
   const d=await api('/api/ip/info?ip='+encodeURIComponent(ip)+'&days=30');
@@ -203,6 +212,20 @@ async function showIp(ip){
     const rt=el('table');(a.top_recipients||[]).forEach(s=>rt.append(el('tr',{},el('td',{},s.key),el('td',{class:'num'},s.count))));
     m.body.append(rt);
   }
+
+  // Location (third-party lookup, loaded after the local data so the modal is instant)
+  const geoHead=el('h2',{style:'font-size:.9rem;margin:.9rem 0 .3rem'},'Location');
+  const geoBox=el('div',{class:'muted'},'Looking up…');
+  m.body.append(geoHead,geoBox);
+  api('/api/ip/geo?ip='+encodeURIComponent(ip)).then(g=>{
+    geoBox.innerHTML='';
+    if(!g||!g.enabled){geoBox.textContent='Geolocation is disabled (clear or set geoip_url in the MSFE-NG config).';return;}
+    if(!(g.rows||[]).length){geoBox.textContent='No location data returned for this address.';return;}
+    const gt=el('table');
+    g.rows.forEach(r=>gt.append(el('tr',{},el('th',{style:'width:12rem'},r.key),el('td',{},r.value))));
+    geoBox.append(gt,el('div',{class:'muted',style:'font-size:.78rem;margin-top:.3rem'},
+      'Looked up via the configured provider and cached for 30 days. The address is sent to that third party; clear geoip_url to disable.'));
+  });
 
   m.body.append(el('h2',{style:'font-size:.9rem;margin:.9rem 0 .3rem'},'Firewall (ConfigServer csf)'));
   const out=el('pre',{class:'log',style:'max-height:12rem'},d.csf||'');

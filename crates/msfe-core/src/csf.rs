@@ -15,6 +15,27 @@ fn csf_path() -> String {
     std::env::var("MSFE_NG_CSF_BIN").unwrap_or_else(|_| CSF_BIN.to_string())
 }
 
+/// Normalize a client address as recorded by MailScanner/Exim, which may
+/// arrive as `[ip]`, `[ip]:port`, `ip:port` (IPv4) or bare — csf, DNS and our
+/// own queries all want the bare address.
+pub fn normalize_ip(raw: &str) -> String {
+    let s = raw.trim();
+    if let Some(rest) = s.strip_prefix('[') {
+        if let Some(end) = rest.find(']') {
+            return rest[..end].to_string();
+        }
+    }
+    // ipv4:port — a single colon with a valid IPv4 on the left
+    if s.matches(':').count() == 1 {
+        if let Some((left, _)) = s.split_once(':') {
+            if left.split('.').count() == 4 && left.split('.').all(|o| o.parse::<u8>().is_ok()) {
+                return left.to_string();
+            }
+        }
+    }
+    s.to_string()
+}
+
 /// True when csf is installed on this host.
 pub fn available() -> bool {
     std::path::Path::new(&csf_path()).exists()
@@ -269,6 +290,22 @@ mod tests {
         assert!(validate_target("not-an-ip", false).is_err());
         assert!(validate_target("1.2.3.4/99", false).is_err());
         assert!(validate_target("1.2.3.999", false).is_err());
+        std::env::remove_var("MSFE_NG_OWN_IPS");
+    }
+
+    #[test]
+    fn normalizes_recorded_client_addresses() {
+        // what MailScanner/Exim actually store
+        assert_eq!(normalize_ip("[35.247.160.179]:45570"), "35.247.160.179");
+        assert_eq!(normalize_ip("[35.247.160.179]"), "35.247.160.179");
+        assert_eq!(normalize_ip("35.247.160.179:45570"), "35.247.160.179");
+        assert_eq!(normalize_ip(" 35.247.160.179 "), "35.247.160.179");
+        // IPv6 must not lose anything to the port rule
+        assert_eq!(normalize_ip("2a00:1450:4025::200e"), "2a00:1450:4025::200e");
+        assert_eq!(normalize_ip("[2a00:1450::1]:25"), "2a00:1450::1");
+        // and the normalized form validates
+        std::env::set_var("MSFE_NG_OWN_IPS", "203.0.113.5");
+        assert!(validate_target(&normalize_ip("[35.247.160.179]:45570"), false).is_ok());
         std::env::remove_var("MSFE_NG_OWN_IPS");
     }
 

@@ -259,7 +259,15 @@ pub fn messages(cfg: &Config, f: &MessageFilter) -> io::Result<Json> {
 /// What this server has seen from one client IP: volume, verdict mix, when it
 /// first and last appeared, and its most frequent senders/recipients.
 pub fn ip_activity(cfg: &Config, ip: &str, days: u32) -> io::Result<Json> {
-    let q = sql_quote(ip);
+    // MailScanner records the client address in several shapes ("1.2.3.4",
+    // "[1.2.3.4]:45570", "1.2.3.4:45570") — match them all.
+    let ip = crate::csf::normalize_ip(ip);
+    let q = format!(
+        "(clientip = {} OR clientip LIKE {} OR clientip LIKE {})",
+        sql_quote(&ip),
+        sql_quote(&format!("[{ip}]:%")),
+        sql_quote(&format!("{ip}:%"))
+    );
     let window = if days > 0 {
         format!(
             " AND msg_ts >= (NOW() - INTERVAL {} DAY)",
@@ -275,14 +283,14 @@ pub fn ip_activity(cfg: &Config, ip: &str, days: u32) -> io::Result<Json> {
                 COALESCE(SUM(quarantined=1),0), \
                 COALESCE(MIN(msg_ts),''), COALESCE(MAX(msg_ts),''), \
                 COALESCE(ROUND(AVG(sascore),2),0) \
-         FROM maillog WHERE clientip = {q}{window}"
+         FROM maillog WHERE {q}{window}"
     );
     let rows = db::query(cfg, &sql)?;
     let r = rows.first().cloned().unwrap_or_default();
     let g = |i: usize| r.get(i).cloned().unwrap_or_default();
     let top = |col: &str| -> Json {
         let sql = format!(
-            "SELECT {col}, COUNT(*) FROM maillog WHERE clientip = {q}{window} AND {col} <> '' \
+            "SELECT {col}, COUNT(*) FROM maillog WHERE {q}{window} AND {col} <> '' \
              GROUP BY {col} ORDER BY COUNT(*) DESC LIMIT 5"
         );
         Json::Array(
@@ -306,7 +314,7 @@ pub fn ip_activity(cfg: &Config, ip: &str, days: u32) -> io::Result<Json> {
     };
     Ok(Json::Object(vec![
         ("available".into(), Json::Bool(true)),
-        ("ip".into(), Json::str(ip)),
+        ("ip".into(), Json::str(&ip)),
         ("days".into(), Json::Int(days as i64)),
         ("total".into(), count(&g(0))),
         ("spam".into(), count(&g(1))),

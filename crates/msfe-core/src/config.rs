@@ -33,6 +33,9 @@ pub struct Config {
     /// Exim ACL fragment that routes mail into the MailScanner named queue
     /// (written by `engine wire`; its absence = direct delivery).
     pub mailscannerq_conf: String,
+    /// Geolocation lookup URL for the client-IP modal, `{ip}` substituted.
+    /// Empty disables lookups (the address is sent to this third party).
+    pub geoip_url: String,
 }
 
 impl Default for Config {
@@ -54,6 +57,7 @@ impl Default for Config {
             maillog_path: "/var/log/maillog".into(),
             exim_mainlog_path: "/var/log/exim_mainlog".into(),
             mailscannerq_conf: "/etc/msfe-ng/mailscannerq.conf".into(),
+            geoip_url: "https://ipwho.is/{ip}".into(),
         }
     }
 }
@@ -89,6 +93,7 @@ impl Config {
                 "maillog_path" => c.maillog_path = v,
                 "exim_mainlog_path" => c.exim_mainlog_path = v,
                 "mailscannerq_conf" => c.mailscannerq_conf = v,
+                "geoip_url" => c.geoip_url = v,
                 _ => {} // unknown keys ignored
             }
         }
