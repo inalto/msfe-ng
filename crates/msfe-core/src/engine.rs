@@ -125,10 +125,12 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
     // Processing.db and every message stalls in the scanning queue.
     let work_base = ms_work_dir();
     let quarantine = Path::new(&cfg.quarantine_dir).to_path_buf();
+    let archive = Path::new(&cfg.archive_dir).to_path_buf();
     for (d, owner) in [
         (&work_base, run_user),
         (&work_base.join("incoming"), run_user),
         (&quarantine, "root"),
+        (&archive, run_user),
     ] {
         if !d.exists() {
             if std::fs::create_dir_all(d).is_err() {
@@ -156,6 +158,89 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
         set,
         created,
         chown_failed,
+        restarted,
+    })
+}
+
+pub struct ArchiveReport {
+    pub enabled: bool,
+    pub changed: Vec<String>,
+    pub restarted: bool,
+}
+
+/// Keep MailScanner's `Archive Mail` directive in step with the generated
+/// `archive.rules`. Called at the end of every sync; a no-op when nothing
+/// changed, so the ten-minute sync cron can never restart MailScanner in a loop.
+///
+/// When no domain archives, the directive is emptied rather than left pointing
+/// at a ruleset with no matching lines — clearer for anyone reading the config.
+pub fn apply_archive(cfg: &Config, config_file: &Path) -> io::Result<ArchiveReport> {
+    let pdir = crate::sync::policy_dir(config_file);
+    let (settings, _, _) = crate::sync::load_policy(&pdir);
+    let overrides = crate::sync::load_overrides(&pdir);
+    let rs = crate::rules::RuleSettings::from_settings(&settings, &cfg.archive_dir);
+    let any_domain_on = overrides.values().any(|p| {
+        p.archive
+            .as_deref()
+            .is_some_and(|v| v.eq_ignore_ascii_case("yes"))
+    });
+    let enabled = rs.archive || any_domain_on;
+
+    let rules_path = Path::new(&cfg.mailscanner_rules_dir).join("archive.rules");
+    let directives = [
+        (
+            "Archive Mail",
+            if enabled {
+                rules_path.display().to_string()
+            } else {
+                String::new()
+            },
+        ),
+        ("Missing Mail Archive Is", "directory".to_string()),
+    ];
+
+    let conf_path = Path::new(&cfg.mailscanner_conf);
+    let original = std::fs::read_to_string(conf_path).unwrap_or_default();
+    let mut text = original.clone();
+    let mut changed = Vec::new();
+    for (k, v) in &directives {
+        let new_text = mailscanner::set_directive(&text, k, v);
+        if new_text != text {
+            text = new_text;
+            changed.push(format!("{k} = {v}"));
+        }
+    }
+    if !original.is_empty() && text != original {
+        service::save_conf(conf_path, &text)?;
+    }
+
+    // The archive tree is ours to create and own (same treatment as quarantine).
+    if enabled {
+        let dir = Path::new(&cfg.archive_dir);
+        if !dir.as_os_str().is_empty() && !dir.exists() {
+            std::fs::create_dir_all(dir)?;
+        }
+        if dir.exists() {
+            set_perms_0750(dir);
+            let run_user = if cfg.panel == "directadmin" {
+                "mail"
+            } else {
+                "mailnull"
+            };
+            chown_user_mail(dir, run_user);
+        }
+    }
+
+    // MailScanner reads its config only at startup; the ruleset file itself is
+    // re-read per batch, so per-domain changes cost no restart.
+    let restarted = if !changed.is_empty() && service::status().active {
+        service::control("restart").ok
+    } else {
+        false
+    };
+    Ok(ArchiveReport {
+        enabled,
+        changed,
         restarted,
     })
 }

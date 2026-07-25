@@ -27,6 +27,7 @@ use Sys::Hostname qw(hostname);
 # without the driver installed.
 
 my $CONF_FILE = $ENV{MSFE_NG_CONFIG} || '/etc/msfe-ng/config.toml';
+our @COLS;   # insert column list, intersected with the live table at connect
 my $LISTEN_IP = '127.0.0.1';
 my $LISTEN_PORT = 47_712;         # MSFE-NG's own port (localhost only)
 my $IDLE_TIMEOUT = 3600;          # self-terminate a wedged logger after 1h
@@ -141,9 +142,15 @@ sub logger_connect {
         _log("MSFE-NG: DB connect failed: $DBI::errstr");
         return;
     }
-    my @cols = maillog_columns();
-    my $ph = join ',', ('?') x scalar(@cols);
-    my $sql = 'INSERT INTO maillog (' . join(',', @cols) . ") VALUES ($ph)";
+    # Intersect with the columns the database actually has: during an upgrade
+    # this plugin can load before `msfe-ng db-migrate` runs, and a mismatched
+    # INSERT would silently fail for every message.
+    my $have = eval { $DBH->selectcol_arrayref('SHOW COLUMNS FROM maillog') } || [];
+    my %present = map { $_ => 1 } @$have;
+    @COLS = grep { $present{$_} } maillog_columns();
+    unless (@COLS) { @COLS = maillog_columns() }   # SHOW COLUMNS failed; try anyway
+    my $ph = join ',', ('?') x scalar(@COLS);
+    my $sql = 'INSERT INTO maillog (' . join(',', @COLS) . ") VALUES ($ph)";
     $INSERT = $DBH->prepare($sql);
     _log("MSFE-NG: connected to maillog database $DB{db_name}");
     return;
@@ -184,7 +191,7 @@ sub insert_row {
     my ($row) = @_;
     return unless $INSERT;
     unless ($DBH && $DBH->ping) { logger_connect(); return unless $INSERT; }
-    my @vals = map { $row->{$_} } maillog_columns();
+    my @vals = map { $row->{$_} } @COLS;
     unless ($INSERT->execute(@vals)) {
         _log("MSFE-NG: insert failed: $DBI::errstr");
     }
@@ -207,7 +214,7 @@ sub maillog_columns {
         spamwhitelisted spamblacklisted sascore spamreport rblspamreport
         virusinfected nameinfected otherinfected report ismcp ishighmcp issamcp
         mcpwhitelisted mcpblacklisted mcpsascore mcpreport hostname headers
-        quarantined
+        quarantined body_path
     );
 }
 
@@ -230,6 +237,7 @@ sub extract_row {
         $ts[5] + 1900, $ts[4] + 1, $ts[3], $ts[2], $ts[1], $ts[0]);
 
     my $quarantined = (scalar(@quarant) + scalar(@spamarch)) > 0 ? 1 : 0;
+    my $body_path = body_path_of($m->{id} // '', \@quarant, \@spamarch, \@archive);
 
     return (
         msg_ts          => $msg_ts,
@@ -266,7 +274,30 @@ sub extract_row {
         hostname        => hostname(),
         headers         => join("\n", @{ $m->{headers} || [] }),
         quarantined     => $quarantined,
+        body_path       => $body_path,
     );
+}
+
+# Where this message's copy landed, so the front-end can open it directly
+# instead of scanning the spool. Quarantine/spam-archive entries are full
+# paths; archive entries may be a directory (one file per message), an mbox
+# file, or an email address (skipped).
+sub body_path_of {
+    my ($id, $quar, $spam, $arch) = @_;
+    return '' unless defined $id && $id ne '';
+    for my $p (@$quar, @$spam) {
+        next unless defined $p && $p =~ m{^/};
+        return $p if -e $p;
+        return "$p/$id" if -d $p && -e "$p/$id";
+    }
+    my $first = '';
+    for my $p (@$arch) {
+        next unless defined $p && $p =~ m{^/};   # skip forwarding addresses
+        my $cand = -d $p ? "$p/$id" : $p;
+        return $cand if -e $cand;
+        $first ||= $cand;
+    }
+    return $first;   # not flushed to disk yet, but this is where it will be
 }
 
 sub clean {

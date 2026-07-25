@@ -31,6 +31,11 @@ pub struct RuleSettings {
     pub lowscore: String,
     pub highscore: String,
     pub store: bool,
+    /// Keep a copy of every message (MailScanner `Archive Mail`).
+    pub archive: bool,
+    pub archive_dir_rule: String,
+    /// Path written into archive.rules (`<archive_dir>/_DATE_` unless overridden).
+    pub archive_value: String,
 }
 
 impl Default for RuleSettings {
@@ -49,6 +54,9 @@ impl Default for RuleSettings {
             lowscore: "5".into(),
             highscore: "20".into(),
             store: false,
+            archive: true,
+            archive_dir_rule: "FromOrTo:".into(),
+            archive_value: "/var/spool/MailScanner/archive/_DATE_".into(),
         }
     }
 }
@@ -61,7 +69,7 @@ pub struct RuleFile {
 }
 
 /// The seven domain-policy rule files MSFE-NG manages (order stable for tests).
-pub const DOMAIN_RULE_FILES: [&str; 7] = [
+pub const DOMAIN_RULE_FILES: [&str; 8] = [
     "spam.scanning.rules",
     "virus.scanning.rules",
     "spam.action.rules",
@@ -69,6 +77,7 @@ pub const DOMAIN_RULE_FILES: [&str; 7] = [
     "virus.delivery.rules",
     "spam.score.rules",
     "spamhigh.score.rules",
+    "archive.rules",
 ];
 /// The two list rule files (generated from the system white/black lists).
 pub const LIST_RULE_FILES: [&str; 2] = ["spam.whitelist.rules", "spam.blacklist.rules"];
@@ -87,7 +96,7 @@ impl RuleSettings {
     /// (`def_lspam`/`def_hspam` name a token whose MailScanner action string
     /// lives in `spam_action_<token>` / `spamhigh_action_<token>`), and applying
     /// the `store` prefix like the original did.
-    pub fn from_settings(pairs: &[(String, String)]) -> RuleSettings {
+    pub fn from_settings(pairs: &[(String, String)], archive_dir: &str) -> RuleSettings {
         let m = |k: &str| pairs.iter().find(|(kk, _)| kk == k).map(|(_, v)| v.clone());
         let or = |k: &str, d: &str| m(k).filter(|s| !s.is_empty()).unwrap_or_else(|| d.into());
 
@@ -124,6 +133,17 @@ impl RuleSettings {
             lowscore: or("lowscore", "5"),
             highscore: or("highscore", "20"),
             store,
+            // archiving is on unless explicitly disabled
+            archive: or("archive", "yes") == "yes",
+            archive_dir_rule: or("archive_rules_ini", "FromOrTo:"),
+            archive_value: {
+                let custom = or("archive_path", "");
+                if custom.is_empty() {
+                    format!("{}/_DATE_", archive_dir.trim_end_matches('/'))
+                } else {
+                    custom
+                }
+            },
         }
     }
 }
@@ -162,6 +182,8 @@ pub struct DomainPolicy {
     pub virus_delivery: Option<String>,
     pub lowscore: Option<String>,
     pub highscore: Option<String>,
+    /// Per-domain archiving opt-out ("no") / opt-in ("yes").
+    pub archive: Option<String>,
     pub whitelist: Vec<String>,
     pub blacklist: Vec<String>,
 }
@@ -246,6 +268,7 @@ pub fn generate(
             overrides,
             |p| p.highscore.as_deref(),
         ),
+        archive_file(s, domains, overrides),
         list_file("spam.whitelist.rules", whitelist, domains, overrides, |p| {
             &p.whitelist
         }),
@@ -310,6 +333,35 @@ fn domain_file(
     }
 }
 
+/// `archive.rules`: one line per domain whose mail is archived. No `default`
+/// line — MailScanner archives only what a rule matches, so "no match" is the
+/// opt-out, and there is no path value that means "off".
+fn archive_file(
+    s: &RuleSettings,
+    domains: &[String],
+    overrides: &BTreeMap<String, DomainPolicy>,
+) -> RuleFile {
+    let mut c = String::from(HEADER);
+    for d in domains {
+        let d = d.trim();
+        if !valid_domain(d) {
+            continue;
+        }
+        let on = match overrides.get(d).and_then(|p| p.archive.as_deref()) {
+            Some(v) => v.eq_ignore_ascii_case("yes"),
+            None => s.archive,
+        };
+        if on {
+            let value = s.archive_value.replace("[domain]", d);
+            c.push_str(&format!("{}\t*@{d}\t{value}\n", s.archive_dir_rule));
+        }
+    }
+    RuleFile {
+        name: "archive.rules".into(),
+        contents: c,
+    }
+}
+
 fn list_file(
     name: &str,
     patterns: &[String],
@@ -368,7 +420,7 @@ mod tests {
 
     #[test]
     fn resolves_action_tokens_and_store_prefix() {
-        let s = RuleSettings::from_settings(&settings());
+        let s = RuleSettings::from_settings(&settings(), "/var/spool/MailScanner/archive");
         // def_hspam=spambox → resolved action, with store prefix
         assert_eq!(
             s.spamhigh_action_def,
@@ -406,7 +458,7 @@ mod tests {
                 "forward spam@[domain] delete".to_string(),
             ),
         ];
-        let s = RuleSettings::from_settings(&pairs);
+        let s = RuleSettings::from_settings(&pairs, "/var/spool/MailScanner/archive");
         let files = generate(&s, &["x.example".into()], &[], &[], &BTreeMap::new());
         let act = files
             .iter()
@@ -460,7 +512,72 @@ mod tests {
 
     #[test]
     fn managed_files_count() {
-        assert_eq!(managed_files().len(), 9);
+        assert_eq!(managed_files().len(), 10);
+    }
+
+    #[test]
+    fn archive_rules_respect_global_and_per_domain() {
+        let on = RuleSettings::from_settings(&[], "/var/spool/MailScanner/archive");
+        assert!(on.archive, "archiving is on unless disabled");
+        let mut ov = BTreeMap::new();
+        ov.insert(
+            "private.example".to_string(),
+            DomainPolicy {
+                archive: Some("no".into()),
+                ..Default::default()
+            },
+        );
+        let files = generate(
+            &on,
+            &["shop.example".into(), "private.example".into()],
+            &[],
+            &[],
+            &ov,
+        );
+        let a = files.iter().find(|f| f.name == "archive.rules").unwrap();
+        assert!(a
+            .contents
+            .contains("FromOrTo:\t*@shop.example\t/var/spool/MailScanner/archive/_DATE_\n"));
+        assert!(
+            !a.contents.contains("private.example"),
+            "opt-out domain must not be archived"
+        );
+        // never a catch-all: "no match" is how a domain stays unarchived
+        assert!(!a.contents.contains("default"));
+
+        // globally off, one domain opted in
+        let off = RuleSettings::from_settings(
+            &[("archive".to_string(), "no".to_string())],
+            "/var/spool/MailScanner/archive",
+        );
+        assert!(!off.archive);
+        let mut ov2 = BTreeMap::new();
+        ov2.insert(
+            "keep.example".to_string(),
+            DomainPolicy {
+                archive: Some("yes".into()),
+                ..Default::default()
+            },
+        );
+        let files = generate(
+            &off,
+            &["a.example".into(), "keep.example".into()],
+            &[],
+            &[],
+            &ov2,
+        );
+        let a = files.iter().find(|f| f.name == "archive.rules").unwrap();
+        assert!(a.contents.contains("*@keep.example"));
+        assert!(!a.contents.contains("*@a.example"));
+    }
+
+    #[test]
+    fn archive_path_override_wins() {
+        let s = RuleSettings::from_settings(
+            &[("archive_path".to_string(), "/mail/store/_DATE_".to_string())],
+            "/ignored",
+        );
+        assert_eq!(s.archive_value, "/mail/store/_DATE_");
     }
 
     #[test]

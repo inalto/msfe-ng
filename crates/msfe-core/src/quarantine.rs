@@ -52,6 +52,63 @@ fn find_rec(dir: &Path, id: &str, depth: usize) -> Option<PathBuf> {
     None
 }
 
+/// Directories a message body may legitimately live under: the quarantine
+/// spool and, when archiving is on, the archive tree.
+pub fn body_roots(cfg: &crate::Config) -> Vec<PathBuf> {
+    let mut roots = vec![PathBuf::from(&cfg.quarantine_dir)];
+    if !cfg.archive_dir.trim().is_empty() {
+        roots.push(PathBuf::from(&cfg.archive_dir));
+    }
+    roots
+}
+
+/// Resolve a message body. Prefers the path MailScanner reported (recorded in
+/// `maillog.body_path`), falling back to the legacy recursive scan for rows
+/// logged before that column existed.
+///
+/// The stored path is trusted only after validation: it must sit under one of
+/// the configured roots and be named after the message id. A poisoned database
+/// value must never turn the raw-message endpoint into an arbitrary-file read.
+pub fn resolve_body(cfg: &crate::Config, message_id: &str, stored: &str) -> Option<PathBuf> {
+    if !valid_message_id(message_id) {
+        return None;
+    }
+    let roots = body_roots(cfg);
+    let stored = stored.trim();
+    if !stored.is_empty() {
+        let p = Path::new(stored);
+        let named_for_id = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n == message_id || n.starts_with(&format!("{message_id}.")))
+            .unwrap_or(false);
+        let under_root = roots.iter().any(|r| p.starts_with(r));
+        // `..` can only appear in a hand-edited value; reject rather than resolve
+        let traversal = p.components().any(|c| c == std::path::Component::ParentDir);
+        if named_for_id && under_root && !traversal && p.exists() {
+            return Some(p.to_path_buf());
+        }
+    }
+    roots.iter().find_map(|r| find_message(r, message_id))
+}
+
+/// True when the message still has a body on disk (the only honest basis for
+/// offering View source / release / Bayes training in the UI).
+pub fn body_exists(cfg: &crate::Config, message_id: &str, stored: &str) -> bool {
+    resolve_body(cfg, message_id, stored).is_some()
+}
+
+/// Which tree a resolved body came from, for display ("quarantine"/"archive").
+pub fn body_kind(cfg: &crate::Config, path: &Path) -> &'static str {
+    if path.starts_with(&cfg.quarantine_dir) {
+        "quarantine"
+    } else if !cfg.archive_dir.trim().is_empty() && path.starts_with(&cfg.archive_dir) {
+        "archive"
+    } else {
+        "unknown"
+    }
+}
+
 /// Read the raw message bytes. If `path` is a directory (MailScanner keeps the
 /// message next to metadata), prefer a file literally named after the id or the
 /// first regular file inside.
@@ -126,6 +183,61 @@ pub fn valid_recipient(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolves_bodies_by_stored_path_with_scan_fallback() {
+        let base = std::env::temp_dir().join(format!("msfe-body-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (qdir, adir) = (base.join("quarantine"), base.join("archive"));
+        std::fs::create_dir_all(qdir.join("20260725")).unwrap();
+        std::fs::create_dir_all(adir.join("20260725")).unwrap();
+        let id = "1wnE6V-00000004Oi2-3lJH";
+        let archived = adir.join("20260725").join(id);
+        std::fs::write(&archived, b"archived body").unwrap();
+        let cfg = crate::Config {
+            quarantine_dir: qdir.display().to_string(),
+            archive_dir: adir.display().to_string(),
+            ..Default::default()
+        };
+
+        // stored path is used as-is
+        assert_eq!(
+            resolve_body(&cfg, id, archived.to_str().unwrap()),
+            Some(archived.clone())
+        );
+        assert!(body_exists(&cfg, id, archived.to_str().unwrap()));
+        assert_eq!(body_kind(&cfg, &archived), "archive");
+
+        // A poisoned stored path must never be read. Use an id with no body of
+        // its own, so nothing masks the rejection via the fallback scan.
+        let ghost = "1ghost-00000000AAA-0aaa";
+        let outside = base.join("passwd");
+        std::fs::write(&outside, b"secret").unwrap();
+        assert_eq!(resolve_body(&cfg, ghost, outside.to_str().unwrap()), None);
+        // traversal out of a root is refused too
+        let sneaky = adir.join("20260725").join("..").join("..").join("passwd");
+        assert_eq!(resolve_body(&cfg, ghost, sneaky.to_str().unwrap()), None);
+        // a path belonging to a different message is not accepted for this id
+        assert_eq!(resolve_body(&cfg, ghost, archived.to_str().unwrap()), None);
+        // rejecting a bad stored path still falls back to this id's real body
+        assert_eq!(
+            resolve_body(&cfg, id, outside.to_str().unwrap()),
+            Some(archived.clone())
+        );
+
+        // legacy row (no stored path): the scan still finds a quarantined body
+        let qid = "1wnLIy-00000004OtQ-1CTr";
+        let quarantined = qdir.join("20260725").join(qid);
+        std::fs::write(&quarantined, b"quarantined body").unwrap();
+        assert_eq!(resolve_body(&cfg, qid, ""), Some(quarantined.clone()));
+        assert_eq!(body_kind(&cfg, &quarantined), "quarantine");
+
+        // gone from disk → no body, whatever the database says
+        std::fs::remove_file(&archived).unwrap();
+        assert!(!body_exists(&cfg, id, archived.to_str().unwrap()));
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 
     #[test]
     fn recipient_validation() {

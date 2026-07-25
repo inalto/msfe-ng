@@ -214,6 +214,72 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
         "install clamd (msfe-ng engine install) then msfe-ng engine configure",
     ));
 
+    // ---- message bodies (archive) ----------------------------------------
+    let (settings, _, _) = crate::sync::load_policy(&crate::sync::policy_dir(config_file));
+    let archive_on = settings
+        .iter()
+        .find(|(k, _)| k == "archive")
+        .map(|(_, v)| v != "no")
+        .unwrap_or(true);
+    if archive_on {
+        let rules_ok = mailscanner::get_directive(&conf, "Archive Mail")
+            .is_some_and(|v| !v.trim().is_empty())
+            && Path::new(&cfg.mailscanner_rules_dir)
+                .join("archive.rules")
+                .exists();
+        out.push(check(
+            "message archive configured",
+            rules_ok,
+            Level::Warn,
+            if rules_ok {
+                "MailScanner is keeping a copy of every message".into()
+            } else {
+                "archiving is enabled in policy but MailScanner is not set up for it".into()
+            },
+            "msfe-ng sync",
+        ));
+        let dir = Path::new(&cfg.archive_dir);
+        let writable = dir.is_dir()
+            && std::fs::metadata(dir)
+                .map(|m| {
+                    use std::os::unix::fs::PermissionsExt;
+                    m.permissions().mode() & 0o700 != 0
+                })
+                .unwrap_or(false);
+        out.push(check(
+            "archive directory ready",
+            writable,
+            Level::Fail,
+            format!("{}", dir.display()),
+            "msfe-ng engine configure",
+        ));
+        let bodydays = crate::housekeeping::body_retention_days(&settings);
+        let (headroom_ok, detail) = match crate::housekeeping::disk_free(&cfg.archive_dir) {
+            Some((total, avail)) if total > 0 => {
+                let used_pct = 100 - (avail * 100 / total);
+                (
+                    used_pct < 85 && bodydays > 0,
+                    if bodydays == 0 {
+                        format!("{used_pct}% of the filesystem used, and body retention is set to keep forever")
+                    } else {
+                        format!(
+                            "{used_pct}% used, {} GB free, keeping bodies {bodydays} days",
+                            avail / 1_073_741_824
+                        )
+                    },
+                )
+            }
+            _ => (true, "disk usage unknown".into()),
+        };
+        out.push(check(
+            "archive disk headroom",
+            headroom_ok,
+            Level::Warn,
+            detail,
+            "lower 'Keep message bodies for (days)' in Settings, or turn archiving off",
+        ));
+    }
+
     // ---- database + logging ---------------------------------------------
     let db_conf = !cfg.db_pass.is_empty();
     out.push(check(

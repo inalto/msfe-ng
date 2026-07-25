@@ -222,7 +222,7 @@ pub fn messages(cfg: &Config, f: &MessageFilter) -> io::Result<Json> {
     let sql = format!(
         "SELECT msg_ts, from_address, to_address, subject, sascore, \
                 isspam, ishighspam, virusinfected, quarantined, message_id, size, \
-                spamwhitelisted, spamblacklisted \
+                spamwhitelisted, spamblacklisted, body_path \
          FROM maillog WHERE {where_sql} \
          ORDER BY msg_ts DESC LIMIT {limit} OFFSET {offset}"
     );
@@ -245,6 +245,11 @@ pub fn messages(cfg: &Config, f: &MessageFilter) -> io::Result<Json> {
                 ("size".into(), Json::str(f(10))),
                 ("wl".into(), count(&f(11))),
                 ("bl".into(), count(&f(12))),
+                // availability is the filesystem's answer, never the flag
+                (
+                    "hasbody".into(),
+                    Json::Bool(crate::quarantine::body_exists(cfg, &f(9), &f(13))),
+                ),
             ])
         })
         .collect();
@@ -253,6 +258,43 @@ pub fn messages(cfg: &Config, f: &MessageFilter) -> io::Result<Json> {
         ("total".into(), Json::Int(total)),
         ("offset".into(), Json::Int(offset as i64)),
         ("items".into(), Json::Array(items)),
+    ]))
+}
+
+/// The recorded body location for a message (empty when unknown/pruned).
+pub fn body_path_of(cfg: &Config, message_id: &str) -> io::Result<Option<String>> {
+    if !crate::service::valid_exim_id(message_id) {
+        return Ok(None);
+    }
+    let sql = format!(
+        "SELECT body_path FROM maillog WHERE message_id = {} ORDER BY msg_ts DESC LIMIT 1",
+        sql_quote(message_id)
+    );
+    Ok(db::query(cfg, &sql)?
+        .first()
+        .and_then(|r| r.first())
+        .cloned())
+}
+
+/// Volume figures behind the storage/retention disclosure in Settings.
+pub fn storage(cfg: &Config, bodydays: u32) -> io::Result<Json> {
+    let rows = db::query(
+        cfg,
+        "SELECT COUNT(*), COALESCE(AVG(size),0) FROM maillog \
+         WHERE msg_ts >= (NOW() - INTERVAL 1 DAY)",
+    )?;
+    let r = rows.first().cloned().unwrap_or_default();
+    let per_day: f64 = r.first().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    let avg: f64 = r.get(1).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    Ok(Json::Object(vec![
+        ("available".into(), Json::Bool(true)),
+        ("per_day".into(), Json::Int(per_day as i64)),
+        ("avg_size".into(), Json::Int(avg as i64)),
+        ("bodydays".into(), Json::Int(bodydays as i64)),
+        (
+            "projected_bytes".into(),
+            Json::Int((per_day * avg * bodydays as f64) as i64),
+        ),
     ]))
 }
 
@@ -338,7 +380,7 @@ pub fn message_detail(cfg: &Config, message_id: &str) -> io::Result<Json> {
         "SELECT msg_ts, message_id, from_address, to_address, subject, size, clientip, \
                 sascore, spamreport, rblspamreport, report, isspam, ishighspam, \
                 spamwhitelisted, spamblacklisted, virusinfected, nameinfected, \
-                otherinfected, quarantined, hostname, headers \
+                otherinfected, quarantined, hostname, headers, body_path \
          FROM maillog WHERE message_id = {} ORDER BY msg_ts DESC LIMIT 1",
         sql_quote(message_id)
     );
@@ -370,6 +412,7 @@ pub fn message_detail(cfg: &Config, message_id: &str) -> io::Result<Json> {
         ("quarantined".into(), count(&f(18))),
         ("hostname".into(), Json::str(f(19))),
         ("headers".into(), Json::str(f(20))),
+        ("body_path".into(), Json::str(f(21))),
     ]))
 }
 

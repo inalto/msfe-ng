@@ -103,6 +103,15 @@ async function api(path,{method='GET',body=null,raw=false}={}){
   if(raw) return r.text();
   try{return await r.json();}catch(e){return {error:'bad response'};}
 }
+// like api(..,{raw:true}) but tells the caller whether the fetch succeeded, so
+// an error body is never rendered as if it were the message
+async function apiRaw(path){
+  const opts={headers:{}};
+  let url=path;
+  if(!DIRECT){url=location.pathname.split('?')[0];opts.headers['X-MSFE-Path']=path;}
+  const r=await fetch(url,opts);
+  return {ok:r.ok,text:await r.text()};
+}
 const $=(s,r=document)=>r.querySelector(s);
 const el=(t,a={},...c)=>{const n=document.createElement(t);for(const k in a){if(k==='html')n.innerHTML=a[k];else n.setAttribute(k,a[k]);}c.flat().forEach(x=>n.append(x));return n;};
 const esc=s=>String(s??'').replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));
@@ -399,6 +408,7 @@ const SETTINGS_FIELDS=[
   ['def_hspam','High-spam action',['deliver','delete','spambox','forward']],
   ['def_dvirus','Deliver disinfected',['yes','no']],
   ['store','Store copies (quarantine)',['yes','no']],
+  ['archive','Keep a copy of every message',['yes','no']],
   ['cleanmysql','Keep message log for (days)','number'],
   ['bodydays','Keep message bodies for (days, 0 = forever)','number'],
 ];
@@ -406,7 +416,23 @@ async function renderSettings(){
   const v=$('#view');v.innerHTML='';await ensurePolicy();
   const card=el('div',{class:'card'},el('h2',{},'Global scanning policy'),
     el('div',{class:'muted',style:'margin-bottom:.6rem;font-size:.8rem'},
-      'Retention: the message log keeps entries, scores and reports; message bodies are the quarantined copies that back the source/rendered view, release and Bayes training — they use the most disk, so they are usually kept for fewer days. Pruning runs nightly.'));
+      'Retention: the message log keeps entries, scores and reports; message bodies are the stored copies that back the content view, release and Bayes training — they use the most disk, so they are usually kept for fewer days. Pruning runs nightly.'));
+  const storeBox=el('div',{class:'muted',style:'font-size:.8rem;margin-bottom:.8rem'});
+  card.append(storeBox);
+  api('/api/storage').then(st=>{
+    if(!st)return;
+    const gb=b=>(+b||0)/1073741824;
+    const fmt=b=>gb(b)>=1?gb(b).toFixed(1)+' GB':Math.round((+b||0)/1048576)+' MB';
+    storeBox.innerHTML='';
+    storeBox.append(el('b',{},'What is stored: '),
+      st.archive_enabled
+        ? `complete copies (headers and body) of every message for archiving domains, under ${st.archive_dir}, readable by server administrators. `
+        : 'only messages MailScanner holds (spam/virus), under the quarantine directory. ',
+      `Kept for ${st.bodydays} day(s)${st.bodydays===0?' — forever, which grows without limit':''}. `,
+      st.available?`Current volume ≈ ${st.per_day} messages/day at ~${Math.round((st.avg_size||0)/1024)} KB, so expect ≈ ${fmt(st.projected_bytes)} of copies. `:'',
+      (st.disk_avail!=null)?`Disk free: ${fmt(st.disk_avail)}. `:'',
+      el('span',{},'Archiving everyone\u2019s mail can carry legal obligations; a domain can be excluded from its own settings.'));
+  });
   const grid=el('div',{class:'grid2'});
   SETTINGS_FIELDS.forEach(([k,lbl,type])=>{
     const cur=policy.settings[k]??'';
@@ -555,9 +581,9 @@ async function renderMessages(){
     if(!data.items||!data.items.length){t.append(el('tr',{},el('td',{class:'empty'},'No messages match.')));return;}
     t.append(el('tr',{},el('th',{}),...['Time','Score','From / To','Subject','Size','Status'].map(h=>el('th',{},h))));
     data.items.forEach(m=>{
-      // only quarantined messages still have a body to re-deliver
-      const pick=m.quarantined?el('input',{type:'checkbox',class:'sel','data-id':m.id,title:'select for release/forward'}):el('span',{});
-      if(m.quarantined)pick.onclick=e=>{e.stopPropagation();updateBulk();};
+      // only messages whose body is still on disk can be re-delivered
+      const pick=m.hasbody?el('input',{type:'checkbox',class:'sel','data-id':m.id,title:'select for release/forward'}):el('span',{});
+      if(m.hasbody)pick.onclick=e=>{e.stopPropagation();updateBulk();};
       const tr=el('tr',{style:'cursor:pointer'},
         el('td',{},pick),
         el('td',{class:'muted',style:'white-space:nowrap'},m.ts),
@@ -626,19 +652,23 @@ async function renderMessageView(id){
 
   // Source + rendered views (quarantined only — the body isn't stored otherwise)
   const vc=el('div',{class:'card'},el('h2',{},'Message content'));v.append(vc);
-  if(d.quarantined){
+  if(d.has_body){
     vc.append(el('div',{class:'ctl'},
       Object.assign(el('button',{class:'act plain'},'View source'),{onclick:()=>openRaw(d.id,'source')}),
       Object.assign(el('button',{class:'act plain'},'View rendered'),{onclick:()=>openRaw(d.id,'rendered')})));
     if(d.content)vc.append(el('div',{class:'muted',style:'font-size:.8rem;margin:.4rem 0'},'Preview (first 10KB):'),el('pre',{class:'log',style:'max-height:18rem'},d.content));
   } else {
-    vc.append(el('div',{class:'muted'},'Full content and rendering are available only for quarantined messages (the body of a delivered message is not stored).'));
+    vc.append(el('div',{class:'muted'},
+      d.archive_enabled===false
+        ? 'No copy was kept: message archiving is off (enable “Keep a copy of every message” in Settings, or per domain in the user panel).'
+        : `The body is no longer available — copies are kept for ${d.bodydays??'the configured number of'} days.`));
   }
 
-  // Actions: SpamAssassin Bayes training + release (quarantined only)
-  if(d.quarantined){
+  // Actions need the body: Bayes training and re-sending both read it
+  if(d.has_body){
     const ac=el('div',{class:'card'},el('h2',{},'Actions'),
-      el('div',{class:'muted',style:'font-size:.8rem;margin-bottom:.5rem'},'Bayes training uses the quarantined copy. Release re-sends the message through Exim.'));
+      el('div',{class:'muted',style:'font-size:.8rem;margin-bottom:.5rem'},
+        `Bayes training uses the stored copy (${d.body_kind||'message'}). Release re-sends the message through Exim.`));
     v.append(ac);
     const out=el('pre',{class:'log',style:'display:none;max-height:12rem'});
     async function learn(action,warn){
@@ -671,7 +701,9 @@ async function renderMessageView(id){
 
 // Open a quarantined message's raw source or rendered HTML in a new tab.
 async function openRaw(id,mode){
-  const raw=await api('/api/messages/raw?id='+encodeURIComponent(id),{raw:true});
+  const r=await apiRaw('/api/messages/raw?id='+encodeURIComponent(id));
+  if(!r.ok){toast(r.text||'the message body is no longer available');return;}
+  const raw=r.text;
   const w=window.open('','_blank');
   if(!w){toast('Pop-up blocked — allow pop-ups to view');return;}
   if(mode==='source'){

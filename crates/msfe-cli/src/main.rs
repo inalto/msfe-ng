@@ -171,7 +171,7 @@ fn cmd_sync(flag: Option<&str>) -> ExitCode {
     let domains = sync::gather_domains(None);
 
     if flag == Some("--dry-run") {
-        let rs = rules::RuleSettings::from_settings(&settings);
+        let rs = rules::RuleSettings::from_settings(&settings, &cfg.archive_dir);
         let overrides = sync::load_overrides(&pdir);
         let mut files = rules::generate(&rs, &domains, &wl, &bl, &overrides);
         rules::merge_custom(
@@ -511,12 +511,21 @@ fn cmd_housekeeping() -> ExitCode {
                     println!("housekeeping: message bodies kept forever (bodydays=0)");
                     let _ = r;
                 }
-                Ok(r) => println!(
-                    "housekeeping: removed {} message bodies older than {body_days} days ({} KB freed, {} checked)",
-                    r.removed,
-                    r.bytes / 1024,
-                    r.scanned
-                ),
+                Ok(r) => {
+                    println!(
+                        "housekeeping: removed {} message bodies older than {body_days} days ({} MB freed, {} checked)",
+                        r.removed,
+                        r.bytes / 1_048_576,
+                        r.scanned
+                    );
+                    println!(
+                        "housekeeping: {} bodies kept, using {} MB",
+                        r.kept,
+                        r.kept_bytes / 1_048_576
+                    );
+                    let _ = msfe_core::housekeeping::clear_pruned_paths(&cfg, body_days);
+                    let _ = msfe_core::housekeeping::record_usage(&cfg, r.kept_bytes, r.kept);
+                }
                 Err(e) => eprintln!("msfe-ng housekeeping: body prune: {e}"),
             }
             ExitCode::SUCCESS

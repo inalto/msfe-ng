@@ -84,6 +84,11 @@ db_pass = ""
 mailscanner_conf = "/etc/MailScanner/MailScanner.conf"
 mailscanner_custom_dir = "/etc/MailScanner/custom"
 
+# Where copies of scanned messages are kept (archive/quarantine), so the
+# Messages tab can show content. Retention is the 'bodydays' policy setting.
+quarantine_dir = "/var/spool/MailScanner/quarantine"
+archive_dir = "/var/spool/MailScanner/archive"
+
 # IP geolocation for the client-IP modal ({ip} is substituted).
 # The address being looked up is sent to this provider; leave empty to disable.
 geoip_url = "https://ipwho.is/{ip}"

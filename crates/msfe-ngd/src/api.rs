@@ -43,6 +43,27 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             let days = stats::clamp_int(req.query_param("days").as_deref(), 14, 1, 365);
             stat_response(stats::daily_summary(cfg, days))
         }
+        ("GET", "/api/storage") => {
+            let (settings, _, _) = sync::load_policy(&sync::policy_dir(config_file));
+            let bodydays = msfe_core::housekeeping::body_retention_days(&settings);
+            let mut obj = match stats::storage(cfg, bodydays) {
+                Ok(Json::Object(f)) => f,
+                _ => vec![("available".into(), Json::Bool(false))],
+            };
+            let archive_on = settings
+                .iter()
+                .find(|(k, _)| k == "archive")
+                .map(|(_, v)| v != "no")
+                .unwrap_or(true);
+            obj.push(("archive_enabled".into(), Json::Bool(archive_on)));
+            obj.push(("archive_dir".into(), Json::str(&cfg.archive_dir)));
+            obj.push(("quarantine_dir".into(), Json::str(&cfg.quarantine_dir)));
+            if let Some((total, avail)) = msfe_core::housekeeping::disk_free(&cfg.archive_dir) {
+                obj.push(("disk_total".into(), Json::Int(total as i64)));
+                obj.push(("disk_avail".into(), Json::Int(avail as i64)));
+            }
+            Response::json(200, &Json::Object(obj).to_string())
+        }
         ("GET", "/api/sa/bayes") => {
             let rows: Vec<Json> = msfe_core::sa::bayes_status()
                 .into_iter()
@@ -88,16 +109,23 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                 Err(_) => return Response::json(200, r#"{"available":false}"#),
             };
             if let Json::Object(fields) = &mut detail {
-                let get = |k: &str| {
-                    fields
-                        .iter()
-                        .find(|(kk, _)| kk == k)
-                        .and_then(|(_, v)| v.as_str())
-                        .unwrap_or("")
-                        .to_string()
+                // read everything we need before mutating `fields`
+                let (report, headers, stored) = {
+                    let get = |k: &str| {
+                        fields
+                            .iter()
+                            .find(|(kk, _)| kk == k)
+                            .and_then(|(_, v)| v.as_str())
+                            .unwrap_or("")
+                            .to_string()
+                    };
+                    (
+                        format!("{} {}", get("spamreport"), get("report")),
+                        get("headers"),
+                        get("body_path"),
+                    )
                 };
                 // spam-report component rows (rule / score / description)
-                let report = format!("{} {}", get("spamreport"), get("report"));
                 let comps: Vec<Json> = msfe_core::sa::parse_report(&report)
                     .iter()
                     .map(|c| {
@@ -109,7 +137,7 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                     })
                     .collect();
                 // header IP hops (no geolocation)
-                let ips: Vec<Json> = msfe_core::sa::header_ips(&get("headers"))
+                let ips: Vec<Json> = msfe_core::sa::header_ips(&headers)
                     .iter()
                     .map(|h| {
                         Json::Object(vec![
@@ -118,22 +146,31 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                         ])
                     })
                     .collect();
-                let quarantined = get("quarantined") == "1"
-                    || fields
-                        .iter()
-                        .any(|(k, v)| k == "quarantined" && matches!(v, Json::Int(1)));
                 fields.push(("components".into(), Json::Array(comps)));
                 fields.push(("header_ips".into(), Json::Array(ips)));
-                // quarantined content preview (first 10 KB)
-                if quarantined {
-                    if let Some(p) = quarantine::find_message(Path::new(&cfg.quarantine_dir), &id) {
-                        if let Ok(bytes) = quarantine::read_message(&p) {
-                            let body = String::from_utf8_lossy(&bytes[..bytes.len().min(10240)])
-                                .into_owned();
-                            fields.push(("content".into(), Json::str(body)));
-                        }
+                // Body availability is decided by the filesystem, not by the
+                // stored `quarantined` flag: after pruning the flag stays 1.
+                let body = quarantine::resolve_body(cfg, &id, &stored);
+                fields.push(("has_body".into(), Json::Bool(body.is_some())));
+                if let Some(p) = &body {
+                    fields.push(("body_kind".into(), Json::str(quarantine::body_kind(cfg, p))));
+                    if let Ok(bytes) = quarantine::read_message(p) {
+                        let preview =
+                            String::from_utf8_lossy(&bytes[..bytes.len().min(10240)]).into_owned();
+                        fields.push(("content".into(), Json::str(preview)));
                     }
                 }
+                let (settings, _, _) = sync::load_policy(&sync::policy_dir(config_file));
+                let archive_on = settings
+                    .iter()
+                    .find(|(k, _)| k == "archive")
+                    .map(|(_, v)| v != "no")
+                    .unwrap_or(true);
+                fields.push(("archive_enabled".into(), Json::Bool(archive_on)));
+                fields.push((
+                    "bodydays".into(),
+                    Json::Int(msfe_core::housekeeping::body_retention_days(&settings) as i64),
+                ));
             }
             Response::json(200, &detail.to_string())
         }
@@ -225,14 +262,10 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             if !service::valid_exim_id(&id) {
                 return Response::text(200, "bad message id");
             }
-            match quarantine::find_message(Path::new(&cfg.quarantine_dir), &id)
-                .and_then(|p| quarantine::read_message(&p).ok())
-            {
+            match body_of(cfg, &id).and_then(|p| quarantine::read_message(&p).ok()) {
                 Some(bytes) => Response::text(200, &String::from_utf8_lossy(&bytes)),
-                None => Response::text(
-                    200,
-                    "(full source is only available for quarantined messages)",
-                ),
+                // 404, so the caller never renders this text as the message
+                None => Response::text(404, "the message body is no longer available"),
             }
         }
         ("POST", "/api/messages/learn") => {
@@ -242,12 +275,11 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             if !service::valid_exim_id(&id) {
                 return Response::json(400, r#"{"error":"bad message id"}"#);
             }
-            let Some(bytes) = quarantine::find_message(Path::new(&cfg.quarantine_dir), &id)
-                .and_then(|p| quarantine::read_message(&p).ok())
+            let Some(bytes) = body_of(cfg, &id).and_then(|p| quarantine::read_message(&p).ok())
             else {
                 return Response::json(
                     404,
-                    r#"{"error":"Bayes training needs the message body, which is only kept for quarantined messages"}"#,
+                    r#"{"error":"Bayes training needs the message body, which is no longer available (see the body retention setting)"}"#,
                 );
             };
             let o = msfe_core::sa::learn(&bytes, &action);
@@ -288,7 +320,7 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                 let outcome = if !service::valid_exim_id(id) {
                     "invalid id".to_string()
                 } else {
-                    match quarantine::find_message(Path::new(&cfg.quarantine_dir), id) {
+                    match body_of(cfg, id) {
                         None => "body no longer available (past the retention window)".into(),
                         Some(p) => {
                             let r = if to.is_empty() {
@@ -329,10 +361,10 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             if !service::valid_exim_id(&id) {
                 return Response::json(400, r#"{"error":"bad message id"}"#);
             }
-            let Some(p) = quarantine::find_message(Path::new(&cfg.quarantine_dir), &id) else {
+            let Some(p) = body_of(cfg, &id) else {
                 return Response::json(
                     404,
-                    r#"{"error":"message not found in quarantine (only quarantined messages can be released)"}"#,
+                    r#"{"error":"the message body is no longer available, so it cannot be re-sent"}"#,
                 );
             };
             let result = if to.is_empty() {
@@ -592,6 +624,16 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
 
         _ => Response::json(404, r#"{"error":"not found"}"#),
     }
+}
+
+/// Resolve a message body: the path MailScanner recorded, else the legacy scan.
+/// Single source of truth for every body-dependent endpoint.
+fn body_of(cfg: &Config, id: &str) -> Option<std::path::PathBuf> {
+    let stored = stats::body_path_of(cfg, id)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    quarantine::resolve_body(cfg, id, &stored)
 }
 
 // ---- structured rule handlers ------------------------------------------------
@@ -1292,6 +1334,7 @@ fn user_handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                             ("spamhigh_action".into(), opt(&ov.spamhigh_action)),
                             ("lowscore".into(), opt(&ov.lowscore)),
                             ("highscore".into(), opt(&ov.highscore)),
+                            ("archive".into(), opt(&ov.archive)),
                         ]),
                     ),
                     (
@@ -1306,6 +1349,7 @@ fn user_handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                             ),
                             ("lowscore".into(), Json::str(g("lowscore", "5"))),
                             ("highscore".into(), Json::str(g("highscore", "20"))),
+                            ("archive".into(), Json::str(g("archive", "yes"))),
                         ]),
                     ),
                 ])
@@ -1335,6 +1379,7 @@ fn user_handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             ov.spamhigh_action = field("spamhigh_action");
             ov.lowscore = field("lowscore");
             ov.highscore = field("highscore");
+            ov.archive = field("archive");
             apply_override(cfg, config_file, &pdir, &domain, ov)
         }
 
@@ -1394,9 +1439,7 @@ fn user_handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             if !quarantine::valid_message_id(&id) || !quarantine_owned(cfg, &id, &domains) {
                 return forbidden();
             }
-            match quarantine::find_message(Path::new(&cfg.quarantine_dir), &id)
-                .and_then(|p| quarantine::read_message(&p).ok())
-            {
+            match body_of(cfg, &id).and_then(|p| quarantine::read_message(&p).ok()) {
                 Some(bytes) => Response::text(200, &String::from_utf8_lossy(&bytes)),
                 None => Response::json(404, r#"{"error":"message not found"}"#),
             }
@@ -1407,7 +1450,7 @@ fn user_handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             if !quarantine::valid_message_id(&id) || !quarantine_owned(cfg, &id, &domains) {
                 return forbidden();
             }
-            match quarantine::find_message(Path::new(&cfg.quarantine_dir), &id) {
+            match body_of(cfg, &id) {
                 Some(p) => match quarantine::release(&p) {
                     Ok(()) => Response::json(200, r#"{"ok":true}"#),
                     Err(e) => {

@@ -73,6 +73,7 @@ pub fn parse_domain_policy(text: &str) -> DomainPolicy {
         virus_delivery: some("virus_delivery"),
         lowscore: some("lowscore"),
         highscore: some("highscore"),
+        archive: some("archive"),
         whitelist: list("whitelist"),
         blacklist: list("blacklist"),
     }
@@ -93,6 +94,7 @@ pub fn domain_policy_text(p: &DomainPolicy) -> String {
     put("virus_delivery", &p.virus_delivery);
     put("lowscore", &p.lowscore);
     put("highscore", &p.highscore);
+    put("archive", &p.archive);
     if !p.whitelist.is_empty() {
         s.push_str(&format!("whitelist={}\n", p.whitelist.join(",")));
     }
@@ -197,7 +199,7 @@ pub fn run(cfg: &Config, policy_path: &Path, override_domains: Option<&str>) -> 
         }
     }
     let domains = gather_domains(override_domains);
-    let rs = rules::RuleSettings::from_settings(&settings);
+    let rs = rules::RuleSettings::from_settings(&settings, &cfg.archive_dir);
     let mut files = rules::generate(&rs, &domains, &wl, &bl, &overrides);
     rules::merge_custom(
         &mut files,
@@ -209,16 +211,20 @@ pub fn run(cfg: &Config, policy_path: &Path, override_domains: Option<&str>) -> 
     for f in &files {
         atomic_write(&rules_dir.join(&f.name), f.contents.as_bytes())?;
     }
+    // Keep MailScanner's Archive Mail directive in step with the generated
+    // ruleset (no-op when nothing changed, so the sync cron cannot loop).
+    let _ = crate::engine::apply_archive(cfg, policy_path);
     Ok(files.len())
 }
 
 /// Canonical rule lines a managed file is expected to contain, regenerated from
 /// the current policy with custom rules merged. Baseline for stray detection.
 pub fn expected_rule_lines(config_file: &Path, name: &str) -> Vec<String> {
+    let cfg = Config::load(config_file);
     let dir = policy_dir(config_file);
     let (settings, wl, bl) = load_policy(&dir);
     let overrides = load_overrides(&dir);
-    let rs = rules::RuleSettings::from_settings(&settings);
+    let rs = rules::RuleSettings::from_settings(&settings, &cfg.archive_dir);
     let domains = gather_domains(None);
     let mut files = rules::generate(&rs, &domains, &wl, &bl, &overrides);
     rules::merge_custom(

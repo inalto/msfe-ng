@@ -26,6 +26,9 @@ pub struct Config {
     pub spambox_conf: String,
     /// MailScanner quarantine spool directory (for the user quarantine viewer).
     pub quarantine_dir: String,
+    /// Where `Archive Mail` copies of scanned messages land
+    /// (`<dir>/<YYYYMMDD>/<message-id>`), backing the message content view.
+    pub archive_dir: String,
     /// Mail log file watched by the admin Service tab.
     pub maillog_path: String,
     /// Exim main log (cPanel: /var/log/exim_mainlog), also viewable there.
@@ -54,6 +57,7 @@ impl Default for Config {
             mailscanner_rules_dir: "/etc/MailScanner/rules".into(),
             spambox_conf: "/etc/msfe-ng/spambox.exim".into(),
             quarantine_dir: "/var/spool/MailScanner/quarantine".into(),
+            archive_dir: "/var/spool/MailScanner/archive".into(),
             maillog_path: "/var/log/maillog".into(),
             exim_mainlog_path: "/var/log/exim_mainlog".into(),
             mailscannerq_conf: "/etc/msfe-ng/mailscannerq.conf".into(),
@@ -90,6 +94,7 @@ impl Config {
                 "mailscanner_rules_dir" => c.mailscanner_rules_dir = v,
                 "spambox_conf" => c.spambox_conf = v,
                 "quarantine_dir" => c.quarantine_dir = v,
+                "archive_dir" => c.archive_dir = v,
                 "maillog_path" => c.maillog_path = v,
                 "exim_mainlog_path" => c.exim_mainlog_path = v,
                 "mailscannerq_conf" => c.mailscannerq_conf = v,

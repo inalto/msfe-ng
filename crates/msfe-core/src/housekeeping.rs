@@ -47,6 +47,9 @@ pub struct BodyPruneReport {
     pub removed: usize,
     pub bytes: u64,
     pub scanned: usize,
+    /// Bodies still on disk after the prune, measured in the same walk.
+    pub kept: usize,
+    pub kept_bytes: u64,
 }
 
 /// Remove quarantined message bodies older than `days` (0 = keep forever).
@@ -58,15 +61,31 @@ pub fn prune_bodies(cfg: &Config, days: u32) -> io::Result<BodyPruneReport> {
         removed: 0,
         bytes: 0,
         scanned: 0,
+        kept: 0,
+        kept_bytes: 0,
     };
     if days == 0 {
         return Ok(report);
     }
     let cutoff = std::time::Duration::from_secs(days as u64 * 86_400);
-    let base = std::path::Path::new(&cfg.quarantine_dir);
-    // MailScanner stores <quarantine>/<date>/<message-id>{,dir}
+    // Both trees hold message bodies and share the retention window.
+    for root in [&cfg.quarantine_dir, &cfg.archive_dir] {
+        if !root.trim().is_empty() {
+            prune_root(std::path::Path::new(root), cutoff, &mut report)?;
+        }
+    }
+    Ok(report)
+}
+
+/// Prune one body tree (`<root>/<date>/<entry>`), accumulating into `report`.
+fn prune_root(
+    base: &std::path::Path,
+    cutoff: std::time::Duration,
+    report: &mut BodyPruneReport,
+) -> io::Result<()> {
+    // MailScanner stores <root>/<date>/<message-id>{,dir}
     let Ok(days_dirs) = std::fs::read_dir(base) else {
-        return Ok(report);
+        return Ok(());
     };
     for day in days_dirs.flatten() {
         let Ok(entries) = std::fs::read_dir(day.path()) else {
@@ -82,6 +101,8 @@ pub fn prune_bodies(cfg: &Config, days: u32) -> io::Result<BodyPruneReport> {
                 .map(|age| age > cutoff)
                 .unwrap_or(false);
             if !old {
+                report.kept += 1;
+                report.kept_bytes += dir_size(&path);
                 continue;
             }
             let size = dir_size(&path);
@@ -103,7 +124,49 @@ pub fn prune_bodies(cfg: &Config, days: u32) -> io::Result<BodyPruneReport> {
             let _ = std::fs::remove_dir(day.path());
         }
     }
-    Ok(report)
+    Ok(())
+}
+
+/// Forget body paths whose files the prune just removed, so the database never
+/// advertises a body that is gone (the UI asks the filesystem, but this keeps
+/// list queries cheap and the data honest).
+pub fn clear_pruned_paths(cfg: &Config, days: u32) -> io::Result<()> {
+    if days == 0 {
+        return Ok(());
+    }
+    db::exec_stdin(
+        cfg,
+        &format!(
+            "UPDATE maillog SET body_path='' \
+             WHERE body_path <> '' AND msg_ts < (NOW() - INTERVAL {days} DAY);\n"
+        ),
+    )
+}
+
+/// Record measured archive usage for the Settings disclosure.
+pub fn record_usage(cfg: &Config, bytes: u64, files: usize) -> io::Result<()> {
+    let sql = format!(
+        "INSERT INTO msfe_config (scope, scope_id, ckey, cvalue) VALUES \
+           ('global','','archive_usage_bytes','{bytes}'), \
+           ('global','','archive_usage_files','{files}'), \
+           ('global','','archive_usage_at', NOW()) \
+         ON DUPLICATE KEY UPDATE cvalue = VALUES(cvalue);\n"
+    );
+    db::exec_stdin(cfg, &sql)
+}
+
+/// (total, available) bytes of the filesystem holding `path`, via `df -kP`.
+pub fn disk_free(path: &str) -> Option<(u64, u64)> {
+    let out = std::process::Command::new("df")
+        .args(["-kP", path])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text.lines().nth(1)?;
+    let f: Vec<&str> = line.split_whitespace().collect();
+    let total: u64 = f.get(1)?.parse().ok()?;
+    let avail: u64 = f.get(3)?.parse().ok()?;
+    Some((total * 1024, avail * 1024))
 }
 
 fn dir_size(p: &std::path::Path) -> u64 {
@@ -148,18 +211,42 @@ mod tests {
         let f = std::fs::File::options().write(true).open(&old).unwrap();
         f.set_modified(past).unwrap();
 
+        // an archived copy in a second tree must be pruned by the same window
+        let arch = base
+            .parent()
+            .unwrap()
+            .join(format!("msfe-arch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&arch);
+        std::fs::create_dir_all(arch.join("20260724")).unwrap();
+        let old_arch = arch.join("20260724").join("1ccccc-0000000CCCC-3ccc");
+        std::fs::write(&old_arch, b"old archived body").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&old_arch)
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+
         let cfg = Config {
             quarantine_dir: base.display().to_string(),
+            archive_dir: arch.display().to_string(),
             ..Default::default()
         };
         // days=0 keeps everything
         assert_eq!(prune_bodies(&cfg, 0).unwrap().removed, 0);
         let r = prune_bodies(&cfg, 14).unwrap();
-        assert_eq!(r.removed, 1);
+        assert_eq!(r.removed, 2, "both the quarantine and archive copies go");
         assert!(r.bytes > 0);
+        assert_eq!(r.kept, 1, "the recent body is counted as kept");
+        assert!(r.kept_bytes > 0);
         assert!(fresh.exists(), "recent body must be kept");
         assert!(!old.exists(), "body past the retention window must go");
+        assert!(
+            !old_arch.exists(),
+            "archived body past the window must go too"
+        );
         std::fs::remove_dir_all(&base).unwrap();
+        let _ = std::fs::remove_dir_all(&arch);
     }
 
     #[test]
