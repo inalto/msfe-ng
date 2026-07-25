@@ -123,6 +123,54 @@ function modal(title){
   return {body,close};
 }
 
+// ---- message tools: daily summary, Bayes status, SpamAssassin lint ----------
+async function showDailySummary(){
+  const m=modal('Daily summary');
+  const sel=el('select');[7,14,30,60,90].forEach(d=>sel.append(el('option',{value:d,...(d===14?{selected:'selected'}:{})},d+' days')));
+  const holder=el('div',{});
+  m.body.append(el('div',{class:'ctl'},el('span',{class:'muted'},'Window:'),sel),holder);
+  const fmtB=b=>{b=+b||0;return b>1073741824?(b/1073741824).toFixed(1)+' GB':b>1048576?(b/1048576).toFixed(1)+' MB':Math.round(b/1024)+' KB';};
+  async function load(){
+    holder.innerHTML='';holder.append(el('div',{class:'muted'},'Loading…'));
+    const d=await api('/api/stats/daily?days='+sel.value);
+    holder.innerHTML='';
+    if(!d||!d.available||!(d.items||[]).length){holder.append(el('div',{class:'empty'},'No data for this window.'));return;}
+    const t=el('table');
+    t.append(el('tr',{},...['Date','Total','Clean','Spam','High spam','Infected','Quarantined','Volume'].map(h=>el('th',{},h))));
+    let tot=0;
+    d.items.forEach(r=>{tot+=r.total;t.append(el('tr',{},
+      el('td',{},r.date),el('td',{class:'num'},r.total),
+      el('td',{class:'num',style:'color:var(--good)'},r.clean),
+      el('td',{class:'num',style:'color:var(--warning)'},r.spam),
+      el('td',{class:'num',style:'color:var(--serious)'},r.highspam),
+      el('td',{class:'num',style:'color:var(--critical)'},r.infected),
+      el('td',{class:'num'},r.quarantined),el('td',{class:'num'},fmtB(r.bytes))));});
+    holder.append(t,el('div',{class:'muted',style:'margin-top:.4rem'},`${tot} messages over ${d.items.length} day(s)`));
+  }
+  sel.onchange=load;load();
+}
+async function showBayes(){
+  const m=modal('SpamAssassin Bayes database');
+  m.body.append(el('div',{class:'muted'},'Loading…'));
+  const d=await api('/api/sa/bayes');
+  m.body.innerHTML='';
+  const t=el('table');
+  (d.rows||[]).forEach(r=>t.append(el('tr',{},el('th',{style:'width:16rem'},r.key),el('td',{},r.value))));
+  m.body.append(t,el('div',{class:'muted',style:'margin-top:.5rem;font-size:.8rem'},
+    'Bayes learns from the messages you train in the message view (Learn as ham / spam). It usually needs a couple of hundred of each before it starts scoring confidently.'));
+}
+async function showSaLint(){
+  const m=modal('SpamAssassin lint test');
+  const verdict=el('div',{class:'statline'},el('span',{class:'muted'},'Running spamassassin --lint …'));
+  const out=el('pre',{class:'log'});
+  m.body.append(verdict,out);
+  const r=await api('/api/sa/lint',{method:'POST'});
+  verdict.innerHTML='';
+  verdict.append(el('span',{style:'font-weight:600;color:'+(r.ok?'var(--good)':'var(--critical)')},
+    r.ok?'✅ SpamAssassin configuration is valid':'❌ Problems found — details below'));
+  out.textContent=r.output||r.error||'(no output)';
+}
+
 // ---- client IP: activity, reverse DNS, csf status and blocking ---------------
 function ipLink(ip){
   if(!ip)return el('span',{});
@@ -401,6 +449,7 @@ async function renderMessages(){
   const FILTERS=[['all','All','var(--accent)'],['blocked','Blocked (releasable)','var(--critical)'],
     ['clean','Clean','var(--good)'],['lowspam','Low Spam','var(--warning)'],
     ['highspam','High Spam','var(--serious)'],['infected','Infected','var(--critical)'],
+    ['attachments','Attachments','var(--serious)'],
     ['wl','Whitelist','var(--good)'],['bl','Blacklist','var(--ink2)'],['quarantined','Quarantined','var(--muted)']];
   const fbar=el('div',{class:'ctl',style:'flex-wrap:wrap'});
   FILTERS.forEach(([key,lbl,color])=>{
@@ -428,6 +477,11 @@ async function renderMessages(){
     Object.assign(el('button',{class:'act plain'},'Refresh'),{onclick:()=>loadList()}),
     auto,el('label',{for:'msgauto',class:'muted'},'auto-refresh (10s)'));
   card.append(sbar);
+  card.append(el('div',{class:'ctl'},
+    el('span',{class:'muted'},'Tools:'),
+    Object.assign(el('button',{class:'act plain'},'Daily summary'),{onclick:showDailySummary}),
+    Object.assign(el('button',{class:'act plain'},'SpamAssassin Bayes'),{onclick:showBayes}),
+    Object.assign(el('button',{class:'act plain'},'SpamAssassin lint'),{onclick:showSaLint})));
 
   // Bulk release / forward of blocked (quarantined) messages
   const bulk=el('div',{class:'ctl',style:'display:none;flex-wrap:wrap'});

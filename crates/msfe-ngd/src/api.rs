@@ -39,6 +39,36 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                 .unwrap_or_else(|| "from_domain".into());
             stat_response(stats::top(cfg, days, &field, limit))
         }
+        ("GET", "/api/stats/daily") => {
+            let days = stats::clamp_int(req.query_param("days").as_deref(), 14, 1, 365);
+            stat_response(stats::daily_summary(cfg, days))
+        }
+        ("GET", "/api/sa/bayes") => {
+            let rows: Vec<Json> = msfe_core::sa::bayes_status()
+                .into_iter()
+                .map(|(k, v)| {
+                    Json::Object(vec![
+                        ("key".into(), Json::str(k)),
+                        ("value".into(), Json::str(v)),
+                    ])
+                })
+                .collect();
+            Response::json(
+                200,
+                &Json::Object(vec![("rows".into(), Json::Array(rows))]).to_string(),
+            )
+        }
+        ("POST", "/api/sa/lint") => {
+            let (ok, output) = msfe_core::sa::lint();
+            Response::json(
+                200,
+                &Json::Object(vec![
+                    ("ok".into(), Json::Bool(ok)),
+                    ("output".into(), Json::str(output)),
+                ])
+                .to_string(),
+            )
+        }
         ("GET", "/api/messages") => {
             let f = stats::MessageFilter {
                 status: req.query_param("status").unwrap_or_else(|| "all".into()),

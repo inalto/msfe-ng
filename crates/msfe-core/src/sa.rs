@@ -171,6 +171,92 @@ pub fn learn(message: &[u8], action: &str) -> ControlOutcome {
     ControlOutcome { ok, transcript }
 }
 
+/// SpamAssassin's Bayes database status (`sa-learn --dump magic`), parsed into
+/// the handful of numbers that matter: how much ham/spam it has learned, token
+/// count, and when it last expired old tokens.
+pub fn bayes_status() -> Vec<(String, String)> {
+    let out = Command::new("sa-learn").args(["--dump", "magic"]).output();
+    let Ok(o) = out else {
+        return vec![("error".into(), "sa-learn is not installed".into())];
+    };
+    let text = String::from_utf8_lossy(&o.stdout);
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        // 0.000          0     3577          0  non-token data: nspam
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 6 || !line.contains("non-token data:") {
+            continue;
+        }
+        let key = f[f.len() - 1];
+        let value = f[2];
+        let label = match key {
+            "nspam" => "Spam messages learned",
+            "nham" => "Ham messages learned",
+            "ntokens" => "Tokens in the database",
+            "oldest_token_age" => "Oldest token",
+            "newest_token_age" => "Newest token",
+            "last_expire" => "Last expiry run",
+            "last_journal_sync" => "Last journal sync",
+            "last_atime_delta" => "Last atime delta",
+            "bayes_db_version" => "Bayes DB version",
+            _ => continue,
+        };
+        let value = if key.ends_with("_age") || key.starts_with("last_") {
+            format_epoch(value)
+        } else {
+            value.to_string()
+        };
+        rows.push((label.to_string(), value));
+    }
+    if rows.is_empty() {
+        rows.push((
+            "status".into(),
+            String::from_utf8_lossy(&o.stderr).trim().to_string(),
+        ));
+    }
+    rows
+}
+
+/// Epoch seconds → a readable "N days ago"; passes other values through.
+fn format_epoch(v: &str) -> String {
+    let Ok(secs) = v.parse::<u64>() else {
+        return v.to_string();
+    };
+    if secs == 0 {
+        return "never".into();
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if secs > 1_000_000_000 && secs <= now {
+        let ago = now - secs;
+        format!("{} days ago", ago / 86_400)
+    } else {
+        format!("{} days", secs / 86_400)
+    }
+}
+
+/// SpamAssassin's own configuration self-check (`spamassassin --lint`).
+pub fn lint() -> (bool, String) {
+    match Command::new("spamassassin").arg("--lint").output() {
+        Ok(o) => {
+            let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+            s.push_str(&String::from_utf8_lossy(&o.stderr));
+            let s = s.trim().to_string();
+            (
+                o.status.success(),
+                if s.is_empty() {
+                    "No problems found — SpamAssassin's configuration is valid.".into()
+                } else {
+                    s
+                },
+            )
+        }
+        Err(e) => (false, format!("cannot run spamassassin: {e}")),
+    }
+}
+
 fn run_with_stdin(cmd: &str, args: &[&str], input: &[u8]) -> std::io::Result<(bool, String)> {
     let mut child = Command::new(cmd)
         .args(args)

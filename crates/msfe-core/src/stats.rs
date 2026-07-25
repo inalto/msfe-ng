@@ -78,6 +78,44 @@ pub fn series(cfg: &Config, days: u32) -> io::Result<Json> {
     ]))
 }
 
+/// Per-day totals for the last `days` days: the legacy "Daily Summary".
+pub fn daily_summary(cfg: &Config, days: u32) -> io::Result<Json> {
+    let days = days.clamp(1, 365);
+    let sql = format!(
+        "SELECT DATE(msg_ts), COUNT(*), \
+                COALESCE(SUM(isspam=0 AND virusinfected=0 AND nameinfected=0 AND otherinfected=0),0), \
+                COALESCE(SUM(isspam=1 AND ishighspam=0),0), \
+                COALESCE(SUM(ishighspam=1),0), \
+                COALESCE(SUM(virusinfected=1 OR nameinfected=1 OR otherinfected=1),0), \
+                COALESCE(SUM(quarantined=1),0), \
+                COALESCE(SUM(size),0) \
+         FROM maillog WHERE msg_ts >= (NOW() - INTERVAL {days} DAY) \
+         GROUP BY DATE(msg_ts) ORDER BY DATE(msg_ts) DESC"
+    );
+    let rows = db::query(cfg, &sql)?;
+    let items = rows
+        .iter()
+        .map(|r| {
+            let f = |i: usize| r.get(i).map(String::as_str).unwrap_or("0");
+            Json::Object(vec![
+                ("date".into(), Json::str(f(0))),
+                ("total".into(), count(f(1))),
+                ("clean".into(), count(f(2))),
+                ("spam".into(), count(f(3))),
+                ("highspam".into(), count(f(4))),
+                ("infected".into(), count(f(5))),
+                ("quarantined".into(), count(f(6))),
+                ("bytes".into(), count(f(7))),
+            ])
+        })
+        .collect();
+    Ok(Json::Object(vec![
+        ("available".into(), Json::Bool(true)),
+        ("days".into(), Json::Int(days as i64)),
+        ("items".into(), Json::Array(items)),
+    ]))
+}
+
 /// The dimensions `top` may group by (allow-list → safe to interpolate).
 pub fn valid_top_field(field: &str) -> Option<&'static str> {
     match field {
@@ -139,6 +177,9 @@ fn status_where(status: &str) -> &'static str {
         "lowspam" => "isspam=1 AND ishighspam=0",
         "highspam" => "ishighspam=1",
         "infected" => "(virusinfected=1 OR nameinfected=1 OR otherinfected=1)",
+        // blocked by a filename/content rule rather than a virus signature —
+        // the legacy "Attachment Emails" view
+        "attachments" => "(nameinfected=1 OR otherinfected=1)",
         "wl" => "spamwhitelisted=1",
         "bl" => "spamblacklisted=1",
         "quarantined" => "quarantined=1",
