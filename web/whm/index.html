@@ -180,6 +180,84 @@ async function showSaLint(){
   out.textContent=r.output||r.error||'(no output)';
 }
 
+// ---- sender: history and white/black listing --------------------------------
+function senderLink(addr){
+  const a=String(addr||'').trim();
+  if(!a||!a.includes('@'))return el('span',{},a);
+  return Object.assign(el('a',{class:'iplink',title:'Sender history, blacklist or whitelist'},a),{onclick:e=>{e.stopPropagation();showSender(a);}});
+}
+async function showSender(addr){
+  const m=modal('Sender '+addr);
+  m.body.append(el('div',{class:'muted'},'Loading…'));
+  const d=await api('/api/sender/info?addr='+encodeURIComponent(addr)+'&days=30');
+  m.body.innerHTML='';
+  const dom=d.domain||'';
+  const stat=(a,label)=>{
+    if(!a||!a.available)return el('span',{});
+    return el('tr',{},el('th',{style:'width:14rem'},label),
+      el('td',{},`${a.total} message(s), ${a.spam} spam / ${a.highspam} high spam / ${a.infected} infected`+
+        (a.last_seen?` — last seen ${a.last_seen}`:'')));
+  };
+  const t=el('table');
+  t.append(stat(d.activity,'From this address (30 days)'));
+  if(dom)t.append(stat(d.domain_activity,`From the whole domain @${dom}`));
+  m.body.append(t);
+
+  const status=el('div',{class:'statline',style:'margin:.6rem 0'});
+  function paintStatus(){
+    status.innerHTML='';
+    const badge=(on,txt,col)=>on?el('span',{class:'badge',style:'background:'+col+';margin-right:.4rem'},txt):el('span',{});
+    status.append(
+      badge(d.addr_blacklisted,'address blacklisted','var(--ink2)'),
+      badge(d.addr_whitelisted,'address whitelisted','var(--good)'),
+      badge(d.domain_blacklisted,`@${dom} blacklisted`,'var(--ink2)'),
+      badge(d.domain_whitelisted,`@${dom} whitelisted`,'var(--good)'),
+      (!d.addr_blacklisted&&!d.addr_whitelisted&&!d.domain_blacklisted&&!d.domain_whitelisted)
+        ? el('span',{class:'muted'},'Not on any list.') : el('span',{}));
+  }
+  paintStatus();
+  m.body.append(status);
+  const out=el('pre',{class:'log',style:'display:none;max-height:8rem'});
+
+  async function apply(pattern,list,remove){
+    const what=remove?`Remove ${pattern} from the ${list}list?`
+      :(list==='black'
+        ? `Blacklist ${pattern}?\n\nMail matching it is treated as spam${pattern.startsWith('*@')?' — this covers every sender at that domain.':'.'}`
+        : `Whitelist ${pattern}?\n\nMail matching it is never marked as spam${pattern.startsWith('*@')?' — this covers every sender at that domain.':'.'}`);
+    if(!confirm(what))return;
+    out.style.display='';out.textContent='▶ applying…';
+    const r=await api('/api/sender/list',{method:'POST',body:{pattern,list,remove}});
+    if(r&&r.ok){
+      out.textContent=`${remove?'removed from':'added to'} the ${list}list — ${r.files} rule files written, reload ${r.reloaded?'ok':'failed'}`;
+      toast('Lists updated');
+      // reflect the change without a reload
+      if(pattern.startsWith('*@')){ if(list==='black')d.domain_blacklisted=!remove; else d.domain_whitelisted=!remove; }
+      else { if(list==='black')d.addr_blacklisted=!remove; else d.addr_whitelisted=!remove; }
+      paintStatus();
+      policy=null;   // Lists/Settings tabs re-fetch
+    } else { out.textContent=(r&&r.error)||'failed'; toast('Update failed'); }
+  }
+  const row=el('div',{class:'ctl',style:'flex-wrap:wrap'});
+  row.append(
+    Object.assign(el('button',{class:'act'},d.addr_blacklisted?'Remove address from blacklist':'Blacklist this address'),
+      {onclick:()=>apply(addr,'black',!!d.addr_blacklisted)}),
+    Object.assign(el('button',{class:'act plain'},d.addr_whitelisted?'Remove address from whitelist':'Whitelist this address'),
+      {onclick:()=>apply(addr,'white',!!d.addr_whitelisted)}));
+  m.body.append(row);
+  if(dom){
+    const drow=el('div',{class:'ctl',style:'flex-wrap:wrap'});
+    drow.append(
+      Object.assign(el('button',{class:'act danger'},d.domain_blacklisted?`Remove @${dom} from blacklist`:`Blacklist the whole domain @${dom}`),
+        {onclick:()=>apply('*@'+dom,'black',!!d.domain_blacklisted)}),
+      Object.assign(el('button',{class:'act plain'},d.domain_whitelisted?`Remove @${dom} from whitelist`:`Whitelist the whole domain @${dom}`),
+        {onclick:()=>apply('*@'+dom,'white',!!d.domain_whitelisted)}));
+    m.body.append(drow,
+      el('div',{class:'muted',style:'font-size:.78rem;margin-top:.4rem'},
+        'Lists are global and take effect immediately (rules are regenerated and MailScanner reloaded). Manage them all in the Lists tab.'));
+  }
+  m.body.append(out);
+}
+
 // ---- client IP: activity, reverse DNS, csf status and blocking ---------------
 // MailScanner records "[ip]:port" / "ip:port" — show and query the bare address
 function bareIp(raw){
@@ -285,6 +363,7 @@ let policy=null; // {settings:{}, whitelist:[], blacklist:[]}
 let days=7;
 
 const tabs={dash:renderDash,settings:renderSettings,lists:renderLists,messages:renderMessages,rules:renderRules,service:renderService,logs:renderLogs,queues:renderQueues,config:renderConfig};
+let dashTimer=null; // dashboard auto-refresh; cleared on every tab switch
 let logTimer=null; // maillog auto-refresh; cleared on every tab switch
 let jrnTimer=null; // restart-console journal polling; cleared on every tab switch
 $('#tabs').addEventListener('click',e=>{
@@ -292,6 +371,7 @@ $('#tabs').addEventListener('click',e=>{
   clearInterval(logTimer);logTimer=null;
   clearInterval(jrnTimer);jrnTimer=null;
   clearInterval(msgTimer);msgTimer=null;
+  clearInterval(dashTimer);dashTimer=null;
   document.querySelectorAll('#tabs button').forEach(x=>x.setAttribute('aria-selected',x===b));
   tabs[b.dataset.tab]();
 });
@@ -302,7 +382,19 @@ async function renderDash(){
   const ctl=el('div',{class:'ctl'},el('span',{class:'muted'},'Window: '));
   const sel=el('select');[7,30,90].forEach(d=>sel.append(el('option',{value:d,...(d===days?{selected:'selected'}:{})},d+' days')));
   sel.onchange=()=>{days=+sel.value;renderDash();};
-  ctl.append(sel);v.append(ctl);
+  const dauto=el('input',{type:'checkbox',id:'dashauto',...(dashTimer?{checked:'checked'}:{})});
+  dauto.onchange=()=>{
+    clearInterval(dashTimer);
+    // re-render only while the Dashboard is the visible tab
+    dashTimer=dauto.checked?setInterval(()=>{
+      if(document.querySelector('#tabs button[data-tab="dash"]').getAttribute('aria-selected')==='true')renderDash();
+    },30000):null;
+  };
+  const stamp=el('span',{class:'muted',style:'margin-left:auto;font-size:.8rem'},'updated '+new Date().toLocaleTimeString());
+  ctl.append(sel,
+    Object.assign(el('button',{class:'act plain'},'Refresh'),{onclick:()=>renderDash()}),
+    dauto,el('label',{for:'dashauto',class:'muted'},'auto-refresh (30s)'),stamp);
+  v.append(ctl);
 
   const tiles=el('div',{class:'tiles'});v.append(tiles);
   const sum=await api('/api/stats/summary?days='+days);
@@ -588,7 +680,7 @@ async function renderMessages(){
         el('td',{},pick),
         el('td',{class:'muted',style:'white-space:nowrap'},m.ts),
         el('td',{class:'num'},m.score||'0'),
-        el('td',{},el('div',{},m.from),el('div',{class:'muted'},m.to)),
+        el('td',{},el('div',{},senderLink(m.from)),el('div',{class:'muted'},m.to)),
         el('td',{},m.subject),
         el('td',{class:'num'},fmtSize(m.size)),
         el('td',{},badgeFor(m)));
@@ -620,7 +712,10 @@ async function renderMessageView(id){
   const dt=el('table');
   const row=(k,val)=>{if(val!=null&&String(val).trim()!=='')dt.append(el('tr',{},el('th',{style:'width:12rem'},k),el('td',{style:'word-break:break-word'},String(val))));};
   row('Scan status',lbl);row('Message ID',d.id);row('Date received',d.ts);
-  row('From',d.from);row('To',d.to);row('Subject',d.subject);
+  if(d.from&&String(d.from).trim()!=='')
+    dt.append(el('tr',{},el('th',{style:'width:12rem'},'From'),
+      el('td',{},senderLink(d.from),el('span',{class:'muted'},'  (click to blacklist the address or its domain)'))));
+  row('To',d.to);row('Subject',d.subject);
   row('Size',fmtSize(d.size)+` (${d.size} bytes)`);
   if(d.clientip&&String(d.clientip).trim()!=='')
     dt.append(el('tr',{},el('th',{style:'width:12rem'},'Client IP'),el('td',{},ipLink(d.clientip),el('span',{class:'muted'},'  (click for details and firewall actions)'))));

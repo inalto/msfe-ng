@@ -174,6 +174,51 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             }
             Response::json(200, &detail.to_string())
         }
+        // ---- sender: history + current list membership -----------------------
+        ("GET", "/api/sender/info") => {
+            let addr = req.query_param("addr").unwrap_or_default();
+            let addr_l = addr.trim().to_lowercase();
+            let domain = addr_l.rsplit_once('@').map(|(_, d)| d.to_string());
+            let days = stats::clamp_int(req.query_param("days").as_deref(), 30, 0, 3650) as u32;
+            let activity = stats::sender_activity(cfg, &addr_l, days)
+                .unwrap_or(Json::Object(vec![("available".into(), Json::Bool(false))]));
+            let domain_activity = domain
+                .as_ref()
+                .and_then(|d| stats::sender_activity(cfg, &format!("@{d}"), days).ok())
+                .unwrap_or(Json::Object(vec![("available".into(), Json::Bool(false))]));
+            // membership in the global lists (the Lists tab's data)
+            let (_, wl, bl) = sync::load_policy(&sync::policy_dir(config_file));
+            let listed = |list: &[String], pat: &str| list.iter().any(|e| e.trim() == pat);
+            let dom_pat = domain
+                .as_ref()
+                .map(|d| format!("*@{d}"))
+                .unwrap_or_default();
+            Response::json(
+                200,
+                &Json::Object(vec![
+                    ("addr".into(), Json::str(&addr_l)),
+                    (
+                        "domain".into(),
+                        domain.clone().map(Json::Str).unwrap_or(Json::Null),
+                    ),
+                    ("activity".into(), activity),
+                    ("domain_activity".into(), domain_activity),
+                    ("addr_blacklisted".into(), Json::Bool(listed(&bl, &addr_l))),
+                    ("addr_whitelisted".into(), Json::Bool(listed(&wl, &addr_l))),
+                    (
+                        "domain_blacklisted".into(),
+                        Json::Bool(!dom_pat.is_empty() && listed(&bl, &dom_pat)),
+                    ),
+                    (
+                        "domain_whitelisted".into(),
+                        Json::Bool(!dom_pat.is_empty() && listed(&wl, &dom_pat)),
+                    ),
+                ])
+                .to_string(),
+            )
+        }
+        ("POST", "/api/sender/list") => sender_list(req, cfg, config_file),
+
         // ---- client IP: intel + firewall (csf) ------------------------------
         ("GET", "/api/ip/geo") => {
             let ip = msfe_core::csf::normalize_ip(&req.query_param("ip").unwrap_or_default());
@@ -623,6 +668,68 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
         ("POST", "/api/rules/adopt") => rules_adopt(req, cfg, config_file),
 
         _ => Response::json(404, r#"{"error":"not found"}"#),
+    }
+}
+
+/// A pattern accepted into the white/black lists: `user@domain` or `*@domain`.
+/// Rejects whitespace and anything that could break the TAB-separated rule
+/// files these end up in.
+fn valid_list_pattern(p: &str) -> bool {
+    let p = p.trim();
+    !p.is_empty()
+        && p.len() <= 254
+        && p.contains('@')
+        && !p.contains(char::is_whitespace)
+        && p.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'@' | b'.' | b'_' | b'-' | b'+' | b'*')
+        })
+}
+
+/// Add or remove a sender pattern from the global white/black lists, then
+/// regenerate the rules — the same path the Lists tab uses, so one code path
+/// owns list changes.
+fn sender_list(req: &Request, cfg: &Config, config_file: &Path) -> Response {
+    let v = match Json::parse(&req.body) {
+        Ok(v) => v,
+        Err(e) => return Response::json(400, &format!("{{\"error\":\"bad json: {e}\"}}")),
+    };
+    let pattern = v.str_field("pattern").trim().to_lowercase();
+    let list = v.str_field("list"); // "black" | "white"
+    let remove = matches!(v.get("remove"), Some(Json::Bool(true)));
+    if !valid_list_pattern(&pattern) {
+        return Response::json(
+            400,
+            r#"{"error":"pattern must be an address or *@domain, without spaces"}"#,
+        );
+    }
+    if list != "black" && list != "white" {
+        return Response::json(400, r#"{"error":"list must be black or white"}"#);
+    }
+    let pdir = sync::policy_dir(config_file);
+    let (settings, mut wl, mut bl) = sync::load_policy(&pdir);
+    let target = if list == "black" { &mut bl } else { &mut wl };
+    let existed = target
+        .iter()
+        .any(|e| e.trim().eq_ignore_ascii_case(&pattern));
+    if remove {
+        target.retain(|e| !e.trim().eq_ignore_ascii_case(&pattern));
+    } else if !existed {
+        target.push(pattern.clone());
+    }
+    if let Err(e) = sync::save_policy(&pdir, &settings, &wl, &bl) {
+        return Response::json(500, &format!("{{\"error\":\"cannot save lists: {e}\"}}"));
+    }
+    match sync::run(cfg, config_file, None) {
+        Ok(n) => {
+            let reloaded = sync::reload_mailscanner();
+            Response::json(
+                200,
+                &format!(
+                    "{{\"ok\":true,\"pattern\":\"{pattern}\",\"list\":\"{list}\",\"removed\":{remove},\"files\":{n},\"reloaded\":{reloaded}}}"
+                ),
+            )
+        }
+        Err(e) => Response::json(500, &format!("{{\"error\":\"sync failed: {e}\"}}")),
     }
 }
 

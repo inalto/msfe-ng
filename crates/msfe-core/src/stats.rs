@@ -298,6 +298,50 @@ pub fn storage(cfg: &Config, bodydays: u32) -> io::Result<Json> {
     ]))
 }
 
+/// What this server has seen from one sender address (or a whole domain when
+/// `addr` starts with `@`), for the sender modal's blacklist decision.
+pub fn sender_activity(cfg: &Config, addr: &str, days: u32) -> io::Result<Json> {
+    let addr = addr.trim().to_lowercase();
+    let (col, needle) = match addr.strip_prefix('@') {
+        Some(domain) => ("from_domain", domain.to_string()),
+        None => ("from_address", addr.clone()),
+    };
+    let window = if days > 0 {
+        format!(
+            " AND msg_ts >= (NOW() - INTERVAL {} DAY)",
+            days.clamp(1, 3650)
+        )
+    } else {
+        String::new()
+    };
+    let sql = format!(
+        "SELECT COUNT(*), \
+                COALESCE(SUM(isspam=1),0), COALESCE(SUM(ishighspam=1),0), \
+                COALESCE(SUM(virusinfected=1 OR nameinfected=1 OR otherinfected=1),0), \
+                COALESCE(SUM(quarantined=1),0), \
+                COALESCE(MIN(msg_ts),''), COALESCE(MAX(msg_ts),''), \
+                COALESCE(ROUND(AVG(sascore),2),0) \
+         FROM maillog WHERE {col} = {}{window}",
+        sql_quote(&needle)
+    );
+    let rows = db::query(cfg, &sql)?;
+    let r = rows.first().cloned().unwrap_or_default();
+    let g = |i: usize| r.get(i).cloned().unwrap_or_default();
+    Ok(Json::Object(vec![
+        ("available".into(), Json::Bool(true)),
+        ("addr".into(), Json::str(&addr)),
+        ("days".into(), Json::Int(days as i64)),
+        ("total".into(), count(&g(0))),
+        ("spam".into(), count(&g(1))),
+        ("highspam".into(), count(&g(2))),
+        ("infected".into(), count(&g(3))),
+        ("quarantined".into(), count(&g(4))),
+        ("first_seen".into(), Json::str(g(5))),
+        ("last_seen".into(), Json::str(g(6))),
+        ("avg_score".into(), Json::str(g(7))),
+    ]))
+}
+
 /// What this server has seen from one client IP: volume, verdict mix, when it
 /// first and last appeared, and its most frequent senders/recipients.
 pub fn ip_activity(cfg: &Config, ip: &str, days: u32) -> io::Result<Json> {
