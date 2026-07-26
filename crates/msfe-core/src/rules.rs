@@ -56,7 +56,7 @@ impl Default for RuleSettings {
             store: false,
             archive: true,
             archive_dir_rule: "FromOrTo:".into(),
-            archive_value: "/var/spool/MailScanner/archive/_DATE_".into(),
+            archive_value: "/var/spool/MailScanner/archive".into(),
         }
     }
 }
@@ -139,7 +139,9 @@ impl RuleSettings {
             archive_value: {
                 let custom = or("archive_path", "");
                 if custom.is_empty() {
-                    format!("{}/_DATE_", archive_dir.trim_end_matches('/'))
+                    // MailScanner adds its own <date>/ under this, giving the
+                    // <archive_dir>/<date>/<id> layout that matches quarantine.
+                    archive_dir.trim_end_matches('/').to_string()
                 } else {
                     custom
                 }
@@ -537,7 +539,7 @@ mod tests {
         let a = files.iter().find(|f| f.name == "archive.rules").unwrap();
         assert!(a
             .contents
-            .contains("FromOrTo:\t*@shop.example\t/var/spool/MailScanner/archive/_DATE_\n"));
+            .contains("FromOrTo:\t*@shop.example\t/var/spool/MailScanner/archive\n"));
         assert!(
             !a.contents.contains("private.example"),
             "opt-out domain must not be archived"

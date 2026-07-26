@@ -237,7 +237,10 @@ sub extract_row {
         $ts[5] + 1900, $ts[4] + 1, $ts[3], $ts[2], $ts[1], $ts[0]);
 
     my $quarantined = (scalar(@quarant) + scalar(@spamarch)) > 0 ? 1 : 0;
-    my $body_path = body_path_of($m->{id} // '', \@quarant, \@spamarch, \@archive);
+    # MailScanner writes archived copies to <archive-dir>/<date>/<id>; build
+    # the same date the message row uses so the recorded path is exact.
+    my $datedir = sprintf('%04d%02d%02d', $ts[5] + 1900, $ts[4] + 1, $ts[3]);
+    my $body_path = body_path_of($m->{id} // '', $datedir, \@quarant, \@spamarch, \@archive);
 
     return (
         msg_ts          => $msg_ts,
@@ -283,17 +286,19 @@ sub extract_row {
 # paths; archive entries may be a directory (one file per message), an mbox
 # file, or an email address (skipped).
 sub body_path_of {
-    my ($id, $quar, $spam, $arch) = @_;
+    my ($id, $datedir, $quar, $spam, $arch) = @_;
     return '' unless defined $id && $id ne '';
+    # quarantine/spam entries are already full paths incl. their date dir
     for my $p (@$quar, @$spam) {
         next unless defined $p && $p =~ m{^/};
         return $p if -e $p;
         return "$p/$id" if -d $p && -e "$p/$id";
     }
+    # archive entries are the target directory; MailScanner appends <date>/<id>
     my $first = '';
     for my $p (@$arch) {
         next unless defined $p && $p =~ m{^/};   # skip forwarding addresses
-        my $cand = -d $p ? "$p/$id" : $p;
+        my $cand = -d $p ? "$p/$datedir/$id" : $p;
         return $cand if -e $cand;
         $first ||= $cand;
     }
