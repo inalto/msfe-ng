@@ -18,12 +18,21 @@ fn load_template(area: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|_| FALLBACK.to_string())
 }
 
+/// The compiled Tailwind + design-system CSS for an area (`web/<area>/app.css`,
+/// built from `web/src/app.css`). Inlined into the page so the panel CGI proxy
+/// serves the whole SPA in one response. Missing file → unstyled but functional.
+fn load_css(area: &str) -> String {
+    let path = format!("{}/{}/app.css", web_root(), area);
+    std::fs::read_to_string(&path).unwrap_or_default()
+}
+
 pub fn render(view: View, panel: &dyn Panel) -> String {
     let (area, title) = match view {
         View::Admin => ("whm", "MSFE-NG — Admin"),
         View::User => ("user", "MSFE-NG — Mail Settings"),
     };
     load_template(area)
+        .replace("{{APPCSS}}", &load_css(area))
         .replace("{{TITLE}}", title)
         .replace("{{VERSION}}", VERSION)
         .replace("{{PANEL}}", panel.display_name())

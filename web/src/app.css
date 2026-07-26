@@ -1,0 +1,556 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ==========================================================================
+   MSFE-NG design system — "instrument panel"
+   Cool slate neutrals, one technical cyan-teal accent, machine data set in a
+   tabular monospace. Colors live in CSS variables so a single utility follows
+   the theme; the variables swap for light/dark, the utilities never do.
+   ========================================================================== */
+
+@layer base {
+  :root {
+    color-scheme: light dark;
+    --page: #eef1f4;
+    --surface: #ffffff;
+    --surface-2: #f4f6f9;
+    --line: #dde2e8;
+    --ring: rgba(14, 116, 144, 0.35);
+    --ink: #0f172a;
+    --ink2: #475569;
+    --muted: #8a95a5;
+    --accent: #0e7490;
+    --accent-strong: #0b5e73;
+    --accent-weak: rgba(14, 116, 144, 0.1);
+    --accent-ink: #ffffff;
+    /* validated status palette (data-viz reference) */
+    --good: #0ca30c;
+    --warning: #d98a0b;
+    --serious: #ec835a;
+    --critical: #d03b3b;
+    --grid: #e3e7ec;
+    --axis: #c3c2b7;
+    --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+      Helvetica, Arial, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas,
+      monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      --page: #0a0e13;
+      --surface: #141b23;
+      --surface-2: #1b232d;
+      --line: #26303b;
+      --ring: rgba(34, 193, 221, 0.4);
+      --ink: #eef2f6;
+      --ink2: #b6c2d0;
+      --muted: #7c8a99;
+      --accent: #22c1dd;
+      --accent-strong: #3fcfe8;
+      --accent-weak: rgba(34, 193, 221, 0.14);
+      --accent-ink: #04222a;
+      --good: #22c55e;
+      --warning: #f5a623;
+      --serious: #f0916b;
+      --critical: #ef5151;
+      --grid: #26303b;
+      --axis: #383835;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --page: #0a0e13;
+    --surface: #141b23;
+    --surface-2: #1b232d;
+    --line: #26303b;
+    --ring: rgba(34, 193, 221, 0.4);
+    --ink: #eef2f6;
+    --ink2: #b6c2d0;
+    --muted: #7c8a99;
+    --accent: #22c1dd;
+    --accent-strong: #3fcfe8;
+    --accent-weak: rgba(34, 193, 221, 0.14);
+    --accent-ink: #04222a;
+    --good: #22c55e;
+    --warning: #f5a623;
+    --serious: #f0916b;
+    --critical: #ef5151;
+    --grid: #26303b;
+    --axis: #383835;
+  }
+
+  body {
+    @apply bg-page text-ink font-sans antialiased;
+    margin: 0;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  /* machine data — IPs, message-ids, scores, queue-ids — reads as one system */
+  .data,
+  code,
+  kbd {
+    @apply font-mono;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Preflight flattens headings and links; restore sensible semantic defaults
+     (component classes like .card h2 / a.iplink still override these). */
+  h1 {
+    font-size: 1.35rem;
+    font-weight: 650;
+    letter-spacing: -0.02em;
+  }
+  h2 {
+    font-size: 1rem;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+  }
+  h3 {
+    font-size: 0.88rem;
+    font-weight: 600;
+  }
+  a {
+    color: var(--accent);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+}
+
+@layer components {
+  /* ---- app shell: persistent left instrument rail ---------------------- */
+  .app {
+    display: grid;
+    grid-template-columns: 15rem 1fr;
+    min-height: 100vh;
+  }
+  .rail {
+    @apply bg-surface;
+    border-right: 1px solid var(--line);
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    padding: 0.9rem 0.7rem;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow: auto;
+  }
+  .rail .brand {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.25rem 0.4rem 0.9rem;
+  }
+  .rail .brand .logo {
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    background: var(--accent);
+    color: var(--accent-ink);
+    display: grid;
+    place-items: center;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+  }
+  .rail .brand b {
+    font-size: 0.9rem;
+    letter-spacing: -0.01em;
+  }
+  .rail nav {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+  }
+  .rail nav button {
+    @apply font-sans text-ink2;
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    text-align: left;
+    border: 0;
+    background: none;
+    padding: 0.5rem 0.6rem;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.86rem;
+  }
+  .rail nav button:hover {
+    background: var(--surface-2);
+    color: var(--ink);
+  }
+  .rail nav button[aria-selected="true"] {
+    background: var(--accent-weak);
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .rail nav button .ico {
+    width: 1.05rem;
+    text-align: center;
+    opacity: 0.85;
+    font-size: 0.95rem;
+  }
+  .rail .foot {
+    margin-top: auto;
+    padding-top: 0.7rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    font-size: 0.72rem;
+    color: var(--muted);
+  }
+  .rail .health {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.4rem 0.5rem;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    font-size: 0.75rem;
+    color: var(--ink2);
+  }
+  .content {
+    min-width: 0;
+  }
+  .content > main {
+    padding: 1.25rem 1.4rem;
+  }
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    padding: 0.8rem 1.4rem;
+    border-bottom: 1px solid var(--line);
+    background: var(--surface);
+  }
+  .topbar h1 {
+    font-size: 0.98rem;
+    margin: 0;
+    letter-spacing: -0.01em;
+  }
+  .topbar .meta {
+    margin-left: auto;
+    color: var(--muted);
+    font-size: 0.78rem;
+  }
+  .iconbtn {
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--ink2);
+    border-radius: 8px;
+    padding: 0.3rem 0.55rem;
+    cursor: pointer;
+    font-size: 0.8rem;
+  }
+  .iconbtn:hover {
+    background: var(--surface-2);
+    color: var(--ink);
+  }
+
+  /* ---- cards, tiles ---------------------------------------------------- */
+  .card {
+    @apply bg-surface;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 1rem 1.15rem;
+    margin-bottom: 1rem;
+  }
+  .card h2 {
+    font-size: 0.9rem;
+    margin: 0 0 0.75rem;
+    letter-spacing: -0.01em;
+  }
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
+    gap: 0.75rem;
+  }
+  .tile {
+    @apply bg-surface;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 0.8rem 0.9rem;
+  }
+  .tile .lbl {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    color: var(--ink2);
+    font-size: 0.78rem;
+  }
+  .tile .dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+  }
+  .tile .val {
+    font-size: 1.7rem;
+    font-weight: 650;
+    margin-top: 0.2rem;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+  .row {
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+  .row > .card {
+    flex: 1;
+    min-width: 18rem;
+  }
+
+  /* ---- controls -------------------------------------------------------- */
+  .ctl {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    margin-bottom: 1rem;
+    flex-wrap: wrap;
+  }
+  select,
+  input,
+  textarea,
+  button.act {
+    font: inherit;
+    color: var(--ink);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 0.4rem 0.6rem;
+  }
+  select:focus-visible,
+  input:focus-visible,
+  textarea:focus-visible,
+  button:focus-visible,
+  .rail nav button:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 1px;
+  }
+  button.act {
+    background: var(--accent);
+    color: var(--accent-ink);
+    border-color: transparent;
+    cursor: pointer;
+    font-weight: 600;
+  }
+  button.act:hover {
+    background: var(--accent-strong);
+  }
+  button.act:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  button.act.danger {
+    background: var(--critical);
+    color: #fff;
+  }
+  button.act.danger:hover {
+    filter: brightness(0.93);
+  }
+  button.act.plain {
+    background: var(--surface);
+    color: var(--ink);
+    border: 1px solid var(--line);
+    font-weight: 500;
+  }
+  button.act.plain:hover {
+    background: var(--surface-2);
+  }
+  label.field {
+    display: grid;
+    gap: 0.25rem;
+    margin-bottom: 0.7rem;
+    font-size: 0.82rem;
+    color: var(--ink2);
+  }
+  label.field input,
+  label.field select {
+    width: 100%;
+  }
+  .grid2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0 1.25rem;
+  }
+  textarea {
+    width: 100%;
+    min-height: 14rem;
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    resize: vertical;
+  }
+
+  /* ---- tables ---------------------------------------------------------- */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.82rem;
+  }
+  th,
+  td {
+    text-align: left;
+    padding: 0.4rem 0.5rem;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+  }
+  th {
+    color: var(--muted);
+    font-weight: 600;
+  }
+  tbody tr:hover td {
+    background: var(--surface-2);
+  }
+  td.num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    font-family: var(--font-mono);
+  }
+
+  /* ---- misc bits ------------------------------------------------------- */
+  .badge {
+    display: inline-block;
+    padding: 0.05rem 0.4rem;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    color: #fff;
+  }
+  .bars text {
+    fill: var(--ink2);
+  }
+  .bars .axis {
+    stroke: var(--axis);
+  }
+  .bars .grid {
+    stroke: var(--grid);
+  }
+  .empty {
+    color: var(--muted);
+    padding: 1.5rem 0;
+    text-align: center;
+  }
+  pre.log {
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 0.6rem 0.8rem;
+    font: 0.76rem/1.45 var(--font-mono);
+    max-height: 24rem;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    margin: 0;
+  }
+  .statline {
+    display: flex;
+    gap: 1.2rem;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-bottom: 0.8rem;
+  }
+  .statline .dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 0.35rem;
+  }
+  .modal-bg {
+    position: fixed;
+    inset: 0;
+    background: rgba(2, 6, 12, 0.5);
+    display: grid;
+    place-items: center;
+    z-index: 50;
+    padding: 1rem;
+    backdrop-filter: blur(2px);
+  }
+  .modal {
+    @apply bg-surface;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    max-width: 52rem;
+    width: 100%;
+    max-height: 88vh;
+    overflow: auto;
+    padding: 1.1rem 1.25rem;
+    box-shadow: 0 18px 50px rgba(2, 6, 12, 0.35);
+  }
+  .modal h2 {
+    margin-top: 0;
+    font-size: 1.08rem;
+    font-weight: 650;
+  }
+  .modal .close {
+    float: right;
+    cursor: pointer;
+    border: 0;
+    background: none;
+    font-size: 1.3rem;
+    color: var(--ink2);
+    line-height: 1;
+  }
+  a.iplink {
+    color: var(--accent);
+    cursor: pointer;
+    text-decoration: underline;
+    font-family: var(--font-mono);
+  }
+  .toast {
+    position: fixed;
+    bottom: 1rem;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--ink);
+    color: var(--page);
+    padding: 0.5rem 1rem;
+    border-radius: 8px;
+    opacity: 0;
+    transition: opacity 0.2s;
+    pointer-events: none;
+    z-index: 60;
+  }
+  .toast.show {
+    opacity: 1;
+  }
+  .muted {
+    color: var(--muted);
+  }
+
+  /* responsive: rail collapses to a top strip on narrow screens */
+  @media (max-width: 720px) {
+    .app {
+      grid-template-columns: 1fr;
+    }
+    .rail {
+      position: static;
+      height: auto;
+      flex-direction: row;
+      flex-wrap: wrap;
+      align-items: center;
+      border-right: 0;
+      border-bottom: 1px solid var(--line);
+    }
+    .rail nav {
+      flex-direction: row;
+      flex-wrap: wrap;
+    }
+    .rail .foot {
+      margin: 0 0 0 auto;
+      flex-direction: row;
+      align-items: center;
+    }
+    .rail .health {
+      display: none;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * {
+      transition: none !important;
+      animation: none !important;
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "msfe-ng-web",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Build tooling for the MSFE-NG admin/user SPAs (Tailwind CSS).",
+  "scripts": {
+    "build": "tailwindcss -c tailwind.config.js -i src/app.css -o whm/app.css --minify && cp whm/app.css user/app.css"
+  },
+  "devDependencies": {
+    "tailwindcss": "3.4.17"
+  }
+}

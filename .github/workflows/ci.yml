@@ -20,6 +20,29 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install web deps
+        working-directory: web
+        run: npm ci
+      - name: Build Tailwind CSS
+        working-directory: web
+        run: npm run build
+      - name: Committed CSS is up to date
+        # If this fails, run `npm run build` in web/ and commit the result.
+        run: git diff --exit-code web/whm/app.css web/user/app.css
+      - name: SPA JS syntax
+        run: |
+          for area in whm user; do
+            sed -n '/<script>/,/<\/script>/p' "web/$area/index.html" | sed '1d;$d' > "/tmp/$area.js"
+            echo "== node --check $area"; node --check "/tmp/$area.js"
+          done
+
   scripts:
     runs-on: ubuntu-latest
     steps:

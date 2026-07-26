@@ -2,92 +2,37 @@
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{TITLE}}</title>
-<style>
-  /* Palette from the data-viz reference (status colors validated; blue single-series). */
-  :root{
-    color-scheme: light dark;
-    --page:#f9f9f7; --surface:#fcfcfb; --line:#e1e0d9; --ring:rgba(11,11,11,.10);
-    --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
-    --accent:#2a78d6; --grid:#e1e0d9; --axis:#c3c2b7;
-    --good:#0ca30c; --warning:#fab219; --serious:#ec835a; --critical:#d03b3b;
-  }
-  @media (prefers-color-scheme:dark){:root:where(:not([data-theme="light"])){
-    --page:#0d0d0d; --surface:#1a1a19; --line:#2c2c2a; --ring:rgba(255,255,255,.10);
-    --ink:#fff; --ink2:#c3c2b7; --muted:#898781;
-    --accent:#3987e5; --grid:#2c2c2a; --axis:#383835;
-  }}
-  :root[data-theme="dark"]{
-    --page:#0d0d0d; --surface:#1a1a19; --line:#2c2c2a; --ring:rgba(255,255,255,.10);
-    --ink:#fff; --ink2:#c3c2b7; --muted:#898781;
-    --accent:#3987e5; --grid:#2c2c2a; --axis:#383835;
-  }
-  *{box-sizing:border-box}
-  body{font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;margin:0;background:var(--page);color:var(--ink)}
-  header{display:flex;align-items:center;gap:.7rem;padding:1rem 1.25rem;border-bottom:1px solid var(--line);background:var(--surface)}
-  .logo{width:32px;height:32px;border-radius:8px;background:var(--accent);color:#fff;display:grid;place-items:center;font-weight:700}
-  header h1{font-size:1.05rem;margin:0}
-  header .meta{margin-left:auto;color:var(--muted);font-size:.8rem}
-  nav.tabs{display:flex;gap:.25rem;padding:.5rem 1rem 0;border-bottom:1px solid var(--line);background:var(--surface)}
-  nav.tabs button{font:inherit;border:0;background:none;color:var(--ink2);padding:.55rem .9rem;border-radius:8px 8px 0 0;cursor:pointer;border-bottom:2px solid transparent}
-  nav.tabs button[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}
-  main{width:100%;margin:0;padding:1.25rem}
-  .card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:1rem 1.15rem;margin-bottom:1rem}
-  .card h2{font-size:.95rem;margin:0 0 .75rem}
-  .tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(9rem,1fr));gap:.75rem}
-  .tile{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:.8rem .9rem}
-  .tile .lbl{display:flex;align-items:center;gap:.4rem;color:var(--ink2);font-size:.8rem}
-  .tile .dot{width:9px;height:9px;border-radius:50%}
-  .tile .val{font-size:1.7rem;font-weight:650;margin-top:.2rem;font-variant-numeric:tabular-nums}
-  .row{display:flex;gap:1rem;flex-wrap:wrap}
-  .row>.card{flex:1;min-width:18rem}
-  .ctl{display:flex;gap:.5rem;align-items:center;margin-bottom:1rem}
-  select,input,textarea,button.act{font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:.4rem .6rem}
-  button.act{background:var(--accent);color:#fff;border-color:transparent;cursor:pointer;font-weight:600}
-  button.act:disabled{opacity:.5;cursor:default}
-  label.field{display:grid;gap:.25rem;margin-bottom:.7rem;font-size:.82rem;color:var(--ink2)}
-  label.field input,label.field select{width:100%}
-  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 1.25rem}
-  textarea{width:100%;min-height:14rem;font-family:ui-monospace,monospace;font-size:.82rem;resize:vertical}
-  table{width:100%;border-collapse:collapse;font-size:.82rem}
-  th,td{text-align:left;padding:.4rem .5rem;border-bottom:1px solid var(--line);vertical-align:top}
-  th{color:var(--muted);font-weight:600}
-  td.num{text-align:right;font-variant-numeric:tabular-nums}
-  .badge{display:inline-block;padding:.05rem .4rem;border-radius:999px;font-size:.72rem;color:#fff}
-  .bars text{fill:var(--ink2)} .bars .axis{stroke:var(--axis)} .bars .grid{stroke:var(--grid)}
-  .empty{color:var(--muted);padding:1.5rem 0;text-align:center}
-  pre.log{background:var(--page);border:1px solid var(--line);border-radius:8px;padding:.6rem .8rem;font:.76rem/1.45 ui-monospace,monospace;max-height:24rem;overflow:auto;white-space:pre-wrap;word-break:break-all;margin:0}
-  button.act.danger{background:var(--critical)}
-  button.act.plain{background:var(--surface);color:var(--ink);border:1px solid var(--line);font-weight:500}
-  .statline{display:flex;gap:1.2rem;flex-wrap:wrap;align-items:center;margin-bottom:.8rem}
-  .statline .dot{width:9px;height:9px;border-radius:50%;display:inline-block;margin-right:.35rem}
-  .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.45);display:grid;place-items:center;z-index:50;padding:1rem}
-  .modal{background:var(--surface);border:1px solid var(--line);border-radius:12px;max-width:52rem;width:100%;max-height:88vh;overflow:auto;padding:1.1rem 1.25rem;box-shadow:0 10px 40px rgba(0,0,0,.3)}
-  .modal h2{margin-top:0}
-  .modal .close{float:right;cursor:pointer;border:0;background:none;font-size:1.3rem;color:var(--ink2);line-height:1}
-  a.iplink{color:var(--accent);cursor:pointer;text-decoration:underline}
-  .toast{position:fixed;bottom:1rem;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--page);padding:.5rem 1rem;border-radius:8px;opacity:0;transition:opacity .2s;pointer-events:none}
-  .toast.show{opacity:1}
-  .muted{color:var(--muted)}
-</style></head>
+<!-- Compiled Tailwind + design system (web/src/app.css → web/whm/app.css),
+     inlined at serve time so the panel CGI proxy needs no second request. -->
+<style>{{APPCSS}}</style></head>
 <body>
-  <header>
-    <span class="logo">MS</span>
-    <h1>MSFE-NG · MailScanner Front-End</h1>
-    <span class="meta">{{VIEW}} · {{PANEL}} · v{{VERSION}}</span>
-  </header>
-  <nav class="tabs" id="tabs">
-    <button data-tab="dash" aria-selected="true">Dashboard</button>
-    <button data-tab="settings" aria-selected="false">Settings</button>
-    <button data-tab="lists" aria-selected="false">Lists</button>
-    <button data-tab="messages" aria-selected="false">Messages</button>
-    <button data-tab="rules" aria-selected="false">Rules</button>
-    <button data-tab="service" aria-selected="false">Service</button>
-    <button data-tab="logs" aria-selected="false">Logs</button>
-    <button data-tab="queues" aria-selected="false">Queues</button>
-    <button data-tab="config" aria-selected="false">Config</button>
-  </nav>
-  <div id="doctorbar" style="display:none;padding:.5rem 1.25rem;border-bottom:1px solid var(--line);font-size:.85rem"></div>
-  <main id="view"></main>
+  <div class="app">
+    <aside class="rail">
+      <div class="brand"><span class="logo">MS</span><b>MSFE-NG</b></div>
+      <nav id="tabs" aria-label="Sections">
+        <button data-tab="dash" aria-selected="true"><span class="ico">◧</span>Dashboard</button>
+        <button data-tab="settings" aria-selected="false"><span class="ico">⚙</span>Settings</button>
+        <button data-tab="lists" aria-selected="false"><span class="ico">☰</span>Lists</button>
+        <button data-tab="messages" aria-selected="false"><span class="ico">✉</span>Messages</button>
+        <button data-tab="rules" aria-selected="false"><span class="ico">⌥</span>Rules</button>
+        <button data-tab="service" aria-selected="false"><span class="ico">◉</span>Service</button>
+        <button data-tab="logs" aria-selected="false"><span class="ico">≡</span>Logs</button>
+        <button data-tab="queues" aria-selected="false"><span class="ico">⇥</span>Queues</button>
+        <button data-tab="config" aria-selected="false"><span class="ico">⛭</span>Config</button>
+      </nav>
+      <div class="foot">
+        <div class="health" id="railhealth"><span class="dot" style="width:8px;height:8px;border-radius:50%;background:var(--muted)"></span><span>checking…</span></div>
+        <div style="display:flex;align-items:center;gap:.4rem">
+          <button class="iconbtn" id="themebtn" title="Toggle light / dark / auto">◑ Theme</button>
+        </div>
+        <div>{{VIEW}} · {{PANEL}} · v{{VERSION}}</div>
+      </div>
+    </aside>
+    <div class="content">
+      <div id="doctorbar" style="display:none;padding:.5rem 1.4rem;border-bottom:1px solid var(--line);font-size:.85rem"></div>
+      <main id="view"></main>
+    </div>
+  </div>
   <div class="toast" id="toast"></div>
 
 <script>
@@ -117,6 +62,16 @@ const el=(t,a={},...c)=>{const n=document.createElement(t);for(const k in a){if(
 const esc=s=>String(s??'').replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));
 api('/api/config').then(c=>{if(c&&!c.error)PREFS=Object.assign(PREFS,c);});
 function toast(msg){const t=$('#toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2200);}
+
+// theme: cycle auto → light → dark, persisted; drives the CSS-variable palette.
+(function(){
+  const KEY='msfe-theme', label={auto:'◑ Auto',light:'☀ Light',dark:'☾ Dark'};
+  const apply=t=>t==='light'||t==='dark'?document.documentElement.setAttribute('data-theme',t):document.documentElement.removeAttribute('data-theme');
+  let cur=localStorage.getItem(KEY)||'auto';apply(cur);
+  const btn=$('#themebtn');
+  if(btn){const sync=()=>btn.textContent=label[cur]||'◑ Theme';sync();
+    btn.onclick=()=>{cur=cur==='auto'?'light':cur==='light'?'dark':'auto';try{localStorage.setItem(KEY,cur);}catch(e){}apply(cur);sync();};}
+})();
 
 // ---- modal -------------------------------------------------------------------
 function modal(title){
@@ -1453,12 +1408,23 @@ async function renderConfig(){
 }
 
 // Doctor banner: shown on every tab whenever any chain link is unhealthy.
+// Rail health dot mirrors the doctor summary — the "instrument" at a glance.
+function setRailHealth(color,text){
+  const h=$('#railhealth');if(!h)return;
+  h.innerHTML='';
+  h.append(el('span',{class:'dot',style:`width:8px;height:8px;border-radius:50%;background:${color}`}),el('span',{},text));
+}
 async function refreshDoctor(){
   const bar=$('#doctorbar');
   const d=await api('/api/doctor');
-  const probs=(d.checks||[]).filter(c=>c.level!=='ok');
-  if(!probs.length){bar.style.display='none';return;}
+  const checks=d.checks||[];
+  const probs=checks.filter(c=>c.level!=='ok');
   const fails=probs.filter(c=>c.level==='fail').length;
+  if(!checks.length) setRailHealth('var(--muted)','status unknown');
+  else if(fails) setRailHealth('var(--critical)',`${fails} problem${fails>1?'s':''}`);
+  else if(probs.length) setRailHealth('var(--warning)',`${probs.length} notice${probs.length>1?'s':''}`);
+  else setRailHealth('var(--good)','all systems ok');
+  if(!probs.length){bar.style.display='none';return;}
   bar.style.display='';bar.innerHTML='';
   bar.style.background=fails?'color-mix(in srgb, var(--critical) 12%, var(--surface))':'color-mix(in srgb, var(--warning) 14%, var(--surface))';
   const det=el('details',{},
