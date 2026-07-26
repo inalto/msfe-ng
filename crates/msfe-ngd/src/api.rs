@@ -154,7 +154,7 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                 fields.push(("has_body".into(), Json::Bool(body.is_some())));
                 if let Some(p) = &body {
                     fields.push(("body_kind".into(), Json::str(quarantine::body_kind(cfg, p))));
-                    if let Ok(bytes) = quarantine::read_message(p) {
+                    if let Ok(bytes) = quarantine::read_rfc822(p, &headers) {
                         let preview =
                             String::from_utf8_lossy(&bytes[..bytes.len().min(10240)]).into_owned();
                         fields.push(("content".into(), Json::str(preview)));
@@ -307,7 +307,7 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             if !service::valid_exim_id(&id) {
                 return Response::text(200, "bad message id");
             }
-            match body_of(cfg, &id).and_then(|p| quarantine::read_message(&p).ok()) {
+            match read_full_message(cfg, &id) {
                 Some(bytes) => Response::text(200, &String::from_utf8_lossy(&bytes)),
                 // 404, so the caller never renders this text as the message
                 None => Response::text(404, "the message body is no longer available"),
@@ -365,14 +365,17 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                 let outcome = if !service::valid_exim_id(id) {
                     "invalid id".to_string()
                 } else {
-                    match body_of(cfg, id) {
+                    match read_full_message(cfg, id) {
                         None => "body no longer available (past the retention window)".into(),
-                        Some(p) => {
-                            let r = if to.is_empty() {
-                                quarantine::release(&p)
-                            } else {
-                                quarantine::release_to(&p, &to)
-                            };
+                        Some(bytes) => {
+                            let r = quarantine::send_message(
+                                &bytes,
+                                if to.is_empty() {
+                                    None
+                                } else {
+                                    Some(to.as_str())
+                                },
+                            );
                             match r {
                                 Ok(()) => {
                                     released += 1;
@@ -406,17 +409,20 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             if !service::valid_exim_id(&id) {
                 return Response::json(400, r#"{"error":"bad message id"}"#);
             }
-            let Some(p) = body_of(cfg, &id) else {
+            let Some(bytes) = read_full_message(cfg, &id) else {
                 return Response::json(
                     404,
                     r#"{"error":"the message body is no longer available, so it cannot be re-sent"}"#,
                 );
             };
-            let result = if to.is_empty() {
-                quarantine::release(&p)
-            } else {
-                quarantine::release_to(&p, &to)
-            };
+            let result = quarantine::send_message(
+                &bytes,
+                if to.is_empty() {
+                    None
+                } else {
+                    Some(to.as_str())
+                },
+            );
             match result {
                 Ok(()) => Response::json(200, r#"{"ok":true}"#),
                 Err(e) => Response::json(500, &format!("{{\"error\":\"release failed: {e}\"}}")),
@@ -736,11 +742,16 @@ fn sender_list(req: &Request, cfg: &Config, config_file: &Path) -> Response {
 /// Resolve a message body: the path MailScanner recorded, else the legacy scan.
 /// Single source of truth for every body-dependent endpoint.
 fn body_of(cfg: &Config, id: &str) -> Option<std::path::PathBuf> {
-    let stored = stats::body_path_of(cfg, id)
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+    let (stored, _) = stats::body_ref_of(cfg, id).unwrap_or_default();
     quarantine::resolve_body(cfg, id, &stored)
+}
+
+/// Resolve the body and read it as a complete RFC822 message (headers + body),
+/// reconstructing from the logged headers when the store is an Exim `-D` file.
+fn read_full_message(cfg: &Config, id: &str) -> Option<Vec<u8>> {
+    let (stored, headers) = stats::body_ref_of(cfg, id).unwrap_or_default();
+    let p = quarantine::resolve_body(cfg, id, &stored)?;
+    quarantine::read_rfc822(&p, &headers).ok()
 }
 
 // ---- structured rule handlers ------------------------------------------------
@@ -1546,7 +1557,7 @@ fn user_handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             if !quarantine::valid_message_id(&id) || !quarantine_owned(cfg, &id, &domains) {
                 return forbidden();
             }
-            match body_of(cfg, &id).and_then(|p| quarantine::read_message(&p).ok()) {
+            match read_full_message(cfg, &id) {
                 Some(bytes) => Response::text(200, &String::from_utf8_lossy(&bytes)),
                 None => Response::json(404, r#"{"error":"message not found"}"#),
             }
@@ -1557,8 +1568,8 @@ fn user_handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             if !quarantine::valid_message_id(&id) || !quarantine_owned(cfg, &id, &domains) {
                 return forbidden();
             }
-            match body_of(cfg, &id) {
-                Some(p) => match quarantine::release(&p) {
+            match read_full_message(cfg, &id) {
+                Some(bytes) => match quarantine::send_message(&bytes, None) {
                     Ok(()) => Response::json(200, r#"{"ok":true}"#),
                     Err(e) => {
                         Response::json(500, &format!("{{\"error\":\"release failed: {e}\"}}"))

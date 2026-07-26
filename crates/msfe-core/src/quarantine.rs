@@ -28,25 +28,42 @@ pub fn find_message(base: &Path, message_id: &str) -> Option<PathBuf> {
     find_rec(base, message_id, 0)
 }
 
+/// Does `name` identify this message? MailScanner stores a body as a single
+/// file/dir named `<id>` (quarantine) or as an Exim spool *pair* `<id>-D`
+/// (body) and `<id>-H` (headers) when archiving. `<id>.<ext>` is also accepted.
+fn id_match(name: &str, id: &str) -> bool {
+    name == id
+        || name == format!("{id}-D")
+        || name == format!("{id}-H")
+        || name.starts_with(&format!("{id}."))
+}
+
 fn find_rec(dir: &Path, id: &str, depth: usize) -> Option<PathBuf> {
     if depth > 3 {
         return None;
     }
     let entries = std::fs::read_dir(dir).ok()?;
     let mut subdirs = Vec::new();
+    let mut hit: Option<PathBuf> = None;
     for e in entries.flatten() {
         let name = e.file_name();
         let name = name.to_string_lossy();
-        if name == id || name.starts_with(&format!("{id}.")) {
-            return Some(e.path());
-        }
-        if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+        if id_match(&name, id) {
+            // Prefer the `-D` body file when a spool pair is present.
+            if name.ends_with("-D") {
+                return Some(e.path());
+            }
+            hit.get_or_insert_with(|| e.path());
+        } else if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             subdirs.push(e.path());
         }
     }
+    if let Some(h) = hit {
+        return Some(h);
+    }
     for sd in subdirs {
-        if let Some(hit) = find_rec(&sd, id, depth + 1) {
-            return Some(hit);
+        if let Some(h) = find_rec(&sd, id, depth + 1) {
+            return Some(h);
         }
     }
     None
@@ -80,7 +97,7 @@ pub fn resolve_body(cfg: &crate::Config, message_id: &str, stored: &str) -> Opti
         let named_for_id = p
             .file_name()
             .and_then(|n| n.to_str())
-            .map(|n| n == message_id || n.starts_with(&format!("{message_id}.")))
+            .map(|n| id_match(n, message_id))
             .unwrap_or(false);
         let under_root = roots.iter().any(|r| p.starts_with(r));
         // `..` can only appear in a hand-edited value; reject rather than resolve
@@ -109,9 +126,18 @@ pub fn body_kind(cfg: &crate::Config, path: &Path) -> &'static str {
     }
 }
 
-/// Read the raw message bytes. If `path` is a directory (MailScanner keeps the
-/// message next to metadata), prefer a file literally named after the id or the
-/// first regular file inside.
+/// True for an Exim spool data file (`<id>-D`), whose first line repeats the id
+/// and whose remainder is the raw message body.
+fn is_exim_data(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.ends_with("-D"))
+        .unwrap_or(false)
+}
+
+/// Read the raw message bytes. Handles the three shapes MailScanner produces:
+/// a single file, a directory (first file inside), and an Exim spool `-D` data
+/// file (the leading id line is stripped, leaving the body).
 pub fn read_message(path: &Path) -> io::Result<Vec<u8>> {
     if path.is_dir() {
         let mut files: Vec<PathBuf> = std::fs::read_dir(path)?
@@ -124,9 +150,57 @@ pub fn read_message(path: &Path) -> io::Result<Vec<u8>> {
             .into_iter()
             .next()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "empty quarantine dir"))?;
-        std::fs::read(pick)
+        return read_message(&pick);
+    }
+    let bytes = std::fs::read(path)?;
+    if is_exim_data(path) {
+        // drop the first line ("<id>-D\n"); the rest is the body
+        if let Some(nl) = bytes.iter().position(|&b| b == b'\n') {
+            return Ok(bytes[nl + 1..].to_vec());
+        }
+    }
+    Ok(bytes)
+}
+
+/// A readable RFC822 message for viewing or re-sending. For an Exim `-D` body
+/// (which carries no headers), the logged `headers` are prepended so "view
+/// source" and release produce a complete message; other formats are returned
+/// as-is.
+pub fn read_rfc822(path: &Path, logged_headers: &str) -> io::Result<Vec<u8>> {
+    let body = read_message(path)?;
+    if is_exim_data(path) && !logged_headers.trim().is_empty() {
+        let mut out = logged_headers.trim_end().as_bytes().to_vec();
+        out.extend_from_slice(b"\n\n");
+        out.extend_from_slice(&body);
+        return Ok(out);
+    }
+    Ok(body)
+}
+
+/// Send an already-assembled RFC822 message: to its own recipients (`to` None)
+/// or to an explicit address (`to` Some). Shared by every release path so an
+/// Exim `-D` body reconstructed with its headers is what actually goes out.
+pub fn send_message(bytes: &[u8], to: Option<&str>) -> io::Result<()> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut cmd = Command::new("sendmail");
+    match to {
+        Some(addr) => {
+            if !valid_recipient(addr) {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "bad recipient"));
+            }
+            cmd.arg("--").arg(addr);
+        }
+        None => {
+            cmd.arg("-t");
+        }
+    }
+    let mut child = cmd.stdin(Stdio::piped()).spawn()?;
+    child.stdin.take().expect("stdin piped").write_all(bytes)?;
+    if child.wait()?.success() {
+        Ok(())
     } else {
-        std::fs::read(path)
+        Err(io::Error::other("sendmail failed"))
     }
 }
 
@@ -183,6 +257,61 @@ pub fn valid_recipient(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_exim_spool_pair_as_full_message() {
+        let base = std::env::temp_dir().join(format!("msfe-spool-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let day = base.join("archive").join("20260726");
+        std::fs::create_dir_all(&day).unwrap();
+        let id = "1wnyXN-00000007fSr-0Vds";
+        // MailScanner archives an Exim spool pair: <id>-D (body) and <id>-H
+        std::fs::write(
+            day.join(format!("{id}-D")),
+            format!(
+                "{id}-D
+Hello world body
+"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            day.join(format!("{id}-H")),
+            "exim header spool junk
+",
+        )
+        .unwrap();
+        let cfg = crate::Config {
+            quarantine_dir: base.join("q").display().to_string(),
+            archive_dir: base.join("archive").display().to_string(),
+            ..Default::default()
+        };
+        // resolution prefers the -D file
+        let p = resolve_body(&cfg, id, "").unwrap();
+        assert!(p.to_string_lossy().ends_with("-D"));
+        // read_message strips the leading id line, leaving the body
+        assert_eq!(
+            read_message(&p).unwrap(),
+            b"Hello world body
+"
+        );
+        // read_rfc822 prepends the logged headers to make a full message
+        let full = read_rfc822(
+            &p,
+            "Subject: Hi
+From: a@b",
+        )
+        .unwrap();
+        assert_eq!(
+            full,
+            b"Subject: Hi
+From: a@b
+
+Hello world body
+"
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 
     #[test]
     fn resolves_bodies_by_stored_path_with_scan_fallback() {

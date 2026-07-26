@@ -261,19 +261,28 @@ pub fn messages(cfg: &Config, f: &MessageFilter) -> io::Result<Json> {
     ]))
 }
 
-/// The recorded body location for a message (empty when unknown/pruned).
-pub fn body_path_of(cfg: &Config, message_id: &str) -> io::Result<Option<String>> {
+/// The recorded body location and logged headers for a message. Empty strings
+/// when unknown. One query so callers reconstruct an Exim `-D` body into a full
+/// message without a second round trip.
+pub fn body_ref_of(cfg: &Config, message_id: &str) -> io::Result<(String, String)> {
     if !crate::service::valid_exim_id(message_id) {
-        return Ok(None);
+        return Ok((String::new(), String::new()));
     }
     let sql = format!(
-        "SELECT body_path FROM maillog WHERE message_id = {} ORDER BY msg_ts DESC LIMIT 1",
+        "SELECT body_path, headers FROM maillog WHERE message_id = {} ORDER BY msg_ts DESC LIMIT 1",
         sql_quote(message_id)
     );
-    Ok(db::query(cfg, &sql)?
-        .first()
-        .and_then(|r| r.first())
-        .cloned())
+    let rows = db::query(cfg, &sql)?;
+    let r = rows.first().cloned().unwrap_or_default();
+    Ok((
+        r.first().cloned().unwrap_or_default(),
+        r.get(1).cloned().unwrap_or_default(),
+    ))
+}
+
+/// The recorded body location for a message (empty when unknown/pruned).
+pub fn body_path_of(cfg: &Config, message_id: &str) -> io::Result<Option<String>> {
+    Ok(Some(body_ref_of(cfg, message_id)?.0).filter(|s| !s.is_empty()))
 }
 
 /// Volume figures behind the storage/retention disclosure in Settings.
