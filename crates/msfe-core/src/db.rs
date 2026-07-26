@@ -74,6 +74,27 @@ pub fn query(cfg: &Config, sql: &str) -> io::Result<Vec<Vec<String>>> {
         .collect())
 }
 
+/// Dump the whole database to `path` via `mysqldump`, authenticating through the
+/// same private defaults file (credentials never touch argv). A consistent,
+/// low-lock snapshot (`--single-transaction`) suitable for InnoDB.
+pub fn dump(cfg: &Config, path: &std::path::Path) -> io::Result<()> {
+    let df = defaults_file(cfg)?;
+    let out = std::fs::File::create(path)?;
+    let status = Command::new("mysqldump")
+        .arg(format!("--defaults-extra-file={}", df.0.display()))
+        .args(["--single-transaction", "--quick", "--routines"])
+        .arg(&cfg.db_name)
+        .stdout(Stdio::from(out))
+        .stderr(Stdio::null())
+        .status()?;
+    if !status.success() {
+        // don't leave a half-written/empty file behind
+        let _ = std::fs::remove_file(path);
+        return Err(io::Error::other("mysqldump failed"));
+    }
+    Ok(())
+}
+
 /// Feed a SQL script to the `mysql` client over stdin (for DDL / inserts).
 pub fn exec_stdin(cfg: &Config, sql: &str) -> io::Result<()> {
     let df = defaults_file(cfg)?;

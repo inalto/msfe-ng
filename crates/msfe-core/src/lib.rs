@@ -12,6 +12,7 @@ pub mod conffile;
 pub mod config;
 pub mod csf;
 pub mod db;
+pub mod dbtools;
 pub mod digest;
 pub mod doctor;
 pub mod engine;

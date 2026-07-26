@@ -2,7 +2,7 @@
 //!
 //! Used by admins directly and by the installer / cron / panel hooks. Commands:
 //! health, panel, config, import[/--save], sync[/--dry-run], spambox, selftest,
-//! db-migrate, mailscanner.
+//! db-migrate, db, mailscanner.
 
 use msfe_api::{DEFAULT_CONFIG_FILE, DEFAULT_MIGRATIONS_DIR, DEFAULT_SOCKET_PATH, VERSION};
 use msfe_core::config::Config;
@@ -44,6 +44,7 @@ fn main() -> ExitCode {
         "config" => cmd_config(),
         "import" => cmd_import(&args[1..]),
         "db-migrate" => cmd_db_migrate(args.get(1).map(String::as_str)),
+        "db" => cmd_db(args.get(1).map(String::as_str)),
         "mailscanner" => cmd_mailscanner(args.get(1).map(String::as_str)),
         "sync" => cmd_sync(args.get(1).map(String::as_str)),
         "spambox" => cmd_spambox(args.get(1).map(String::as_str)),
@@ -976,6 +977,64 @@ fn conf_dir() -> PathBuf {
 }
 
 /// Back up config + policy (the config dir) to a gzip tarball.
+/// Database maintenance: `backup` (timestamped mysqldump into `backup_dir`),
+/// `fix` (apply migrations + table maintenance), and Bayes `bayes-repair` /
+/// `bayes-recreate`.
+fn cmd_db(sub: Option<&str>) -> ExitCode {
+    use msfe_core::{dbtools, sa};
+    let cfg = Config::load(&config_path());
+    match sub {
+        Some("backup") => match dbtools::backup(&cfg) {
+            Ok(path) => {
+                println!("wrote {}", path.display());
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("msfe-ng db backup: {e}");
+                ExitCode::from(1)
+            }
+        },
+        Some("fix") => {
+            let r = dbtools::fix(&cfg, &migrations_dir());
+            for l in &r.log {
+                println!("{l}");
+            }
+            if r.ok {
+                ExitCode::SUCCESS
+            } else {
+                eprintln!("msfe-ng db fix: completed with errors (see above)");
+                ExitCode::from(1)
+            }
+        }
+        Some(a @ ("bayes-repair" | "bayes-recreate")) => {
+            // recreate is destructive — snapshot the SQL side first
+            if a == "bayes-recreate" {
+                match dbtools::backup(&cfg) {
+                    Ok(p) => println!("backed up database to {}", p.display()),
+                    Err(e) => eprintln!("warning: pre-reset backup failed: {e}"),
+                }
+            }
+            let out = if a == "bayes-repair" {
+                sa::bayes_repair()
+            } else {
+                sa::bayes_reset()
+            };
+            for l in &out.transcript {
+                println!("{l}");
+            }
+            if out.ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
+        _ => {
+            eprintln!("usage: msfe-ng db <backup|fix|bayes-repair|bayes-recreate>");
+            ExitCode::from(2)
+        }
+    }
+}
+
 fn cmd_backup(file: Option<&str>) -> ExitCode {
     let file = match file {
         Some(f) => f,
@@ -1077,6 +1136,10 @@ COMMANDS:
     restore <file.tgz>  Restore config + policy from a tarball
     db-migrate          Apply pending SQL migrations
     db-migrate --status Show which migrations are applied/pending
+    db backup           Dump the database to backup_dir (timestamped)
+    db fix              Apply migrations + optimize/analyze MSFE-NG tables
+    db bayes-repair     Expire & sync the SpamAssassin Bayes database
+    db bayes-recreate   Back up, then wipe Bayes so it retrains from scratch
     mailscanner status  Show MailScanner logging plugin state
     mailscanner enable-logging   Hook the logging plugin into MailScanner.conf
     mailscanner disable-logging  Unhook it (restart MailScanner after either)

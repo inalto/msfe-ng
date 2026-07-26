@@ -478,6 +478,45 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             }
         }
 
+        // ---- database maintenance (root-only admin surface) ----------------
+        ("POST", "/api/db/backup") => match msfe_core::dbtools::backup(cfg) {
+            Ok(path) => Response::json(
+                200,
+                &Json::Object(vec![
+                    ("ok".into(), Json::Bool(true)),
+                    ("path".into(), Json::str(path.display().to_string())),
+                ])
+                .to_string(),
+            ),
+            Err(e) => Response::json(500, &format!("{{\"error\":\"backup failed: {e}\"}}")),
+        },
+        ("POST", "/api/db/fix") => {
+            let r = msfe_core::dbtools::fix(cfg, &migrations_dir());
+            let log: Vec<Json> = r.log.iter().map(Json::str).collect();
+            Response::json(
+                200,
+                &Json::Object(vec![
+                    ("ok".into(), Json::Bool(r.ok)),
+                    ("log".into(), Json::Array(log)),
+                ])
+                .to_string(),
+            )
+        }
+        ("POST", "/api/db/bayes-repair") => outcome_json(msfe_core::sa::bayes_repair()),
+        ("POST", "/api/db/bayes-reset") => {
+            // destructive: snapshot the SQL side first (Bayes lives outside the
+            // DB, but a backup gives a recovery point for the whole operation)
+            let backup = msfe_core::dbtools::backup(cfg)
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            let mut out = msfe_core::sa::bayes_reset();
+            if !backup.is_empty() {
+                out.transcript
+                    .insert(0, format!("backed up database to {backup}"));
+            }
+            outcome_json(out)
+        }
+
         // ---- MailScanner service operations (root-only admin surface) -------
         ("GET", "/api/service/status") => service_status(cfg),
         ("POST", "/api/service/control") => service_control(req),
@@ -1443,6 +1482,30 @@ fn stat_response(r: std::io::Result<Json>) -> Response {
 
 fn forbidden() -> Response {
     Response::json(403, r#"{"error":"not authorized for this domain"}"#)
+}
+
+/// Render a `ControlOutcome` (ok flag + transcript lines) as JSON — the shape the
+/// SPA's action-output panels expect from learn / service / db endpoints.
+fn outcome_json(o: msfe_core::service::ControlOutcome) -> Response {
+    Response::json(
+        200,
+        &Json::Object(vec![
+            ("ok".into(), Json::Bool(o.ok)),
+            (
+                "transcript".into(),
+                Json::Array(o.transcript.iter().map(Json::str).collect()),
+            ),
+        ])
+        .to_string(),
+    )
+}
+
+/// The migrations directory the daemon applies from (env override, else the
+/// packaged default), mirroring the CLI's resolution.
+fn migrations_dir() -> std::path::PathBuf {
+    std::env::var("MSFE_NG_MIGRATIONS")
+        .unwrap_or_else(|_| msfe_api::DEFAULT_MIGRATIONS_DIR.to_string())
+        .into()
 }
 
 /// End-user (`/api/user/*`) routes. The authenticated user comes from the

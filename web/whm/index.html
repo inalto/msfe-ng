@@ -1418,6 +1418,37 @@ async function renderConfig(){
   });
   if(!(r.files||[]).length)list.append(el('span',{class:'muted'},'No ruleset files in '+(r.dir||'rules dir')+' yet — run sync.'));
 
+  // Database & Bayes maintenance (POSTs to /api/db/*)
+  const dc=el('div',{class:'card'},el('h2',{},'Database & Bayes maintenance'),
+    el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},
+      'Backups are timestamped SQL dumps in backup_dir ('+esc(PREFS.backup_dir||'/opt/msfe-ng/backups')+'). '+
+      '"Fix common problems" applies pending migrations, then optimizes and analyzes the MSFE-NG tables. '+
+      'Bayes repair expires old tokens; recreate wipes all training (a database backup is taken first).'));
+  v.append(dc);
+  const dout=el('pre',{class:'log'},'Choose an action.');
+  async function dbAction(path,label,confirmMsg,btn){
+    if(confirmMsg&&!confirm(confirmMsg))return;
+    btn.disabled=true;dout.textContent=label+'…';
+    const rr=await api('/api/db/'+path,{method:'POST'});
+    btn.disabled=false;
+    if(!rr||rr.error){dout.textContent='ERROR: '+((rr&&rr.error)||'request failed');toast('Failed');return;}
+    if(rr.path){dout.textContent='Wrote '+rr.path;toast('Backup written');}
+    else if(rr.log){dout.textContent=(rr.log||[]).join('\n');toast(rr.ok?'Done':'Completed with errors');}
+    else if(rr.transcript){dout.textContent=(rr.transcript||[]).join('\n');toast(rr.ok?'Done':'Failed');}
+    else{dout.textContent=JSON.stringify(rr);toast(rr.ok?'Done':'Failed');}
+  }
+  const dbtns=el('div',{class:'ctl',style:'flex-wrap:wrap'});
+  const bBackup=el('button',{class:'act'},'Backup now');
+  bBackup.onclick=()=>dbAction('backup','Dumping database',null,bBackup);
+  const bFix=el('button',{class:'act plain'},'Fix common problems');
+  bFix.onclick=()=>dbAction('fix','Applying migrations & optimizing','Apply any pending migrations and run OPTIMIZE/ANALYZE on the MSFE-NG tables?',bFix);
+  const bRepair=el('button',{class:'act plain'},'Bayes repair');
+  bRepair.onclick=()=>dbAction('bayes-repair','Expiring old Bayes tokens',null,bRepair);
+  const bReset=el('button',{class:'act danger'},'Bayes recreate');
+  bReset.onclick=()=>dbAction('bayes-reset','Wiping Bayes','Wipe the entire SpamAssassin Bayes database?\n\nAll ham/spam training is discarded and Bayes retrains from scratch. A database backup is taken first.',bReset);
+  dbtns.append(bBackup,bFix,bRepair,bReset);
+  dc.append(dbtns,dout);
+
   loadConf();
 }
 

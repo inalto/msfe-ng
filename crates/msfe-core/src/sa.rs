@@ -257,6 +257,52 @@ pub fn lint() -> (bool, String) {
     }
 }
 
+/// Run a `sa-learn` maintenance command and capture its combined output as a
+/// transcript, mirroring `learn`'s shape so the UI renders both the same way.
+fn sa_learn(args: &[&str]) -> ControlOutcome {
+    let mut transcript = vec![format!("$ sa-learn {}", args.join(" "))];
+    match Command::new("sa-learn").args(args).output() {
+        Ok(o) => {
+            let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+            s.push_str(&String::from_utf8_lossy(&o.stderr));
+            for l in s.lines() {
+                if !l.trim().is_empty() {
+                    transcript.push(l.to_string());
+                }
+            }
+            transcript.push(if o.status.success() {
+                "→ ok".into()
+            } else {
+                "→ failed".into()
+            });
+            ControlOutcome {
+                ok: o.status.success(),
+                transcript,
+            }
+        }
+        Err(e) => {
+            transcript.push(format!("→ cannot run: {e}"));
+            ControlOutcome {
+                ok: false,
+                transcript,
+            }
+        }
+    }
+}
+
+/// Repair the Bayes database: expire old tokens and sync to disk. Non-destructive
+/// — it prunes and rebalances what's learned without discarding training.
+pub fn bayes_repair() -> ControlOutcome {
+    sa_learn(&["--force-expire", "--sync"])
+}
+
+/// Wipe the Bayes database entirely (`sa-learn --clear`). Destructive: all ham/
+/// spam training is discarded and Bayes starts over. Callers back up first and
+/// confirm.
+pub fn bayes_reset() -> ControlOutcome {
+    sa_learn(&["--clear"])
+}
+
 fn run_with_stdin(cmd: &str, args: &[&str], input: &[u8]) -> std::io::Result<(bool, String)> {
     let mut child = Command::new(cmd)
         .args(args)
