@@ -93,6 +93,16 @@ archive_dir = "/var/spool/MailScanner/archive"
 # The address being looked up is sent to this provider; leave empty to disable.
 geoip_url = "https://ipwho.is/{ip}"
 
+# Interface & release preferences (editable in Settings → Interface & release)
+refresh_secs = 0
+rows_per_page = 50
+view_new_window = "no"
+learn_updates_db = "yes"
+release_from = ""
+spamcop_address = ""
+dovecot_lda = "/usr/libexec/dovecot/dovecot-lda"
+backup_dir = "/opt/msfe-ng/backups"
+
 # Logs watched by the WHM Service tab
 maillog_path = "/var/log/maillog"
 exim_mainlog_path = "/var/log/exim_mainlog"

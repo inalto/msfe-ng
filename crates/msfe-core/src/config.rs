@@ -39,6 +39,29 @@ pub struct Config {
     /// Geolocation lookup URL for the client-IP modal, `{ip}` substituted.
     /// Empty disables lookups (the address is sent to this third party).
     pub geoip_url: String,
+    // ---- interface & release preferences (MailControl-style settings) --------
+    /// Messages tab auto-refresh interval in seconds (0 = off).
+    pub refresh_secs: u32,
+    /// Rows per page in the message list.
+    pub rows_per_page: u32,
+    /// Open a message's full view in a new browser window/tab.
+    pub view_new_window: bool,
+    /// Subject for forwarded (release-forward) mail; empty = keep the original.
+    pub forward_subject: String,
+    /// Plain-text line prepended to forwarded mail; empty = none.
+    pub forward_body: String,
+    /// Default reason recorded in csf.deny when blocking an IP from the UI.
+    pub csf_comment_default: String,
+    /// Envelope/From address used when releasing mail; empty = postmaster@<host>.
+    pub release_from: String,
+    /// SpamCop submission address; empty disables the "Report to SpamCop" action.
+    pub spamcop_address: String,
+    /// Local delivery agent for release-to-INBOX.
+    pub dovecot_lda: String,
+    /// Update maillog isfp/isfn/isspam when Learn as ham/spam is used.
+    pub learn_updates_db: bool,
+    /// Directory for database/Bayes backups.
+    pub backup_dir: String,
 }
 
 impl Default for Config {
@@ -62,6 +85,17 @@ impl Default for Config {
             exim_mainlog_path: "/var/log/exim_mainlog".into(),
             mailscannerq_conf: "/etc/msfe-ng/mailscannerq.conf".into(),
             geoip_url: "https://ipwho.is/{ip}".into(),
+            refresh_secs: 0,
+            rows_per_page: 50,
+            view_new_window: false,
+            forward_subject: String::new(),
+            forward_body: String::new(),
+            csf_comment_default: String::new(),
+            release_from: String::new(),
+            spamcop_address: String::new(),
+            dovecot_lda: "/usr/libexec/dovecot/dovecot-lda".into(),
+            learn_updates_db: true,
+            backup_dir: "/opt/msfe-ng/backups".into(),
         }
     }
 }
@@ -99,6 +133,17 @@ impl Config {
                 "exim_mainlog_path" => c.exim_mainlog_path = v,
                 "mailscannerq_conf" => c.mailscannerq_conf = v,
                 "geoip_url" => c.geoip_url = v,
+                "refresh_secs" => c.refresh_secs = v.parse().unwrap_or(0),
+                "rows_per_page" => c.rows_per_page = v.parse().unwrap_or(50).clamp(10, 500),
+                "view_new_window" => c.view_new_window = v == "yes" || v == "true" || v == "1",
+                "forward_subject" => c.forward_subject = v,
+                "forward_body" => c.forward_body = v,
+                "csf_comment_default" => c.csf_comment_default = v,
+                "release_from" => c.release_from = v,
+                "spamcop_address" => c.spamcop_address = v,
+                "dovecot_lda" => c.dovecot_lda = v,
+                "learn_updates_db" => c.learn_updates_db = v != "no" && v != "false" && v != "0",
+                "backup_dir" => c.backup_dir = v,
                 _ => {} // unknown keys ignored
             }
         }
@@ -124,6 +169,19 @@ impl Config {
             ("db_pass_set".into(), Json::Bool(!self.db_pass.is_empty())),
             ("mailscanner_conf".into(), Json::str(&self.mailscanner_conf)),
             ("db_configured".into(), Json::Bool(self.db_configured())),
+            ("refresh_secs".into(), Json::Int(self.refresh_secs as i64)),
+            ("rows_per_page".into(), Json::Int(self.rows_per_page as i64)),
+            ("view_new_window".into(), Json::Bool(self.view_new_window)),
+            ("forward_subject".into(), Json::str(&self.forward_subject)),
+            ("forward_body".into(), Json::str(&self.forward_body)),
+            (
+                "csf_comment_default".into(),
+                Json::str(&self.csf_comment_default),
+            ),
+            ("release_from".into(), Json::str(&self.release_from)),
+            ("spamcop_address".into(), Json::str(&self.spamcop_address)),
+            ("learn_updates_db".into(), Json::Bool(self.learn_updates_db)),
+            ("backup_dir".into(), Json::str(&self.backup_dir)),
         ])
     }
 }

@@ -222,7 +222,7 @@ pub fn messages(cfg: &Config, f: &MessageFilter) -> io::Result<Json> {
     let sql = format!(
         "SELECT msg_ts, from_address, to_address, subject, sascore, \
                 isspam, ishighspam, virusinfected, quarantined, message_id, size, \
-                spamwhitelisted, spamblacklisted, body_path \
+                spamwhitelisted, spamblacklisted, body_path, clientip \
          FROM maillog WHERE {where_sql} \
          ORDER BY msg_ts DESC LIMIT {limit} OFFSET {offset}"
     );
@@ -250,6 +250,7 @@ pub fn messages(cfg: &Config, f: &MessageFilter) -> io::Result<Json> {
                     "hasbody".into(),
                     Json::Bool(crate::quarantine::body_exists(cfg, &f(9), &f(13))),
                 ),
+                ("clientip".into(), Json::str(f(14))),
             ])
         })
         .collect();
@@ -259,6 +260,22 @@ pub fn messages(cfg: &Config, f: &MessageFilter) -> io::Result<Json> {
         ("offset".into(), Json::Int(offset as i64)),
         ("items".into(), Json::Array(items)),
     ]))
+}
+
+/// Mark a message as ham/spam after Bayes training, so the list, badges and
+/// stats follow the correction ("Modify database when Learn as Ham/Spam").
+/// A message re-marked as spam sets the false-negative flag; as ham, the
+/// false-positive flag.
+pub fn reclassify(cfg: &Config, message_id: &str, spam: bool) -> io::Result<()> {
+    if !crate::service::valid_exim_id(message_id) {
+        return Ok(());
+    }
+    let (isspam, isfn, isfp) = if spam { (1, 1, 0) } else { (0, 0, 1) };
+    let sql = format!(
+        "UPDATE maillog SET isspam={isspam}, isfn={isfn}, isfp={isfp} WHERE message_id = {};\n",
+        sql_quote(message_id)
+    );
+    db::exec_stdin(cfg, &sql)
 }
 
 /// The recorded body location and logged headers for a message. Empty strings

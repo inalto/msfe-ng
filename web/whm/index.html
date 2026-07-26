@@ -115,6 +115,7 @@ async function apiRaw(path){
 const $=(s,r=document)=>r.querySelector(s);
 const el=(t,a={},...c)=>{const n=document.createElement(t);for(const k in a){if(k==='html')n.innerHTML=a[k];else n.setAttribute(k,a[k]);}c.flat().forEach(x=>n.append(x));return n;};
 const esc=s=>String(s??'').replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));
+api('/api/config').then(c=>{if(c&&!c.error)PREFS=Object.assign(PREFS,c);});
 function toast(msg){const t=$('#toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2200);}
 
 // ---- modal -------------------------------------------------------------------
@@ -326,7 +327,7 @@ async function showIp(raw){
     .forEach(([v,l])=>msel.append(el('option',{value:v},l)));
   const hsel=el('select');
   [['0','permanent'],['1','1 hour'],['24','24 hours'],['168','7 days']].forEach(([v,l])=>hsel.append(el('option',{value:v},l)));
-  const cin=el('input',{placeholder:'reason (goes into csf.deny)',style:'flex:1;min-width:14rem'});
+  const cin=el('input',{placeholder:'reason (goes into csf.deny)',value:(PREFS.csf_comment_default||''),style:'flex:1;min-width:14rem'});
   const rchk=el('input',{type:'checkbox',id:'csfrestart'});
   function target(){
     const m=msel.value;
@@ -360,6 +361,7 @@ async function showIp(raw){
 }
 
 let policy=null; // {settings:{}, whitelist:[], blacklist:[]}
+let PREFS={refresh_secs:0,rows_per_page:50,view_new_window:false}; // /api/config prefs
 let days=7;
 
 const tabs={dash:renderDash,settings:renderSettings,lists:renderLists,messages:renderMessages,rules:renderRules,service:renderService,logs:renderLogs,queues:renderQueues,config:renderConfig};
@@ -544,6 +546,45 @@ async function renderSettings(){
     toast(r&&r.ok?`Saved — ${r.files} rule files written`:'Save failed');
   };
   card.append(save);v.append(card);
+
+  // Interface & release preferences (config.toml keys, saved via conf-apply)
+  const pc=el('div',{class:'card'},el('h2',{},'Interface & release'),
+    el('div',{class:'muted',style:'margin-bottom:.6rem;font-size:.8rem'},
+      'How the console behaves and how released mail is sent. Stored in the MSFE-NG config.'));
+  const PREF_FIELDS=[
+    ['refresh_secs','Messages auto-refresh (seconds, 0 = off)','number'],
+    ['rows_per_page','Rows per page in the message list','number'],
+    ['view_new_window','Open message details in a new window',['no','yes']],
+    ['learn_updates_db','Reclassify the database on Learn as ham/spam',['yes','no']],
+    ['forward_subject','Release (forward) subject — blank keeps the original','text'],
+    ['forward_body','Release (forward) intro line','text'],
+    ['release_from','Release from address — blank uses postmaster@host','text'],
+    ['spamcop_address','SpamCop reporting address — blank disables it','text'],
+    ['csf_comment_default','Default reason when blocking an IP in the firewall','text'],
+  ];
+  const cfg=await api('/api/config');
+  const pgrid=el('div',{class:'grid2'});
+  PREF_FIELDS.forEach(([k,lbl,type])=>{
+    let cur=cfg&&cfg[k]!=null?cfg[k]:'';
+    if(cur===true)cur='yes'; if(cur===false)cur='no';
+    let input;
+    if(Array.isArray(type)){input=el('select');type.forEach(o=>input.append(el('option',{value:o,...(o===String(cur)?{selected:'selected'}:{})},o)));}
+    else input=el('input',{type,value:cur});
+    input.dataset.pkey=k;
+    pgrid.append(el('label',{class:'field'},lbl,input));
+  });
+  pc.append(pgrid);
+  const psave=el('button',{class:'act'},'Save preferences');
+  psave.onclick=async()=>{
+    psave.disabled=true;
+    const changes={};
+    pgrid.querySelectorAll('[data-pkey]').forEach(i=>changes[i.dataset.pkey]=i.value);
+    const r=await api('/api/service/conf/apply',{method:'POST',body:{which:'msfe',changes}});
+    psave.disabled=false;
+    if(r&&r.ok){toast(`${r.applied} preference(s) saved — reload to apply`);const c=await api('/api/config');if(c&&!c.error)PREFS=Object.assign(PREFS,c);}
+    else toast(r.error||'Save failed');
+  };
+  pc.append(psave);v.append(pc);
 }
 
 // ---- Lists ------------------------------------------------------------------
@@ -569,6 +610,7 @@ async function renderLists(){
 
 // ---- Messages (MailControl-style: filters, search, pagination, detail) -------
 const msgF={status:'all',field:'from',text:'',days:0,offset:0,limit:50};
+function msgLimit(){return (PREFS.rows_per_page&&PREFS.rows_per_page>=10)?PREFS.rows_per_page:50;}
 let msgTimer=null;
 // shared by the list and the single-message view (which is a top-level render)
 const fmtSize=b=>{b=+b||0;return b>1048576?(b/1048576).toFixed(1)+'MB':b>1024?Math.round(b/1024)+'KB':b+'B';};
@@ -606,8 +648,10 @@ async function renderMessages(){
   const stxt=el('input',{placeholder:'search…',value:msgF.text,style:'width:16rem'});
   stxt.onkeydown=e=>{if(e.key==='Enter')doSearch();};
   function doSearch(){msgF.field=fsel.value;msgF.text=stxt.value.trim();msgF.offset=0;renderMessages();}
-  const auto=el('input',{type:'checkbox',id:'msgauto',...(msgTimer?{checked:'checked'}:{})});
-  auto.onchange=()=>{clearInterval(msgTimer);msgTimer=auto.checked?setInterval(loadList,10000):null;};
+  const secs=(PREFS.refresh_secs&&PREFS.refresh_secs>0)?PREFS.refresh_secs:10;
+  const auto=el('input',{type:'checkbox',id:'msgauto',...((msgTimer||PREFS.refresh_secs>0)?{checked:'checked'}:{})});
+  auto.onchange=()=>{clearInterval(msgTimer);msgTimer=auto.checked?setInterval(loadList,secs*1000):null;};
+  if(PREFS.refresh_secs>0&&!msgTimer){msgTimer=setInterval(loadList,secs*1000);}
   const dsel=el('select');
   [[0,'any time'],[1,'last 24 hours'],[3,'last 3 days'],[7,'last 7 days'],[14,'last 14 days'],[30,'last 30 days'],[90,'last 90 days']]
     .forEach(([val,lbl])=>dsel.append(el('option',{value:val,...(val===msgF.days?{selected:'selected'}:{})},lbl)));
@@ -658,20 +702,20 @@ async function renderMessages(){
   card.append(info,t);v.append(detail);
 
   async function loadList(){
-    const q=`status=${msgF.status}&field=${msgF.field}&text=${encodeURIComponent(msgF.text)}&days=${msgF.days}&offset=${msgF.offset}&limit=${msgF.limit}`;
+    const q=`status=${msgF.status}&field=${msgF.field}&text=${encodeURIComponent(msgF.text)}&days=${msgF.days}&offset=${msgF.offset}&limit=${msgLimit()}`;
     const data=await api('/api/messages?'+q);
     t.innerHTML='';info.innerHTML='';
     if(!data||!data.available){t.append(el('tr',{},el('td',{class:'empty'},'No data yet — check the setup card on the Dashboard.')));return;}
-    const total=data.total||0,page=Math.floor(msgF.offset/msgF.limit)+1,pages=Math.max(1,Math.ceil(total/msgF.limit));
+    const L=msgLimit();const total=data.total||0,page=Math.floor(msgF.offset/L)+1,pages=Math.max(1,Math.ceil(total/L));
     info.append(`Results: ${total} — page ${page}/${pages}  `);
     const nav=(lbl,off,dis)=>Object.assign(el('button',{class:'act plain',style:'margin-left:.3rem',...(dis?{disabled:'disabled'}:{})},lbl),{onclick:()=>{msgF.offset=off;loadList();}});
-    info.append(nav('⟨ prev',Math.max(0,msgF.offset-msgF.limit),msgF.offset===0),
-                nav('next ⟩',msgF.offset+msgF.limit,msgF.offset+msgF.limit>=total));
+    info.append(nav('⟨ prev',Math.max(0,msgF.offset-L),msgF.offset===0),
+                nav('next ⟩',msgF.offset+L,msgF.offset+L>=total));
     const jump=el('input',{type:'number',min:1,max:pages,value:page,style:'width:4.5rem;margin-left:.5rem'});
-    jump.onchange=()=>{msgF.offset=(Math.min(pages,Math.max(1,+jump.value))-1)*msgF.limit;loadList();};
+    jump.onchange=()=>{msgF.offset=(Math.min(pages,Math.max(1,+jump.value))-1)*L;loadList();};
     info.append(' jump: ',jump);
     if(!data.items||!data.items.length){t.append(el('tr',{},el('td',{class:'empty'},'No messages match.')));return;}
-    t.append(el('tr',{},el('th',{}),...['Time','Score','From / To','Subject','Size','Status'].map(h=>el('th',{},h))));
+    t.append(el('tr',{},el('th',{}),...['Time','Score','From / To','Client IP','Subject','Size','Status'].map(h=>el('th',{},h))));
     data.items.forEach(m=>{
       // only messages whose body is still on disk can be re-delivered
       const pick=m.hasbody?el('input',{type:'checkbox',class:'sel','data-id':m.id,title:'select for release/forward'}):el('span',{});
@@ -681,6 +725,7 @@ async function renderMessages(){
         el('td',{class:'muted',style:'white-space:nowrap'},m.ts),
         el('td',{class:'num'},m.score||'0'),
         el('td',{},el('div',{},senderLink(m.from)),el('div',{class:'muted'},m.to)),
+        el('td',{style:'white-space:nowrap'},m.clientip?ipLink(m.clientip):''),
         el('td',{},m.subject),
         el('td',{class:'num'},fmtSize(m.size)),
         el('td',{},badgeFor(m)));
@@ -689,7 +734,10 @@ async function renderMessages(){
     });
     updateBulk();
   }
-  function showDetail(id){ location.hash='#msg='+encodeURIComponent(id); renderMessageView(id); }
+  function showDetail(id){
+    if(PREFS.view_new_window){window.open(location.pathname.split('?')[0]+(location.search||'')+'#msg='+encodeURIComponent(id),'_blank');return;}
+    location.hash='#msg='+encodeURIComponent(id); renderMessageView(id);
+  }
   loadList();
 }
 

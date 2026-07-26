@@ -328,6 +328,18 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                 );
             };
             let o = msfe_core::sa::learn(&bytes, &action);
+            // reflect the correction in the database when enabled
+            if o.ok && cfg.learn_updates_db {
+                match action.as_str() {
+                    "spam" | "report" => {
+                        let _ = stats::reclassify(cfg, &id, true);
+                    }
+                    "ham" => {
+                        let _ = stats::reclassify(cfg, &id, false);
+                    }
+                    _ => {}
+                }
+            }
             Response::json(
                 200,
                 &Json::Object(vec![
