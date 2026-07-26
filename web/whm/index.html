@@ -826,19 +826,29 @@ async function renderMessageView(id){
       Object.assign(el('button',{class:'act plain'},'Learn as spam'),{onclick:()=>learn('spam')}),
       Object.assign(el('button',{class:'act plain'},'Learn as spam & report'),{onclick:()=>learn('report','Learn as spam AND report to the collaborative networks (Razor/Pyzor/DCC)?')}),
       Object.assign(el('button',{class:'act plain'},'Forget'),{onclick:()=>learn('forget','Make SpamAssassin forget this message from its Bayes database?')})));
-    const rto=el('input',{placeholder:'recipient (empty = original To:)',style:'width:22rem'});
-    ac.append(el('div',{class:'ctl'},rto,
-      Object.assign(el('button',{class:'act'},'Release (resend)'),{onclick:()=>release(d.id,'',rto)}),
-      Object.assign(el('button',{class:'act'},'Release (forward)'),{onclick:()=>release(d.id,rto.value.trim(),rto)})));
-    ac.append(out);
+    const rto=el('input',{placeholder:'recipient / account',style:'width:22rem'});
+    const relRow=el('div',{class:'ctl',style:'flex-wrap:wrap'},rto,
+      Object.assign(el('button',{class:'act'},'Release (resend)'),{onclick:()=>release(d.id,'','resend')}),
+      Object.assign(el('button',{class:'act'},'Release (forward)'),{onclick:()=>release(d.id,rto.value.trim(),'forward')}),
+      Object.assign(el('button',{class:'act plain',title:'Deliver straight into a local account’s INBOX'},'Deliver to INBOX'),{onclick:()=>release(d.id,rto.value.trim(),'inbox')}));
+    if(PREFS.spamcop_address)relRow.append(
+      Object.assign(el('button',{class:'act danger'},'Report to SpamCop'),{onclick:async()=>{
+        if(!confirm('Forward this message to SpamCop ('+PREFS.spamcop_address+')?'))return;
+        const r=await api('/api/messages/spamcop',{method:'POST',body:{id:d.id}});
+        toast(r&&r.ok?'Reported to SpamCop':(r.error||'report failed'));
+      }}));
+    ac.append(relRow,out);
   }
   window.scrollTo(0,0);
 
-  async function release(id,to,inp){
-    if(to&&!/^[^\s@]+@[^\s@]+$/.test(to)){toast('Enter a valid recipient to forward');return;}
-    if(!confirm('Release this message'+(to?` (forward) to ${to}`:' (resend) to its original recipients')+'?'))return;
-    const r=await api('/api/messages/release',{method:'POST',body:{id,to}});
-    toast(r&&r.ok?'Released — on its way':(r.error||'release failed'));
+  async function release(id,to,mode){
+    if((mode==='forward'||mode==='inbox')&&!/^[^\s@]+@[^\s@]+$/.test(to)){toast(mode==='inbox'?'Enter the local account':'Enter a recipient to forward to');return;}
+    const what=mode==='inbox'?`Deliver this message into ${to}'s INBOX?`
+      :mode==='forward'?`Forward this message to ${to}?`
+      :'Re-send this message to its original recipients?';
+    if(!confirm(what))return;
+    const r=await api('/api/messages/release',{method:'POST',body:{id,to,mode}});
+    toast(r&&r.ok?'Done — on its way':(r.error||'release failed'));
   }
 }
 

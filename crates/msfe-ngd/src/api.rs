@@ -418,6 +418,8 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             let v = Json::parse(&req.body).unwrap_or(Json::Null);
             let id = v.str_field("id");
             let to = v.str_field("to");
+            // mode: "resend" (default) | "forward" | "inbox"
+            let mode = v.str_field("mode");
             if !service::valid_exim_id(&id) {
                 return Response::json(400, r#"{"error":"bad message id"}"#);
             }
@@ -427,17 +429,52 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                     r#"{"error":"the message body is no longer available, so it cannot be re-sent"}"#,
                 );
             };
-            let result = quarantine::send_message(
-                &bytes,
-                if to.is_empty() {
-                    None
-                } else {
-                    Some(to.as_str())
-                },
-            );
+            let result = match mode.as_str() {
+                "inbox" => quarantine::deliver_inbox(&bytes, &cfg.dovecot_lda, &to),
+                "forward" => {
+                    let msg = quarantine::rewrite_for_forward(
+                        &bytes,
+                        &cfg.forward_subject,
+                        &cfg.release_from,
+                        &cfg.forward_body,
+                    );
+                    quarantine::send_message(&msg, Some(&to))
+                }
+                _ => quarantine::send_message(
+                    &bytes,
+                    if to.is_empty() {
+                        None
+                    } else {
+                        Some(to.as_str())
+                    },
+                ),
+            };
             match result {
                 Ok(()) => Response::json(200, r#"{"ok":true}"#),
                 Err(e) => Response::json(500, &format!("{{\"error\":\"release failed: {e}\"}}")),
+            }
+        }
+        ("POST", "/api/messages/spamcop") => {
+            let v = Json::parse(&req.body).unwrap_or(Json::Null);
+            let id = v.str_field("id");
+            if !service::valid_exim_id(&id) {
+                return Response::json(400, r#"{"error":"bad message id"}"#);
+            }
+            if cfg.spamcop_address.trim().is_empty() {
+                return Response::json(
+                    400,
+                    r#"{"error":"no SpamCop address configured (Settings → Interface & release)"}"#,
+                );
+            }
+            let Some(bytes) = read_full_message(cfg, &id) else {
+                return Response::json(
+                    404,
+                    r#"{"error":"the message body is no longer available"}"#,
+                );
+            };
+            match quarantine::send_message(&bytes, Some(cfg.spamcop_address.trim())) {
+                Ok(()) => Response::json(200, r#"{"ok":true}"#),
+                Err(e) => Response::json(500, &format!("{{\"error\":\"report failed: {e}\"}}")),
             }
         }
 

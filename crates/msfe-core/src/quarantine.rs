@@ -177,6 +177,77 @@ pub fn read_rfc822(path: &Path, logged_headers: &str) -> io::Result<Vec<u8>> {
     Ok(body)
 }
 
+/// Rewrite a message for forwarding: optionally replace `Subject:`/`From:` and
+/// prepend an intro line to the body. Empty overrides keep the original. Splits
+/// headers from body at the first blank line.
+pub fn rewrite_for_forward(bytes: &[u8], subject: &str, from: &str, body_prefix: &str) -> Vec<u8> {
+    let text = String::from_utf8_lossy(bytes);
+    // find the header/body separator (blank line)
+    let sep = text
+        .find("\r\n\r\n")
+        .map(|i| (i, 4))
+        .or_else(|| text.find("\n\n").map(|i| (i, 2)));
+    let (mut headers, body) = match sep {
+        Some((i, w)) => (text[..i].to_string(), text[i + w..].to_string()),
+        None => (text.to_string(), String::new()),
+    };
+    let set_header = |h: &mut String, name: &str, val: &str| {
+        if val.is_empty() {
+            return;
+        }
+        let mut out = Vec::new();
+        let mut replaced = false;
+        for line in h.lines() {
+            if line
+                .to_ascii_lowercase()
+                .starts_with(&format!("{}:", name.to_ascii_lowercase()))
+            {
+                out.push(format!("{name}: {val}"));
+                replaced = true;
+            } else {
+                out.push(line.to_string());
+            }
+        }
+        if !replaced {
+            out.push(format!("{name}: {val}"));
+        }
+        *h = out.join("\n");
+    };
+    set_header(&mut headers, "Subject", subject);
+    set_header(&mut headers, "From", from);
+    let mut out = headers.into_bytes();
+    out.extend_from_slice(b"\n\n");
+    if !body_prefix.is_empty() {
+        out.extend_from_slice(body_prefix.as_bytes());
+        out.extend_from_slice(b"\n\n");
+    }
+    out.extend_from_slice(body.as_bytes());
+    out
+}
+
+/// Deliver a message straight into a local account's mailbox via the LDA
+/// (dovecot-lda), the legacy "Release (direct)". The recipient must be a valid
+/// address; the caller is responsible for confirming it is a local account.
+pub fn deliver_inbox(bytes: &[u8], lda: &str, account: &str) -> io::Result<()> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    if !valid_recipient(account) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "bad account"));
+    }
+    let mut child = Command::new(lda)
+        .args(["-d", account])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    child.stdin.take().expect("stdin piped").write_all(bytes)?;
+    if child.wait()?.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other("local delivery (dovecot-lda) failed"))
+    }
+}
+
 /// Send an already-assembled RFC822 message: to its own recipients (`to` None)
 /// or to an explicit address (`to` Some). Shared by every release path so an
 /// Exim `-D` body reconstructed with its headers is what actually goes out.
@@ -257,6 +328,35 @@ pub fn valid_recipient(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forward_rewrite_replaces_headers_and_prepends_body() {
+        let msg = b"Subject: Original
+From: spammer@bad.example
+To: me@x.com
+
+body line
+";
+        let out = rewrite_for_forward(
+            msg,
+            "Fwd: caught spam",
+            "postmaster@x.com",
+            "Released by admin",
+        );
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("Subject: Fwd: caught spam"));
+        assert!(text.contains("From: postmaster@x.com"));
+        assert!(!text.contains("Subject: Original"));
+        assert!(text.contains("To: me@x.com")); // untouched header kept
+                                                // intro line precedes the original body
+        let b = text.split("\n\n").collect::<Vec<_>>();
+        assert_eq!(b[1], "Released by admin");
+        assert!(text.trim_end().ends_with("body line"));
+        // empty overrides keep the originals
+        let keep = String::from_utf8(rewrite_for_forward(msg, "", "", "")).unwrap();
+        assert!(keep.contains("Subject: Original"));
+        assert!(keep.contains("From: spammer@bad.example"));
+    }
 
     #[test]
     fn reads_exim_spool_pair_as_full_message() {
