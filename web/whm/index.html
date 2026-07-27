@@ -358,7 +358,7 @@ async function renderDash(){
   if(sum && sum.available){
     const spec=[['total','Total','var(--accent)'],['clean','Clean','var(--good)'],
       ['spam','Spam','var(--warning)'],['highspam','High spam','var(--serious)'],
-      ['virus','Virus','var(--critical)'],['quarantined','Quarantined','var(--muted)']];
+      ['infected','Infected','var(--critical)'],['quarantined','Quarantined','var(--muted)']];
     spec.forEach(([k,lbl,c])=>tiles.append(el('div',{class:'tile'},
       el('div',{class:'lbl'},el('span',{class:'dot',style:'background:'+c}),lbl),
       el('div',{class:'val'},String(sum[k]??0)))));
@@ -571,7 +571,7 @@ let msgTimer=null;
 const fmtSize=b=>{b=+b||0;return b>1048576?(b/1048576).toFixed(1)+'MB':b>1024?Math.round(b/1024)+'KB':b+'B';};
 function badgeFor(m){
   let col='var(--good)',lbl='clean';
-  if(m.virus)      {col='var(--critical)';lbl='infected';}
+  if(m.virus||m.nameinf||m.otherinf){col='var(--critical)';lbl='infected';}
   else if(m.ishighspam){col='var(--serious)';lbl='high spam';}
   else if(m.isspam){col='var(--warning)';lbl='spam';}
   else if(m.bl)    {col='var(--ink2)';lbl='blacklist';}

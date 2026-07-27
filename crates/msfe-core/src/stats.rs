@@ -20,8 +20,8 @@ pub fn summary(cfg: &Config, days: u32) -> io::Result<Json> {
         "SELECT COUNT(*), \
                 COALESCE(SUM(isspam=1 AND ishighspam=0),0), \
                 COALESCE(SUM(ishighspam=1),0), \
-                COALESCE(SUM(virusinfected=1),0), \
-                COALESCE(SUM(isspam=0 AND virusinfected=0),0), \
+                COALESCE(SUM(virusinfected=1 OR nameinfected=1 OR otherinfected=1),0), \
+                COALESCE(SUM(isspam=0 AND virusinfected=0 AND nameinfected=0 AND otherinfected=0),0), \
                 COALESCE(SUM(quarantined=1),0) \
          FROM maillog WHERE msg_ts >= (NOW() - INTERVAL {days} DAY)"
     );
@@ -34,7 +34,7 @@ pub fn summary(cfg: &Config, days: u32) -> io::Result<Json> {
         ("total".into(), g(0)),
         ("spam".into(), g(1)),
         ("highspam".into(), g(2)),
-        ("virus".into(), g(3)),
+        ("infected".into(), g(3)),
         ("clean".into(), g(4)),
         ("quarantined".into(), g(5)),
     ]))
@@ -222,7 +222,8 @@ pub fn messages(cfg: &Config, f: &MessageFilter) -> io::Result<Json> {
     let sql = format!(
         "SELECT msg_ts, from_address, to_address, subject, sascore, \
                 isspam, ishighspam, virusinfected, quarantined, message_id, size, \
-                spamwhitelisted, spamblacklisted, body_path, clientip \
+                spamwhitelisted, spamblacklisted, body_path, clientip, \
+                nameinfected, otherinfected \
          FROM maillog WHERE {where_sql} \
          ORDER BY msg_ts DESC LIMIT {limit} OFFSET {offset}"
     );
@@ -251,6 +252,12 @@ pub fn messages(cfg: &Config, f: &MessageFilter) -> io::Result<Json> {
                     Json::Bool(crate::quarantine::body_exists(cfg, &f(9), &f(13))),
                 ),
                 ("clientip".into(), Json::str(f(14))),
+                // non-virus "infections": filename/filetype blocks and MailScanner
+                // "other" content catches (phishing/dangerous content). MailScanner
+                // skips SpamAssassin once a message is infected, so these would
+                // otherwise masquerade as clean in the list.
+                ("nameinf".into(), count(&f(15))),
+                ("otherinf".into(), count(&f(16))),
             ])
         })
         .collect();
