@@ -15,6 +15,26 @@ use crate::{mailscanner, service, Config};
 use std::io;
 use std::path::Path;
 
+/// Force MailScanner to spam-check every domain by setting the global
+/// `Spam Checks = yes` directive in MailScanner.conf. This is the authoritative
+/// switch: MSFE-NG does not point that directive at a per-domain ruleset, so a
+/// literal `yes` guarantees SpamAssassin runs on mail for all domains. Returns
+/// `(changed, previous_value)`; the caller restarts MailScanner to apply it
+/// (MailScanner reads its config only at startup).
+pub fn enable_spam_checks_all(cfg: &Config) -> io::Result<(bool, String)> {
+    let conf_path = Path::new(&cfg.mailscanner_conf);
+    let original = std::fs::read_to_string(conf_path)?;
+    let prev = mailscanner::get_directive(&original, "Spam Checks")
+        .unwrap_or("(unset)")
+        .to_string();
+    let text = mailscanner::set_directive(&original, "Spam Checks", "yes");
+    let changed = text != original;
+    if changed {
+        service::save_conf(conf_path, &text)?;
+    }
+    Ok((changed, prev))
+}
+
 pub struct ConfigureReport {
     /// Directives that were changed, as "Key = value".
     pub set: Vec<String>,

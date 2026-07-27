@@ -517,6 +517,33 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             outcome_json(out)
         }
 
+        ("POST", "/api/engine/spam-checks-all") => {
+            let mut transcript = Vec::new();
+            let mut ok = true;
+            match msfe_core::engine::enable_spam_checks_all(cfg) {
+                Ok((changed, prev)) => {
+                    if changed {
+                        transcript
+                            .push(format!("MailScanner.conf: Spam Checks = yes (was: {prev})"));
+                        transcript.push("restarting MailScanner to apply…".into());
+                        let r = service::control("restart");
+                        ok = r.ok;
+                        transcript.extend(r.transcript);
+                    } else {
+                        transcript.push(
+                            "Spam Checks is already 'yes' — every domain is scanned; no restart needed."
+                                .into(),
+                        );
+                    }
+                }
+                Err(e) => {
+                    ok = false;
+                    transcript.push(format!("could not update MailScanner.conf: {e}"));
+                }
+            }
+            outcome_json(service::ControlOutcome { ok, transcript })
+        }
+
         // ---- MailScanner service operations (root-only admin surface) -------
         ("GET", "/api/service/status") => service_status(cfg),
         ("POST", "/api/service/control") => service_control(req),

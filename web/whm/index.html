@@ -574,8 +574,10 @@ function badgeFor(m){
   if(m.virus)      {col='var(--critical)';lbl='infected';}
   else if(m.ishighspam){col='var(--serious)';lbl='high spam';}
   else if(m.isspam){col='var(--warning)';lbl='spam';}
-  else if(m.wl)    {col='var(--good)';lbl='whitelist';}
   else if(m.bl)    {col='var(--ink2)';lbl='blacklist';}
+  else if(m.wl)    {col='var(--good)';lbl='whitelist';}
+  // Quarantined but not otherwise flagged: it was held, so never call it "clean".
+  else if(m.quarantined){col='var(--ink2)';lbl='held';}
   return el('span',{class:'badge',style:'background:'+col},lbl+(m.quarantined?' 🔒':''));
 }
 async function renderMessages(){
@@ -1372,6 +1374,23 @@ async function renderConfig(){
     }}));
   });
   if(!(r.files||[]).length)list.append(el('span',{class:'muted'},'No ruleset files in '+(r.dir||'rules dir')+' yet — run sync.'));
+
+  // Spam checks — force MailScanner to scan mail for every domain
+  const sc=el('div',{class:'card'},el('h2',{},'Spam checks'),
+    el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},
+      'Sets MailScanner’s global “Spam Checks = yes”, so SpamAssassin runs on mail for every domain (this is the authoritative switch — it overrides any per-domain rule). MailScanner is restarted to apply the change.'));
+  v.append(sc);
+  const scout=el('pre',{class:'log',style:'display:none'},'');
+  const scbtn=el('button',{class:'act'},'Enable spam checks for all domains');
+  scbtn.onclick=async()=>{
+    if(!confirm('Set MailScanner “Spam Checks = yes” for all domains and restart MailScanner to apply?'))return;
+    scbtn.disabled=true;scout.style.display='';scout.textContent='Applying…';
+    const r=await api('/api/engine/spam-checks-all',{method:'POST'});
+    scbtn.disabled=false;
+    scout.textContent=((r&&r.transcript)||[(r&&r.error)||'no response']).join('\n');
+    toast(r&&r.ok?'Spam checks on for all domains':'Failed — see output');
+  };
+  sc.append(el('div',{class:'ctl'},scbtn),scout);
 
   // Database & Bayes maintenance (POSTs to /api/db/*)
   const dc=el('div',{class:'card'},el('h2',{},'Database & Bayes maintenance'),
