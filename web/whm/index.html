@@ -569,7 +569,7 @@ function msgLimit(){return (PREFS.rows_per_page&&PREFS.rows_per_page>=10)?PREFS.
 let msgTimer=null;
 // shared by the list and the single-message view (which is a top-level render)
 const fmtSize=b=>{b=+b||0;return b>1048576?(b/1048576).toFixed(1)+'MB':b>1024?Math.round(b/1024)+'KB':b+'B';};
-function badgeFor(m){
+function badgeFor(m,wide){
   let col='var(--good)',lbl='clean';
   if(m.virus||m.nameinf||m.otherinf){col='var(--critical)';lbl='infected';}
   else if(m.ishighspam){col='var(--serious)';lbl='high spam';}
@@ -578,7 +578,7 @@ function badgeFor(m){
   else if(m.wl)    {col='var(--good)';lbl='whitelist';}
   // Quarantined but not otherwise flagged: it was held, so never call it "clean".
   else if(m.quarantined){col='var(--ink2)';lbl='held';}
-  return el('span',{class:'badge',style:'background:'+col},lbl+(m.quarantined?' 🔒':''));
+  return el('span',{class:'badge'+(wide?' wide':''),style:'background:'+col},lbl+(m.quarantined?' 🔒':''));
 }
 async function renderMessages(){
   const v=$('#view');v.innerHTML='';
@@ -685,7 +685,7 @@ async function renderMessages(){
         el('td',{style:'white-space:nowrap'},m.clientip?ipLink(m.clientip):''),
         el('td',{},m.subject),
         el('td',{class:'num'},fmtSize(m.size)),
-        el('td',{},badgeFor(m)));
+        el('td',{},badgeFor(m,true)));
       tr.onclick=()=>showDetail(m.id);
       t.append(tr);
     });

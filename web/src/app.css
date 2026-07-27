@@ -417,6 +417,15 @@
     font-size: 0.72rem;
     color: #fff;
   }
+  /* status pill in the messages list: fills its column, never wraps, roomier */
+  .badge.wide {
+    display: block;
+    width: 100%;
+    text-align: center;
+    white-space: nowrap;
+    padding: 0.35rem 0.7rem;
+    font-size: 0.75rem;
+  }
   .bars text {
     fill: var(--ink2);
   }
