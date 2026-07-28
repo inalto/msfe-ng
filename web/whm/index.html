@@ -1190,22 +1190,35 @@ async function renderQueues(){
   const v=$('#view');v.innerHTML='';
   const qc=el('div',{class:'card'},el('h2',{},'Queue contents'),
     el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},
-      'Live listing (exim -bp): age, size, message id, sender and recipients. Messages sit in the MailScanner queue only for the seconds between arrival and scanning — anything older means MailScanner is not processing.'));
+      'Parsed from the Exim spool: sender, recipients, subject, spam score and frozen state per message. A sender of ∅ (null sender) is a bounce — or spam sent so it can never be bounced back; frozen messages are stuck (Exim can’t deliver or bounce them). Messages sit in the MailScanner queue only for the seconds between arrival and scanning.'));
   v.append(qc);
   const qctl=el('div',{class:'ctl'});qc.append(qctl);
   const qsrc=el('select');[['mailscanner','MailScanner queue (waiting for scan)'],['main','Main queue (delivery)']].forEach(([val,lbl])=>qsrc.append(el('option',{value:val},lbl)));
   const qtable=el('table');
   const qpre=el('pre',{class:'log',style:'display:none'},'');
   const qdetail=el('pre',{class:'log',style:'display:none;max-height:20rem'});
-  // exim -bp: " 25m  5.3K 1wnE6V-00000004Oi2-3lJH <sender>" then indented recipients
-  function parseListing(text){
-    const msgs=[];let cur=null;
-    text.split('\n').forEach(l=>{
-      const m=l.match(/^\s*(\S+)\s+(\S+)\s+([A-Za-z0-9-]{10,30})\s+<(.*?)>(.*)$/);
-      if(m){cur={age:m[1],size:m[2],id:m[3],from:m[4]||'(bounce)',frozen:/frozen/.test(m[5]),to:[]};msgs.push(cur);}
-      else if(cur&&l.trim()&&!/^\d+ matches out of/.test(l)){const t=l.trim();if(/^[^\s<>]+@[^\s<>]+$/.test(t.replace(/^D\s+/,'')))cur.to.push(t);}
+  const qcount=el('span',{class:'muted',style:'margin-left:auto;font-size:.8rem'});
+  let QMSGS=[],QSEL=new Set(),QFILT='all',QTEXT='';
+  const fmtAge=s=>s>=86400?Math.floor(s/86400)+'d '+Math.floor(s%86400/3600)+'h':s>=3600?Math.floor(s/3600)+'h '+Math.floor(s%3600/60)+'m':s>=60?Math.floor(s/60)+'m':s+'s';
+  const fmtSz=b=>b>=1048576?(b/1048576).toFixed(1)+' MB':b>=1024?Math.round(b/1024)+' KB':b+' B';
+  function scoreCell(m){
+    if(m.spam_score==null)return el('td',{class:'num muted'},'—');
+    const s=+m.spam_score;
+    const col=s>=10?'var(--critical)':s>=5?'var(--warning)':'var(--ink2)';
+    return el('td',{class:'num',style:'color:'+col+';font-weight:'+(s>=5?'700':'400')},s.toFixed(1));
+  }
+  function visible(){
+    return QMSGS.filter(m=>{
+      if(QFILT==='frozen'&&!m.frozen)return false;
+      if(QFILT==='bounce'&&!m.bounce)return false;
+      if(QFILT==='spam'&&!(m.spam_score!=null&&+m.spam_score>=5))return false;
+      if(QTEXT){
+        const t=QTEXT.toLowerCase();
+        if(!((m.sender||'').toLowerCase().includes(t)||(m.subject||'').toLowerCase().includes(t)||
+             m.recipients.some(r=>r.toLowerCase().includes(t))||m.id.toLowerCase().includes(t)))return false;
+      }
+      return true;
     });
-    return msgs;
   }
   async function msgView(id,what){
     qdetail.style.display='';
@@ -1225,33 +1238,83 @@ async function renderQueues(){
     toast(r&&r.ok?`${action}: ok`:`${action} failed — see output`);
     refreshQ();
   }
-  async function refreshQ(){
-    const text=await api('/api/service/queue/listing?which='+qsrc.value,{raw:true});
-    qpre.textContent=text;
-    const msgs=parseListing(text);
+  async function bulkAction(action){
+    const ids=[...QSEL];
+    if(!ids.length)return;
+    const warn=action==='delete'
+      ?`Delete ${ids.length} selected message(s) from the queue?\n\nThey are removed permanently.`
+      :`Force delivery of ${ids.length} selected message(s)?`+(qsrc.value==='mailscanner'?'\n\nThis BYPASSES MailScanner scanning for them.':'');
+    if(!confirm(warn))return;
+    qdetail.style.display='';qdetail.textContent=`▶ ${action} ${ids.length} message(s)…`;
+    const r=await api('/api/service/queue/bulk',{method:'POST',body:{which:qsrc.value,ids,action}});
+    qdetail.textContent=(r.transcript||[r.error||'no response']).join('\n');
+    toast(r&&r.ok?`${action}: ${ids.length} done`:`${action} failed — see output`);
+    QSEL.clear();refreshQ();
+  }
+  const fbtns={};
+  const bulkbar=el('div',{class:'ctl',style:'display:none'});
+  const bDel=Object.assign(el('button',{class:'act danger'},'Delete selected'),{onclick:()=>bulkAction('delete')});
+  const bDlv=Object.assign(el('button',{class:'act plain'},'Deliver selected'),{onclick:()=>bulkAction('deliver')});
+  const bulkInfo=el('span',{class:'muted'});
+  bulkbar.append(bDel,bDlv,bulkInfo);
+  function syncBulk(){
+    bulkbar.style.display=QSEL.size?'':'none';
+    bulkInfo.textContent=QSEL.size+' selected';
+    bDel.textContent=`Delete selected (${QSEL.size})`;
+    bDlv.textContent=`Deliver selected (${QSEL.size})`;
+  }
+  function drawTable(){
+    const rows=visible();
     qtable.innerHTML='';
-    if(!msgs.length){
-      qtable.append(el('tr',{},el('td',{class:'muted'},text.startsWith('(')?text:'Queue is empty.')));
-      return;
+    // filter-button counts reflect the whole loaded page
+    const n={all:QMSGS.length,frozen:QMSGS.filter(m=>m.frozen).length,bounce:QMSGS.filter(m=>m.bounce).length,
+      spam:QMSGS.filter(m=>m.spam_score!=null&&+m.spam_score>=5).length};
+    for(const k in fbtns){fbtns[k].textContent=fbtns[k].dataset.lbl+' ('+n[k]+')';fbtns[k].className=QFILT===k?'act':'act plain';}
+    if(!rows.length){
+      qtable.append(el('tr',{},el('td',{class:'muted'},QMSGS.length?'No messages match this filter.':'Queue is empty.')));
+      syncBulk();return;
     }
-    qtable.append(el('tr',{},...['Age','Size','Message','From','To','',''].map(h=>el('th',{},h))));
-    msgs.forEach(m=>{
+    const selAll=el('input',{type:'checkbox',title:'select all shown'});
+    selAll.checked=rows.length&&rows.every(m=>QSEL.has(m.id));
+    selAll.onchange=()=>{rows.forEach(m=>selAll.checked?QSEL.add(m.id):QSEL.delete(m.id));drawTable();};
+    qtable.append(el('tr',{},el('th',{},selAll),...['Age','Size','Message','Score','From','To','Subject','',''].map(h=>el('th',{},h))));
+    rows.forEach(m=>{
+      const cb=el('input',{type:'checkbox'});
+      cb.checked=QSEL.has(m.id);
+      cb.onchange=()=>{cb.checked?QSEL.add(m.id):QSEL.delete(m.id);syncBulk();};
       qtable.append(el('tr',{},
-        el('td',{},m.age),el('td',{},m.size),
-        el('td',{style:'font-family:ui-monospace,monospace;font-size:.75rem'},m.id,
-          m.frozen?el('span',{class:'badge',style:'background:var(--serious);margin-left:.4rem'},'frozen'):''),
-        el('td',{},m.from),el('td',{},m.to.join(', ')),
+        el('td',{},cb),
+        el('td',{},fmtAge(m.age_secs)),el('td',{class:'num'},fmtSz(m.size)),
+        el('td',{style:'font-family:var(--font-mono),ui-monospace,monospace;font-size:.72rem'},m.id,
+          m.frozen?el('span',{class:'badge',style:'background:var(--serious);margin-left:.4rem'},'frozen'):'',
+          m.parsed?'':el('span',{class:'badge',style:'background:var(--muted);margin-left:.4rem',title:'spool header could not be parsed — only age and size are known'},'?')),
+        scoreCell(m),
+        el('td',{},m.bounce?el('span',{class:'badge',style:'background:var(--ink2)',title:'null envelope sender — a bounce, or spam sent so it can never be bounced back'},'∅ bounce'):(m.sender||'—')),
+        el('td',{title:m.recipients.join(', ')},m.recipients[0]||'—',m.recipients.length>1?el('span',{class:'muted'},' +'+(m.recipients.length-1)):''),
+        el('td',{style:'max-width:16rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap',title:m.subject||''},m.subject||el('span',{class:'muted'},'—')),
         el('td',{},...['headers','body','log'].map(w=>Object.assign(el('button',{class:'act plain',style:'margin-right:.25rem'},w),{onclick:()=>msgView(m.id,w)}))),
         el('td',{},
-          Object.assign(el('button',{class:'act',style:'margin-right:.25rem'},'Deliver now'),{onclick:()=>msgAction(m.id,'deliver')}),
+          Object.assign(el('button',{class:'act',style:'margin-right:.25rem'},'Deliver'),{onclick:()=>msgAction(m.id,'deliver')}),
           Object.assign(el('button',{class:'act danger'},'Delete'),{onclick:()=>msgAction(m.id,'delete')}))));
     });
+    syncBulk();
   }
-  qsrc.onchange=()=>{qdetail.style.display='none';refreshQ();};
+  async function refreshQ(){
+    const d=await api('/api/service/queue/detail?which='+qsrc.value+'&limit=500');
+    if(d&&Array.isArray(d.msgs)){
+      QMSGS=d.msgs;
+      // drop selections for messages no longer in the queue
+      const ids=new Set(QMSGS.map(m=>m.id));QSEL.forEach(id=>{if(!ids.has(id))QSEL.delete(id);});
+      qcount.textContent=d.truncated?`showing oldest ${QMSGS.length} of ${d.total}`:`${d.total} message(s)`;
+    }else{QMSGS=[];qcount.textContent='';}
+    drawTable();
+    if(qraw.checked)qpre.textContent=await api('/api/service/queue/listing?which='+qsrc.value,{raw:true});
+  }
+  qsrc.onchange=()=>{qdetail.style.display='none';QSEL.clear();refreshQ();};
   const qauto=el('input',{type:'checkbox',id:'qauto'});
   qauto.onchange=()=>{clearInterval(jrnTimer);jrnTimer=qauto.checked?setInterval(refreshQ,5000):null;};
   const qraw=el('input',{type:'checkbox',id:'qraw'});
-  qraw.onchange=()=>{qpre.style.display=qraw.checked?'':'none';qtable.style.display=qraw.checked?'none':'';};
+  qraw.onchange=()=>{qpre.style.display=qraw.checked?'':'none';qtable.style.display=qraw.checked?'none':'';refreshQ();};
   async function repairSpool(dry){
     if(!dry&&!confirm('Move misplaced spool files into the subdirectories Exim expects, then force a delivery run?\n\nNothing is deleted. Messages Exim could not find become deliverable again.'))return;
     qdetail.style.display='';qdetail.textContent='▶ '+(dry?'checking':'repairing')+' spool placement…';
@@ -1265,8 +1328,20 @@ async function renderQueues(){
     qauto,el('label',{for:'qauto',class:'muted'},'follow (5s)'),
     qraw,el('label',{for:'qraw',class:'muted'},'raw'),
     Object.assign(el('button',{class:'act plain',title:'Check whether queued files sit in the split-spool subdirectory Exim expects'},'Check spool placement'),{onclick:()=>repairSpool(true)}),
-    Object.assign(el('button',{class:'act'},'Fix misplaced spool files'),{onclick:()=>repairSpool(false)}));
-  qc.append(qtable,qpre,qdetail);
+    Object.assign(el('button',{class:'act'},'Fix misplaced spool files'),{onclick:()=>repairSpool(false)}),
+    qcount);
+  // quick filters + search over the loaded rows
+  const filtbar=el('div',{class:'ctl'});
+  [['all','All'],['frozen','Frozen'],['bounce','Bounces'],['spam','Spam ≥5']].forEach(([k,lbl])=>{
+    const b=el('button',{class:'act plain','data-lbl':lbl},lbl);
+    b.dataset.lbl=lbl;
+    b.onclick=()=>{QFILT=k;drawTable();};
+    fbtns[k]=b;filtbar.append(b);
+  });
+  const qsearch=el('input',{placeholder:'search sender / recipient / subject / id…',style:'flex:1;max-width:22rem'});
+  qsearch.oninput=()=>{QTEXT=qsearch.value.trim();drawTable();};
+  filtbar.append(qsearch);
+  qc.append(filtbar,bulkbar,qtable,qpre,qdetail);
   refreshQ();
 }
 

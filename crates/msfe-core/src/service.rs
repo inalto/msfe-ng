@@ -281,7 +281,7 @@ pub fn count_queue(dir: &Path) -> usize {
 }
 
 /// All -H/-D files in an Exim input dir (flat or split-spool).
-fn queue_files(dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn queue_files(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return out;
@@ -600,6 +600,104 @@ pub fn valid_exim_id(id: &str) -> bool {
     (10..=30).contains(&id.len())
         && id.contains('-')
         && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// Act on many queued messages at once. `delete` runs `exim -Mrm` in batches
+/// of 100 and reports per-batch results; `deliver` starts detached `exim -M`
+/// runs (a bulk synchronous delivery could block for minutes on slow remotes).
+/// The whole batch is rejected if any id fails validation — ids come from the
+/// UI or from cleanup criteria, never free-form. `dry` reports what would be
+/// done without touching the queue.
+pub fn queue_bulk_action(
+    named: Option<&str>,
+    ids: &[String],
+    action: &str,
+    dry: bool,
+) -> ControlOutcome {
+    if ids.is_empty() {
+        return ControlOutcome {
+            ok: true,
+            transcript: vec!["nothing to do (no matching messages)".into()],
+        };
+    }
+    if let Some(bad) = ids.iter().find(|i| !valid_exim_id(i)) {
+        return ControlOutcome {
+            ok: false,
+            transcript: vec![format!("invalid message id '{bad}' — batch rejected")],
+        };
+    }
+    if !matches!(action, "delete" | "deliver") {
+        return ControlOutcome {
+            ok: false,
+            transcript: vec![format!("unknown action '{action}'")],
+        };
+    }
+    if dry {
+        let mut transcript = vec![format!("dry-run: would {action} {} message(s):", ids.len())];
+        transcript.extend(ids.iter().map(|i| format!("  {i}")));
+        return ControlOutcome {
+            ok: true,
+            transcript,
+        };
+    }
+    let mut transcript = Vec::new();
+    let mut ok = true;
+    for chunk in ids.chunks(100) {
+        if action == "delete" {
+            transcript.push(format!(
+                "$ exim {}-Mrm <{} ids>",
+                named.map(|q| format!("-qG{q} ")).unwrap_or_default(),
+                chunk.len()
+            ));
+            match exim_cmd(named).arg("-Mrm").args(chunk).output() {
+                Ok(o) => {
+                    for stream in [&o.stdout, &o.stderr] {
+                        for l in String::from_utf8_lossy(stream).lines() {
+                            if !l.trim().is_empty() {
+                                transcript.push(l.to_string());
+                            }
+                        }
+                    }
+                    // a message delivered mid-flight makes -Mrm exit non-zero;
+                    // that's a soft error, not a batch failure — the per-id
+                    // lines above show what happened
+                    if !o.status.success() {
+                        transcript.push(format!(
+                            "→ exit {} (some ids may already be gone)",
+                            o.status.code().unwrap_or(-1)
+                        ));
+                    }
+                }
+                Err(e) => {
+                    transcript.push(format!("→ cannot run exim: {e}"));
+                    ok = false;
+                }
+            }
+        } else {
+            // deliver: fire-and-forget so a slow remote can't hang the request
+            match exim_cmd(named)
+                .arg("-M")
+                .args(chunk)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(_) => transcript.push(format!(
+                    "started delivery run for {} message(s)",
+                    chunk.len()
+                )),
+                Err(e) => {
+                    transcript.push(format!("→ cannot run exim: {e}"));
+                    ok = false;
+                }
+            }
+        }
+    }
+    if ok {
+        transcript.push(format!("→ {action}: {} message(s) processed", ids.len()));
+    }
+    ControlOutcome { ok, transcript }
 }
 
 fn exim_cmd(named: Option<&str>) -> Command {

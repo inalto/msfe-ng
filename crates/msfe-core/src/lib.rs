@@ -25,6 +25,7 @@ pub mod mailscanner;
 pub mod migrate;
 pub mod panel;
 pub mod quarantine;
+pub mod queueview;
 pub mod rulefile;
 pub mod rules;
 pub mod sa;

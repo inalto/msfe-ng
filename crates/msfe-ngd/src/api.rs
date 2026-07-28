@@ -733,6 +733,53 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             let what = req.query_param("what").unwrap_or_else(|| "headers".into());
             Response::text(200, &service::queue_msg_view(cfg, named, &id, &what))
         }
+        // Structured queue listing parsed from the spool -H files: sender,
+        // recipients, subject, spam score, frozen state per message.
+        ("GET", "/api/service/queue/detail") => {
+            let (inq, outq) = service::queue_dirs(cfg);
+            let dir = match req.query_param("which").as_deref() {
+                Some("main") => outq,
+                _ => inq,
+            };
+            let limit =
+                stats::clamp_int(req.query_param("limit").as_deref(), 500, 1, 2000) as usize;
+            let l = msfe_core::queueview::list_queue(&dir, limit);
+            let msgs: Vec<Json> = l
+                .msgs
+                .iter()
+                .map(|m| {
+                    Json::Object(vec![
+                        ("id".into(), Json::str(&m.id)),
+                        ("age_secs".into(), Json::Int(m.age_secs as i64)),
+                        ("size".into(), Json::Int(m.size as i64)),
+                        ("sender".into(), Json::str(&m.sender)),
+                        ("bounce".into(), Json::Bool(m.bounce)),
+                        (
+                            "recipients".into(),
+                            Json::Array(m.recipients.iter().map(Json::str).collect()),
+                        ),
+                        ("subject".into(), Json::str(&m.subject)),
+                        (
+                            "spam_score".into(),
+                            m.spam_score
+                                .map(|s| Json::Num(format!("{s:.1}")))
+                                .unwrap_or(Json::Null),
+                        ),
+                        ("frozen".into(), Json::Bool(m.frozen)),
+                        ("parsed".into(), Json::Bool(m.parsed)),
+                    ])
+                })
+                .collect();
+            Response::json(
+                200,
+                &Json::Object(vec![
+                    ("total".into(), Json::Int(l.total as i64)),
+                    ("truncated".into(), Json::Bool(l.truncated)),
+                    ("msgs".into(), Json::Array(msgs)),
+                ])
+                .to_string(),
+            )
+        }
         ("POST", "/api/service/queue/action") => {
             let v = Json::parse(&req.body).unwrap_or(Json::Null);
             let named = match v.str_field("which").as_str() {
@@ -744,6 +791,38 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                 200,
                 &Json::Object(vec![
                     ("ok".into(), Json::Bool(o.ok)),
+                    (
+                        "transcript".into(),
+                        Json::Array(o.transcript.iter().map(Json::str).collect()),
+                    ),
+                ])
+                .to_string(),
+            )
+        }
+        ("POST", "/api/service/queue/bulk") => {
+            let v = Json::parse(&req.body).unwrap_or(Json::Null);
+            let named = match v.str_field("which").as_str() {
+                "main" => None,
+                _ => Some("mailscanner"),
+            };
+            let ids: Vec<String> = v
+                .get("ids")
+                .and_then(|j| match j {
+                    Json::Array(a) => Some(
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                            .collect(),
+                    ),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            let dry = matches!(v.get("dry"), Some(Json::Bool(true)));
+            let o = service::queue_bulk_action(named, &ids, &v.str_field("action"), dry);
+            Response::json(
+                200,
+                &Json::Object(vec![
+                    ("ok".into(), Json::Bool(o.ok)),
+                    ("count".into(), Json::Int(ids.len() as i64)),
                     (
                         "transcript".into(),
                         Json::Array(o.transcript.iter().map(Json::str).collect()),
