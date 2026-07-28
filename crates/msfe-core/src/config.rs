@@ -62,6 +62,28 @@ pub struct Config {
     pub learn_updates_db: bool,
     /// Directory for database/Bayes backups.
     pub backup_dir: String,
+
+    // ---- queue auto-clean (delivery queue only; every rule ships OFF) --------
+    /// Remove frozen messages older than N hours (0 = off).
+    pub queue_clean_frozen_hours: u32,
+    /// Remove null-sender (bounce) messages older than N hours (0 = off).
+    pub queue_clean_bounce_hours: u32,
+    /// Remove messages whose spool spam score is at least this (0 = off).
+    pub queue_clean_spam_score: f64,
+
+    // ---- Telegram alerts (empty token disables everything) -------------------
+    /// Telegram bot token (from @BotFather). Secret: never exposed via the API.
+    pub telegram_bot_token: String,
+    /// Telegram chat id the alerts are sent to.
+    pub telegram_chat_id: String,
+    /// Alert when the delivery queue holds at least this many messages (0 = off).
+    pub alert_queue_size: u32,
+    /// Alert when the oldest scanning-queue message is at least N minutes old (0 = off).
+    pub alert_scan_stuck_mins: u32,
+    /// Alert when one authenticated account sends at least N messages/hour (0 = off).
+    pub alert_burst_per_hour: u32,
+    /// Minimum minutes between repeats of the same alert.
+    pub alert_cooldown_mins: u32,
 }
 
 impl Default for Config {
@@ -96,6 +118,15 @@ impl Default for Config {
             dovecot_lda: "/usr/libexec/dovecot/dovecot-lda".into(),
             learn_updates_db: true,
             backup_dir: "/opt/msfe-ng/backups".into(),
+            queue_clean_frozen_hours: 0,
+            queue_clean_bounce_hours: 0,
+            queue_clean_spam_score: 0.0,
+            telegram_bot_token: String::new(),
+            telegram_chat_id: String::new(),
+            alert_queue_size: 0,
+            alert_scan_stuck_mins: 0,
+            alert_burst_per_hour: 0,
+            alert_cooldown_mins: 60,
         }
     }
 }
@@ -144,6 +175,15 @@ impl Config {
                 "dovecot_lda" => c.dovecot_lda = v,
                 "learn_updates_db" => c.learn_updates_db = v != "no" && v != "false" && v != "0",
                 "backup_dir" => c.backup_dir = v,
+                "queue_clean_frozen_hours" => c.queue_clean_frozen_hours = v.parse().unwrap_or(0),
+                "queue_clean_bounce_hours" => c.queue_clean_bounce_hours = v.parse().unwrap_or(0),
+                "queue_clean_spam_score" => c.queue_clean_spam_score = v.parse().unwrap_or(0.0),
+                "telegram_bot_token" => c.telegram_bot_token = v,
+                "telegram_chat_id" => c.telegram_chat_id = v,
+                "alert_queue_size" => c.alert_queue_size = v.parse().unwrap_or(0),
+                "alert_scan_stuck_mins" => c.alert_scan_stuck_mins = v.parse().unwrap_or(0),
+                "alert_burst_per_hour" => c.alert_burst_per_hour = v.parse().unwrap_or(0),
+                "alert_cooldown_mins" => c.alert_cooldown_mins = v.parse().unwrap_or(60),
                 _ => {} // unknown keys ignored
             }
         }
@@ -182,6 +222,42 @@ impl Config {
             ("spamcop_address".into(), Json::str(&self.spamcop_address)),
             ("learn_updates_db".into(), Json::Bool(self.learn_updates_db)),
             ("backup_dir".into(), Json::str(&self.backup_dir)),
+            (
+                "queue_clean_frozen_hours".into(),
+                Json::Int(self.queue_clean_frozen_hours as i64),
+            ),
+            (
+                "queue_clean_bounce_hours".into(),
+                Json::Int(self.queue_clean_bounce_hours as i64),
+            ),
+            (
+                "queue_clean_spam_score".into(),
+                Json::Num(format!("{}", self.queue_clean_spam_score)),
+            ),
+            // the bot token is a secret: expose only whether it is set
+            (
+                "telegram_configured".into(),
+                Json::Bool(
+                    !self.telegram_bot_token.is_empty() && !self.telegram_chat_id.is_empty(),
+                ),
+            ),
+            ("telegram_chat_id".into(), Json::str(&self.telegram_chat_id)),
+            (
+                "alert_queue_size".into(),
+                Json::Int(self.alert_queue_size as i64),
+            ),
+            (
+                "alert_scan_stuck_mins".into(),
+                Json::Int(self.alert_scan_stuck_mins as i64),
+            ),
+            (
+                "alert_burst_per_hour".into(),
+                Json::Int(self.alert_burst_per_hour as i64),
+            ),
+            (
+                "alert_cooldown_mins".into(),
+                Json::Int(self.alert_cooldown_mins as i64),
+            ),
         ])
     }
 }

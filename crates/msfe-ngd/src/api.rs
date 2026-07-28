@@ -831,6 +831,71 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                 .to_string(),
             )
         }
+        // Criteria-based cleanup of the DELIVERY queue (frozen/bounce/high-spam
+        // per the queue_clean_* config; optional per-request overrides for the
+        // preview). The scanning queue is deliberately out of reach here.
+        ("POST", "/api/service/queue/clean") => {
+            let v = Json::parse(&req.body).unwrap_or(Json::Null);
+            let dry = matches!(v.get("dry"), Some(Json::Bool(true)));
+            let num = |k: &str| -> Option<f64> {
+                v.get(k).and_then(|j| match j {
+                    Json::Int(n) => Some(*n as f64),
+                    Json::Num(s) => s.parse().ok(),
+                    _ => None,
+                })
+            };
+            let mut criteria = msfe_core::queueview::CleanCriteria::from_config(cfg);
+            // overrides let the UI preview thresholds before saving them
+            if let Some(h) = num("frozen_hours") {
+                criteria.frozen_older_hours = if h > 0.0 { Some(h as u32) } else { None };
+            }
+            if let Some(h) = num("bounce_hours") {
+                criteria.bounce_older_hours = if h > 0.0 { Some(h as u32) } else { None };
+            }
+            if let Some(s) = num("spam_score") {
+                criteria.spam_score_min = if s > 0.0 { Some(s) } else { None };
+            }
+            if !criteria.any_enabled() {
+                return Response::json(
+                    200,
+                    r#"{"ok":true,"count":0,"transcript":["no cleanup rule is enabled — set a threshold first"]}"#,
+                );
+            }
+            let (_, out_dir) = service::queue_dirs(cfg);
+            let listing = msfe_core::queueview::list_queue(&out_dir, 100_000);
+            let ids = msfe_core::queueview::select_removals(&listing.msgs, &criteria);
+            let o = service::queue_bulk_action(None, &ids, "delete", dry);
+            Response::json(
+                200,
+                &Json::Object(vec![
+                    ("ok".into(), Json::Bool(o.ok)),
+                    ("count".into(), Json::Int(ids.len() as i64)),
+                    ("dry".into(), Json::Bool(dry)),
+                    (
+                        "transcript".into(),
+                        Json::Array(o.transcript.iter().map(Json::str).collect()),
+                    ),
+                ])
+                .to_string(),
+            )
+        }
+        ("POST", "/api/telegram/test") => {
+            let mut transcript = Vec::new();
+            let ok = match msfe_core::telegram::send(
+                cfg,
+                "✅ MSFE-NG test message — Telegram alerts are working.",
+            ) {
+                Ok(()) => {
+                    transcript.push("test message sent — check your Telegram chat".into());
+                    true
+                }
+                Err(e) => {
+                    transcript.push(e);
+                    false
+                }
+            };
+            outcome_json(service::ControlOutcome { ok, transcript })
+        }
         ("POST", "/api/service/queue/fix") => service_queue_fix(cfg),
         ("POST", "/api/service/queue/repair-spool") => {
             let v = Json::parse(&req.body).unwrap_or(Json::Null);
@@ -1324,6 +1389,25 @@ fn service_queue(cfg: &Config) -> Response {
                 Json::Int(service::count_queue(&out_dir) as i64),
             ),
             ("orphans".into(), Json::Array(orphans)),
+            (
+                "oldest_incoming_secs".into(),
+                service::oldest_queue_age(&inc_dir)
+                    .map(|a| Json::Int(a as i64))
+                    .unwrap_or(Json::Null),
+            ),
+            (
+                "oldest_outgoing_secs".into(),
+                service::oldest_queue_age(&out_dir)
+                    .map(|a| Json::Int(a as i64))
+                    .unwrap_or(Json::Null),
+            ),
+            // last auto-clean run summary: {"at":epoch,"removed":n}
+            (
+                "clean_last".into(),
+                msfe_core::db::kv_get(cfg, "queueclean_last")
+                    .and_then(|v| Json::parse(&v).ok())
+                    .unwrap_or(Json::Null),
+            ),
         ])
         .to_string(),
     )

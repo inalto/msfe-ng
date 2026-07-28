@@ -390,6 +390,35 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
             ));
         }
     }
+    // ---- alerting --------------------------------------------------------
+    let token = !cfg.telegram_bot_token.trim().is_empty();
+    let chat = !cfg.telegram_chat_id.trim().is_empty();
+    if token != chat {
+        out.push(check(
+            "Telegram alerts half-configured",
+            false,
+            Level::Warn,
+            if token {
+                "bot token is set but the chat id is empty — alerts cannot be delivered".into()
+            } else {
+                "chat id is set but the bot token is empty — alerts cannot be delivered".into()
+            },
+            "Config → Telegram alerts",
+        ));
+    }
+    let thresholds_set =
+        cfg.alert_queue_size > 0 || cfg.alert_scan_stuck_mins > 0 || cfg.alert_burst_per_hour > 0;
+    if thresholds_set && !(token && chat) {
+        out.push(check(
+            "alert thresholds without a delivery channel",
+            false,
+            Level::Warn,
+            "alert thresholds are set but Telegram is not configured — alerts are only logged"
+                .into(),
+            "Config → Telegram alerts (bot token + chat id), then Send test message",
+        ));
+    }
+
     out
 }
 

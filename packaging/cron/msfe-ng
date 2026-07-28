@@ -11,3 +11,8 @@ PATH=/usr/bin:/bin:/opt/msfe-ng/bin
 
 # Prune old mail-log rows past the retention window, nightly.
 20 1 * * * root /opt/msfe-ng/bin/msfe-ng housekeeping >/dev/null 2>&1
+
+# Queue monitor: auto-clean the delivery queue per the queue_clean_* rules and
+# send Telegram alerts (queue growth, stuck scanning, sending bursts). All
+# rules ship disabled, so this is a no-op until configured in the WHM UI.
+*/5 * * * * root /opt/msfe-ng/bin/msfe-ng monitor >/dev/null 2>&1

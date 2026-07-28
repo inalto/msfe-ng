@@ -256,6 +256,62 @@ pub fn list_queue(dir: &Path, cap: usize) -> QueueListing {
     }
 }
 
+/// Automatic-cleanup rules; a `None`/zero rule is disabled. Built from the
+/// `queue_clean_*` config keys, which all ship 0 (off).
+pub struct CleanCriteria {
+    pub frozen_older_hours: Option<u32>,
+    pub bounce_older_hours: Option<u32>,
+    pub spam_score_min: Option<f64>,
+}
+
+impl CleanCriteria {
+    /// Criteria from config; zero values mean the rule is disabled.
+    pub fn from_config(cfg: &crate::Config) -> CleanCriteria {
+        let nz_u = |v: u32| if v > 0 { Some(v) } else { None };
+        CleanCriteria {
+            frozen_older_hours: nz_u(cfg.queue_clean_frozen_hours),
+            bounce_older_hours: nz_u(cfg.queue_clean_bounce_hours),
+            spam_score_min: if cfg.queue_clean_spam_score > 0.0 {
+                Some(cfg.queue_clean_spam_score)
+            } else {
+                None
+            },
+        }
+    }
+
+    pub fn any_enabled(&self) -> bool {
+        self.frozen_older_hours.is_some()
+            || self.bounce_older_hours.is_some()
+            || self.spam_score_min.is_some()
+    }
+}
+
+/// Which messages the cleanup rules would remove (union of the enabled rules,
+/// deduplicated by construction — each message appears once in `msgs`).
+/// Messages whose spool header failed to parse are never selected: a rule must
+/// only fire on data it actually read.
+pub fn select_removals(msgs: &[QueueMsgInfo], c: &CleanCriteria) -> Vec<String> {
+    msgs.iter()
+        .filter(|m| m.parsed)
+        .filter(|m| {
+            let frozen_hit = c
+                .frozen_older_hours
+                .map(|h| m.frozen && m.age_secs >= h as u64 * 3600)
+                .unwrap_or(false);
+            let bounce_hit = c
+                .bounce_older_hours
+                .map(|h| m.bounce && m.age_secs >= h as u64 * 3600)
+                .unwrap_or(false);
+            let spam_hit = c
+                .spam_score_min
+                .map(|s| m.spam_score.map(|v| v >= s).unwrap_or(false))
+                .unwrap_or(false);
+            frozen_hit || bounce_hit || spam_hit
+        })
+        .map(|m| m.id.clone())
+        .collect()
+}
+
 /// Decode RFC 2047 encoded words (`=?charset?Q?…?=` / `=?charset?B?…?=`) for
 /// display. Unknown or malformed tokens are left as-is; charsets are treated
 /// as UTF-8 (lossy) which covers the overwhelmingly common utf-8/iso-8859-1
@@ -441,6 +497,86 @@ mod tests {
         assert_eq!(decode_rfc2047("=?utf-8?q?a?= =?utf-8?q?b?="), "ab");
         // malformed stays visible
         assert_eq!(decode_rfc2047("=?utf-8?q?broken"), "=?utf-8?q?broken");
+    }
+
+    fn mk(
+        id: &str,
+        frozen: bool,
+        bounce: bool,
+        score: Option<f64>,
+        age_h: u64,
+        parsed: bool,
+    ) -> QueueMsgInfo {
+        QueueMsgInfo {
+            id: id.into(),
+            sender: if bounce { String::new() } else { "a@b".into() },
+            bounce,
+            recipients: vec![],
+            subject: String::new(),
+            spam_score: score,
+            frozen,
+            age_secs: age_h * 3600,
+            size: 0,
+            parsed,
+        }
+    }
+
+    #[test]
+    fn selects_by_rule_union_never_unparsed() {
+        let msgs = vec![
+            mk("old-frozen-1", true, false, None, 30, true),
+            mk("new-frozen-1", true, false, None, 2, true),
+            mk("old-bounce-1", false, true, None, 30, true),
+            mk("high-spam-11", false, false, Some(16.4), 1, true),
+            mk("low-spam-111", false, false, Some(3.0), 1, true),
+            mk("frozen-spam1", true, false, Some(20.0), 30, true), // matches two rules, appears once
+            mk("unparsed-111", true, true, Some(99.0), 99, false), // never selected
+        ];
+        let all = CleanCriteria {
+            frozen_older_hours: Some(24),
+            bounce_older_hours: Some(24),
+            spam_score_min: Some(10.0),
+        };
+        let ids = select_removals(&msgs, &all);
+        assert_eq!(
+            ids,
+            [
+                "old-frozen-1",
+                "old-bounce-1",
+                "high-spam-11",
+                "frozen-spam1"
+            ]
+        );
+        // disabled rules select nothing
+        let off = CleanCriteria {
+            frozen_older_hours: None,
+            bounce_older_hours: None,
+            spam_score_min: None,
+        };
+        assert!(!off.any_enabled());
+        assert!(select_removals(&msgs, &off).is_empty());
+        // spam-only: no score recorded → rule can't fire
+        let spam_only = CleanCriteria {
+            frozen_older_hours: None,
+            bounce_older_hours: None,
+            spam_score_min: Some(5.0),
+        };
+        assert_eq!(
+            select_removals(&msgs, &spam_only),
+            ["high-spam-11", "frozen-spam1"]
+        );
+    }
+
+    #[test]
+    fn criteria_from_config_zero_is_off() {
+        let mut cfg = crate::Config::default();
+        assert!(!CleanCriteria::from_config(&cfg).any_enabled());
+        cfg.queue_clean_frozen_hours = 24;
+        cfg.queue_clean_spam_score = 12.5;
+        let c = CleanCriteria::from_config(&cfg);
+        assert_eq!(c.frozen_older_hours, Some(24));
+        assert_eq!(c.bounce_older_hours, None);
+        assert_eq!(c.spam_score_min, Some(12.5));
     }
 
     #[test]

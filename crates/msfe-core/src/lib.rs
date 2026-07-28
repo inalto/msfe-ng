@@ -23,6 +23,7 @@ pub mod legacy;
 pub mod mailflow;
 pub mod mailscanner;
 pub mod migrate;
+pub mod monitor;
 pub mod panel;
 pub mod quarantine;
 pub mod queueview;
@@ -34,6 +35,7 @@ pub mod setup;
 pub mod spambox;
 pub mod stats;
 pub mod sync;
+pub mod telegram;
 pub mod users;
 
 pub use config::Config;

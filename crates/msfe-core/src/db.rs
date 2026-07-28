@@ -74,6 +74,42 @@ pub fn query(cfg: &Config, sql: &str) -> io::Result<Vec<Vec<String>>> {
         .collect())
 }
 
+/// Read a global key from the `msfe_config` kv table (daemon-writable state:
+/// alert cooldowns, last-run summaries). `None` when unset or the DB is down.
+pub fn kv_get(cfg: &Config, ckey: &str) -> Option<String> {
+    if !ckey
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'@' || b == b'-')
+    {
+        return None;
+    }
+    let sql = format!(
+        "SELECT cvalue FROM msfe_config WHERE scope='global' AND scope_id='' AND ckey='{ckey}'"
+    );
+    query(cfg, &sql)
+        .ok()?
+        .first()
+        .and_then(|r| r.first())
+        .cloned()
+}
+
+/// Upsert a global key in the `msfe_config` kv table. Values are SQL-escaped
+/// by doubling quotes; keys are restricted to a safe charset.
+pub fn kv_set(cfg: &Config, ckey: &str, cvalue: &str) -> io::Result<()> {
+    if !ckey
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'@' || b == b'-')
+    {
+        return Err(io::Error::other("invalid kv key"));
+    }
+    let v = cvalue.replace('\\', "\\\\").replace('\'', "''");
+    let sql = format!(
+        "INSERT INTO msfe_config (scope, scope_id, ckey, cvalue) VALUES ('global','','{ckey}','{v}') \
+         ON DUPLICATE KEY UPDATE cvalue = VALUES(cvalue);\n"
+    );
+    exec_stdin(cfg, &sql)
+}
+
 /// Dump the whole database to `path` via `mysqldump`, authenticating through the
 /// same private defaults file (credentials never touch argv). A consistent,
 /// low-lock snapshot (`--single-transaction`) suitable for InnoDB.

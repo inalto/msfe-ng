@@ -1107,12 +1107,16 @@ async function renderService(){
     const q=await api('/api/service/queue');
     qbody.innerHTML='';
     if(q.error){qbody.append(el('span',{class:'muted'},'Queue check unavailable'));return;}
+    const age=s=>s==null?'':s>=86400?` · oldest ${Math.floor(s/86400)}d`:s>=3600?` · oldest ${Math.floor(s/3600)}h`:s>=60?` · oldest ${Math.floor(s/60)}m`:` · oldest ${s}s`;
     qbody.append(el('div',{class:'statline'},
-      el('span',{},`Incoming: ${q.incoming} `,el('span',{class:'muted'},`(${q.incoming_dir})`)),
-      el('span',{},`Outgoing: ${q.outgoing} `,el('span',{class:'muted'},`(${q.outgoing_dir})`)),
+      el('span',{},`Incoming: ${q.incoming}${age(q.oldest_incoming_secs)} `,el('span',{class:'muted'},`(${q.incoming_dir})`)),
+      el('span',{},`Outgoing: ${q.outgoing}${age(q.oldest_outgoing_secs)} `,el('span',{class:'muted'},`(${q.outgoing_dir})`)),
       el('span',{},(q.orphans||[]).length
         ? el('span',{style:'color:var(--serious)'},`${q.orphans.length} incorrectly queued file(s)`)
         : el('span',{style:'color:var(--good)'},'No incorrectly queued emails'))));
+    if(q.clean_last&&q.clean_last.at)
+      qbody.append(el('div',{class:'muted',style:'font-size:.78rem'},
+        `Auto-clean last removed ${q.clean_last.removed} message(s) at ${new Date(q.clean_last.at*1000).toLocaleString()}`));
     if((q.orphans||[]).length)
       qbody.append(el('pre',{class:'log'},q.orphans.join('\n')));
   }
@@ -1486,6 +1490,104 @@ async function renderConfig(){
     else if(rr.transcript){dout.textContent=(rr.transcript||[]).join('\n');toast(rr.ok?'Done':'Failed');}
     else{dout.textContent=JSON.stringify(rr);toast(rr.ok?'Done':'Failed');}
   }
+  // Queue auto-clean: per-rule thresholds, dry-run preview, last-run summary
+  const cc=el('div',{class:'card'},el('h2',{},'Queue auto-clean'),
+    el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},
+      'Every 5 minutes, messages in the DELIVERY queue matching an enabled rule are removed automatically. 0 disables a rule — everything ships off. The scanning queue is never touched, so unscanned mail cannot be deleted. Note: mail scanned only by MailScanner may carry no spool spam score, so the score rule matches mail scored by the cPanel SpamAssassin ACL.'));
+  v.append(cc);
+  const cconf=await api('/api/config');
+  const cgrid=el('div',{class:'grid2'});
+  const CLEAN_FIELDS=[
+    ['queue_clean_frozen_hours','Remove frozen messages older than (hours, 0=off)'],
+    ['queue_clean_bounce_hours','Remove bounces (null sender ∅) older than (hours, 0=off)'],
+    ['queue_clean_spam_score','Remove messages with spam score ≥ (0=off)'],
+  ];
+  CLEAN_FIELDS.forEach(([k,lbl])=>{
+    const inp=el('input',{type:'number',min:'0',step:k==='queue_clean_spam_score'?'0.1':'1',value:String(cconf[k]??0)});
+    inp.dataset.ckey=k;
+    cgrid.append(el('label',{class:'field'},lbl,inp));
+  });
+  const cleanOut=el('pre',{class:'log',style:'display:none'},'');
+  const lastInfo=el('div',{class:'muted',style:'font-size:.8rem;margin-bottom:.5rem'});
+  api('/api/service/queue').then(q=>{
+    if(q&&q.clean_last&&q.clean_last.at)
+      lastInfo.textContent=`Last automatic clean: removed ${q.clean_last.removed} message(s) at ${new Date(q.clean_last.at*1000).toLocaleString()}`;
+  });
+  function cleanBody(dry){
+    const b={dry};
+    cgrid.querySelectorAll('[data-ckey]').forEach(i=>{
+      b[{queue_clean_frozen_hours:'frozen_hours',queue_clean_bounce_hours:'bounce_hours',queue_clean_spam_score:'spam_score'}[i.dataset.ckey]]=+i.value||0;
+    });
+    return b;
+  }
+  const cPrev=el('button',{class:'act plain'},'Preview (dry-run)');
+  cPrev.onclick=async()=>{
+    cPrev.disabled=true;cleanOut.style.display='';cleanOut.textContent='Checking the delivery queue…';
+    const r=await api('/api/service/queue/clean',{method:'POST',body:cleanBody(true)});
+    cPrev.disabled=false;
+    cleanOut.textContent=(r.transcript||[r.error||'no response']).join('\n');
+  };
+  const cRun=el('button',{class:'act danger'},'Clean now');
+  cRun.onclick=async()=>{
+    if(!confirm('Remove all delivery-queue messages matching the thresholds above?\n\nThey are deleted permanently. Use Preview first to see what matches.'))return;
+    cRun.disabled=true;cleanOut.style.display='';cleanOut.textContent='Cleaning…';
+    const r=await api('/api/service/queue/clean',{method:'POST',body:cleanBody(false)});
+    cRun.disabled=false;
+    cleanOut.textContent=(r.transcript||[r.error||'no response']).join('\n');
+    toast(r&&r.ok?`Removed ${r.count} message(s)`:'Clean failed — see output');
+  };
+  const cSave=el('button',{class:'act'},'Save rules');
+  cSave.onclick=async()=>{
+    const changes={};
+    cgrid.querySelectorAll('[data-ckey]').forEach(i=>{changes[i.dataset.ckey]=String(+i.value||0);});
+    const r=await api('/api/service/conf/apply',{method:'POST',body:{which:'msfe',changes}});
+    toast(r&&r.ok?'Rules saved — the 5-minute monitor applies them automatically':'Save failed');
+  };
+  cc.append(lastInfo,cgrid,el('div',{class:'ctl'},cSave,cPrev,cRun),cleanOut);
+
+  // Telegram alerts: bot credentials + thresholds + test button
+  const tc=el('div',{class:'card'},el('h2',{},'Telegram alerts'),
+    el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},
+      'Get a Telegram message when the delivery queue grows, the scanning queue is stuck, or one account suddenly sends a lot of mail (the alert names the account). Create a bot with @BotFather to get a token; the chat id is your own id or a group id. 0 disables a threshold.'));
+  v.append(tc);
+  const tgrid=el('div',{class:'grid2'});
+  const tok=el('input',{type:'password',placeholder:cconf.telegram_configured?'(configured — leave empty to keep)':'123456:ABC-DEF…','autocomplete':'off'});
+  tok.dataset.tkey='telegram_bot_token';
+  const TG_FIELDS=[
+    ['telegram_chat_id','Chat id','text'],
+    ['alert_queue_size','Alert when delivery queue reaches (messages, 0=off)','number'],
+    ['alert_scan_stuck_mins','Alert when scanning queue is stuck for (minutes, 0=off)','number'],
+    ['alert_burst_per_hour','Alert when one account sends (messages/hour, 0=off)','number'],
+    ['alert_cooldown_mins','Repeat the same alert at most every (minutes)','number'],
+  ];
+  tgrid.append(el('label',{class:'field'},'Bot token'+(cconf.telegram_configured?' (set)':''),tok));
+  TG_FIELDS.forEach(([k,lbl,type])=>{
+    const inp=el('input',{type,value:String(cconf[k]??'')});
+    if(type==='number'){inp.setAttribute('min','0');}
+    inp.dataset.tkey=k;
+    tgrid.append(el('label',{class:'field'},lbl,inp));
+  });
+  const tgOut=el('pre',{class:'log',style:'display:none'},'');
+  const tSave=el('button',{class:'act'},'Save alert settings');
+  tSave.onclick=async()=>{
+    const changes={};
+    tgrid.querySelectorAll('[data-tkey]').forEach(i=>{
+      if(i.dataset.tkey==='telegram_bot_token'&&!i.value.trim())return; // empty = keep existing
+      changes[i.dataset.tkey]=i.value.trim();
+    });
+    const r=await api('/api/service/conf/apply',{method:'POST',body:{which:'msfe',changes}});
+    toast(r&&r.ok?`${r.applied} setting(s) saved`:'Save failed');
+  };
+  const tTest=el('button',{class:'act plain'},'Send test message');
+  tTest.onclick=async()=>{
+    tTest.disabled=true;tgOut.style.display='';tgOut.textContent='Sending test message…';
+    const r=await api('/api/telegram/test',{method:'POST'});
+    tTest.disabled=false;
+    tgOut.textContent=(r.transcript||[r.error||'no response']).join('\n');
+    toast(r&&r.ok?'Test message sent':'Test failed — see output');
+  };
+  tc.append(tgrid,el('div',{class:'ctl'},tSave,tTest),tgOut);
+
   const dbtns=el('div',{class:'ctl',style:'flex-wrap:wrap'});
   const bBackup=el('button',{class:'act'},'Backup now');
   bBackup.onclick=()=>dbAction('backup','Dumping database',null,bBackup);

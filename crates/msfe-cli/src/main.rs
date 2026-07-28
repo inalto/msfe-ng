@@ -50,6 +50,7 @@ fn main() -> ExitCode {
         "spambox" => cmd_spambox(args.get(1).map(String::as_str)),
         "selftest" => cmd_selftest(),
         "housekeeping" => cmd_housekeeping(),
+        "monitor" => cmd_monitor(args.get(1).map(String::as_str)),
         "digest" => cmd_digest(args.get(1).map(String::as_str)),
         "exim" => cmd_exim(args.get(1).map(String::as_str)),
         "service" => cmd_service(args.get(1).map(String::as_str)),
@@ -536,6 +537,22 @@ fn cmd_housekeeping() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// Periodic queue monitor (cron, every 5 min): auto-clean the delivery queue
+/// per the queue_clean_* rules and send Telegram alerts for queue growth,
+/// stuck scanning and per-account sending bursts. `--dry-run` previews both.
+fn cmd_monitor(flag: Option<&str>) -> ExitCode {
+    let cfg = Config::load(&config_path());
+    let dry = flag == Some("--dry-run");
+    let r = msfe_core::monitor::run(&cfg, dry);
+    if r.notes.is_empty() {
+        println!("monitor: nothing to do (no cleanup rules or alerts configured)");
+    }
+    for n in &r.notes {
+        println!("{n}");
+    }
+    ExitCode::SUCCESS
 }
 
 /// Send quarantine digests to digest-enabled domains (`--dry-run` to preview).
@@ -1125,6 +1142,7 @@ COMMANDS:
     selftest            Send GTUBE/EICAR/clean test mail through the MTA
     digest [--dry-run]  Email quarantine digests to digest-enabled domains
     housekeeping        Prune old mail-log rows (cleanmysql retention)
+    monitor [--dry-run] Auto-clean the delivery queue + send Telegram alerts (cron)
     exim <status|enable-scanning|disable-scanning>   Toggle MailScanner scanning
     service <status|start|stop|reload|restart|queue-fix|spool-repair>   MailScanner service & queues
     doctor              Check every link of the scanning chain; names each fix

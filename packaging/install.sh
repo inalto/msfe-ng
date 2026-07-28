@@ -106,6 +106,20 @@ backup_dir = "/opt/msfe-ng/backups"
 # Logs watched by the WHM Service tab
 maillog_path = "/var/log/maillog"
 exim_mainlog_path = "/var/log/exim_mainlog"
+
+# Queue auto-clean (delivery queue only; 0 = rule off). Editable in Config →
+# Queue auto-clean. Runs from cron every 5 minutes.
+queue_clean_frozen_hours = 0
+queue_clean_bounce_hours = 0
+queue_clean_spam_score = 0
+
+# Telegram alerts (Config → Telegram alerts). Empty token disables alerting.
+telegram_bot_token = ""
+telegram_chat_id = ""
+alert_queue_size = 0
+alert_scan_stuck_mins = 0
+alert_burst_per_hour = 0
+alert_cooldown_mins = 60
 EOF
     chmod 0640 "$CONFDIR/config.toml"
 fi
