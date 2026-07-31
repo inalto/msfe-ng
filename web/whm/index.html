@@ -1202,14 +1202,16 @@ async function renderQueues(){
   const qpre=el('pre',{class:'log',style:'display:none'},'');
   const qdetail=el('pre',{class:'log',style:'display:none;max-height:20rem'});
   const qcount=el('span',{class:'muted',style:'margin-left:auto;font-size:.8rem'});
-  let QMSGS=[],QSEL=new Set(),QFILT='all',QTEXT='';
+  let QMSGS=[],QSEL=new Set(),QFILT='all',QTEXT='',QTRUNC=false;
   const fmtAge=s=>s>=86400?Math.floor(s/86400)+'d '+Math.floor(s%86400/3600)+'h':s>=3600?Math.floor(s/3600)+'h '+Math.floor(s%3600/60)+'m':s>=60?Math.floor(s/60)+'m':s+'s';
   const fmtSz=b=>b>=1048576?(b/1048576).toFixed(1)+' MB':b>=1024?Math.round(b/1024)+' KB':b+' B';
   function scoreCell(m){
     if(m.spam_score==null)return el('td',{class:'num muted'},'—');
     const s=+m.spam_score;
     const col=s>=10?'var(--critical)':s>=5?'var(--warning)':'var(--ink2)';
-    return el('td',{class:'num',style:'color:'+col+';font-weight:'+(s>=5?'700':'400')},s.toFixed(1));
+    return el('td',{class:'num',style:'color:'+col+';font-weight:'+(s>=5?'700':'400'),title:'spam score '+s.toFixed(1)},
+      s.toFixed(1),
+      s>=5?el('span',{class:'badge',style:'background:'+col+';margin-left:.4rem'},s>=10?'high spam':'spam'):'');
   }
   function visible(){
     return QMSGS.filter(m=>{
@@ -1255,6 +1257,30 @@ async function renderQueues(){
     toast(r&&r.ok?`${action}: ${ids.length} done`:`${action} failed — see output`);
     QSEL.clear();refreshQ();
   }
+  // one-click purge: delete every spam/bounce message, re-fetching pages until none match
+  async function purge(kind){
+    const match=kind==='spam'?(m=>m.spam_score!=null&&+m.spam_score>=5):(m=>!!m.bounce);
+    const what=kind==='spam'?'spam messages (score ≥5)':'bounce messages (null sender ∅)';
+    let ids=QMSGS.filter(match).map(m=>m.id);
+    if(!ids.length)return;
+    if(!confirm(`Delete ALL ${what} from this queue?\n\n${ids.length}${QTRUNC?'+':''} matching message(s)${QTRUNC?' — the queue is larger than the loaded page, deletion repeats until no matches remain':''}.\n\nThey are removed permanently.`))return;
+    qdetail.style.display='';
+    let done=0,out=[];
+    for(let round=0;round<20&&ids.length;round++){
+      qdetail.textContent=`▶ deleting ${what}… ${done} done, ${ids.length} in this round`;
+      const r=await api('/api/service/queue/bulk',{method:'POST',body:{which:qsrc.value,ids,action:'delete'}});
+      out=r&&r.transcript||[r&&r.error||'no response'];
+      if(!r||!r.ok)break;
+      done+=ids.length;
+      const d=await api('/api/service/queue/detail?which='+qsrc.value+'&limit=2000');
+      ids=d&&Array.isArray(d.msgs)?d.msgs.filter(match).map(m=>m.id):[];
+    }
+    qdetail.textContent=out.join('\n')+(done?`\n→ ${done} message(s) deleted`:'');
+    toast(done?`deleted ${done} ${kind} message(s)`:'delete failed — see output');
+    QSEL.clear();refreshQ();
+  }
+  const bSpamAll=Object.assign(el('button',{class:'act danger'},'Delete all spam'),{onclick:()=>purge('spam')});
+  const bBncAll=Object.assign(el('button',{class:'act danger'},'Delete all bounces'),{onclick:()=>purge('bounce')});
   const fbtns={};
   const bulkbar=el('div',{class:'ctl',style:'display:none'});
   const bDel=Object.assign(el('button',{class:'act danger'},'Delete selected'),{onclick:()=>bulkAction('delete')});
@@ -1274,6 +1300,9 @@ async function renderQueues(){
     const n={all:QMSGS.length,frozen:QMSGS.filter(m=>m.frozen).length,bounce:QMSGS.filter(m=>m.bounce).length,
       spam:QMSGS.filter(m=>m.spam_score!=null&&+m.spam_score>=5).length};
     for(const k in fbtns){fbtns[k].textContent=fbtns[k].dataset.lbl+' ('+n[k]+')';fbtns[k].className=QFILT===k?'act':'act plain';}
+    const plus=QTRUNC?'+':'';
+    bSpamAll.textContent=`Delete all spam (${n.spam}${plus})`;bSpamAll.disabled=!n.spam;
+    bBncAll.textContent=`Delete all bounces (${n.bounce}${plus})`;bBncAll.disabled=!n.bounce;
     if(!rows.length){
       qtable.append(el('tr',{},el('td',{class:'muted'},QMSGS.length?'No messages match this filter.':'Queue is empty.')));
       syncBulk();return;
@@ -1309,8 +1338,9 @@ async function renderQueues(){
       QMSGS=d.msgs;
       // drop selections for messages no longer in the queue
       const ids=new Set(QMSGS.map(m=>m.id));QSEL.forEach(id=>{if(!ids.has(id))QSEL.delete(id);});
+      QTRUNC=!!d.truncated;
       qcount.textContent=d.truncated?`showing oldest ${QMSGS.length} of ${d.total}`:`${d.total} message(s)`;
-    }else{QMSGS=[];qcount.textContent='';}
+    }else{QMSGS=[];QTRUNC=false;qcount.textContent='';}
     drawTable();
     if(qraw.checked)qpre.textContent=await api('/api/service/queue/listing?which='+qsrc.value,{raw:true});
   }
@@ -1344,7 +1374,7 @@ async function renderQueues(){
   });
   const qsearch=el('input',{placeholder:'search sender / recipient / subject / id…',style:'flex:1;max-width:22rem'});
   qsearch.oninput=()=>{QTEXT=qsearch.value.trim();drawTable();};
-  filtbar.append(qsearch);
+  filtbar.append(qsearch,bSpamAll,bBncAll);
   qc.append(filtbar,bulkbar,qtable,qpre,qdetail);
   refreshQ();
 }
