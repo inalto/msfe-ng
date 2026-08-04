@@ -196,13 +196,19 @@ fn cmd_sync(flag: Option<&str>) -> ExitCode {
     }
 
     match sync::run(&cfg, &config_path(), None) {
-        Ok(n) => {
+        Ok(r) => {
             println!(
-                "wrote {n} rule files for {} domains to {}",
+                "wrote {} rule files ({} changed) for {} domains to {}",
+                r.files,
+                r.changed,
                 domains.len(),
                 cfg.mailscanner_rules_dir
             );
-            if sync::reload_mailscanner() {
+            // Reload = full restart for the LSB MailScanner service: only pay
+            // that (and only interrupt in-flight batches) for a real change.
+            if r.changed == 0 {
+                println!("ruleset unchanged — MailScanner not reloaded");
+            } else if sync::reload_mailscanner() {
                 println!("reloaded MailScanner");
             } else {
                 eprintln!("note: could not reload MailScanner automatically — reload it to apply");
@@ -811,9 +817,9 @@ fn cmd_rules_adopt() -> ExitCode {
             );
             if r.adopted > 0 {
                 match sync::run(&cfg, &config_path(), None) {
-                    Ok(n) => {
-                        println!("resynced {n} rule files");
-                        if !sync::reload_mailscanner() {
+                    Ok(r) => {
+                        println!("resynced {} rule files ({} changed)", r.files, r.changed);
+                        if r.changed > 0 && !sync::reload_mailscanner() {
                             eprintln!("note: could not reload MailScanner automatically");
                         }
                     }

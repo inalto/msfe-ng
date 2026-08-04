@@ -985,12 +985,13 @@ fn sender_list(req: &Request, cfg: &Config, config_file: &Path) -> Response {
         return Response::json(500, &format!("{{\"error\":\"cannot save lists: {e}\"}}"));
     }
     match sync::run(cfg, config_file, None) {
-        Ok(n) => {
-            let reloaded = sync::reload_mailscanner();
+        Ok(r) => {
+            let reloaded = r.changed > 0 && sync::reload_mailscanner();
             Response::json(
                 200,
                 &format!(
-                    "{{\"ok\":true,\"pattern\":\"{pattern}\",\"list\":\"{list}\",\"removed\":{remove},\"files\":{n},\"reloaded\":{reloaded}}}"
+                    "{{\"ok\":true,\"pattern\":\"{pattern}\",\"list\":\"{list}\",\"removed\":{remove},\"files\":{},\"changed\":{},\"reloaded\":{reloaded}}}",
+                    r.files, r.changed
                 ),
             )
         }
@@ -1135,11 +1136,14 @@ fn rules_custom_put(req: &Request, cfg: &Config, config_file: &Path) -> Response
         return Response::json(500, &format!("{{\"error\":\"cannot save: {e}\"}}"));
     }
     match sync::run(cfg, config_file, None) {
-        Ok(n) => {
-            let reloaded = sync::reload_mailscanner();
+        Ok(r) => {
+            let reloaded = r.changed > 0 && sync::reload_mailscanner();
             Response::json(
                 200,
-                &format!("{{\"ok\":true,\"files\":{n},\"reloaded\":{reloaded}}}"),
+                &format!(
+                    "{{\"ok\":true,\"files\":{},\"changed\":{},\"reloaded\":{reloaded}}}",
+                    r.files, r.changed
+                ),
             )
         }
         Err(e) => Response::json(500, &format!("{{\"error\":\"sync failed: {e}\"}}")),
@@ -1222,10 +1226,14 @@ fn rules_adopt(req: &Request, cfg: &Config, config_file: &Path) -> Response {
         Err(e) => return Response::json(500, &format!("{{\"error\":\"cannot save: {e}\"}}")),
     };
     if report.adopted > 0 {
-        if let Err(e) = sync::run(cfg, config_file, None) {
-            return Response::json(500, &format!("{{\"error\":\"sync failed: {e}\"}}"));
+        match sync::run(cfg, config_file, None) {
+            Ok(r) => {
+                if r.changed > 0 {
+                    sync::reload_mailscanner();
+                }
+            }
+            Err(e) => return Response::json(500, &format!("{{\"error\":\"sync failed: {e}\"}}")),
         }
-        sync::reload_mailscanner();
     }
     Response::json(
         200,
@@ -1339,11 +1347,16 @@ fn service_mailflow(req: &Request) -> Response {
 /// Regenerate rule files from policy (incl. end-user overrides) and reload.
 fn service_sync(cfg: &Config, config_file: &Path) -> Response {
     match sync::run(cfg, config_file, None) {
-        Ok(n) => {
-            let reloaded = sync::reload_mailscanner();
+        Ok(r) => {
+            // reload = restart for the LSB service; skip it when the ruleset
+            // on disk already matches (the 10-minute sync cron hits this path)
+            let reloaded = r.changed > 0 && sync::reload_mailscanner();
             Response::json(
                 200,
-                &format!("{{\"ok\":true,\"files\":{n},\"reloaded\":{reloaded}}}"),
+                &format!(
+                    "{{\"ok\":true,\"files\":{},\"changed\":{},\"reloaded\":{reloaded}}}",
+                    r.files, r.changed
+                ),
             )
         }
         Err(e) => Response::json(500, &format!("{{\"error\":\"sync failed: {e}\"}}")),
@@ -1650,11 +1663,14 @@ fn save_policy(req: &Request, cfg: &Config, config_file: &Path) -> Response {
         return Response::json(500, &format!("{{\"error\":\"cannot save policy: {e}\"}}"));
     }
     match sync::run(cfg, config_file, None) {
-        Ok(n) => {
-            let reloaded = sync::reload_mailscanner();
+        Ok(r) => {
+            let reloaded = r.changed > 0 && sync::reload_mailscanner();
             Response::json(
                 200,
-                &format!("{{\"ok\":true,\"files\":{n},\"reloaded\":{reloaded}}}"),
+                &format!(
+                    "{{\"ok\":true,\"files\":{},\"changed\":{},\"reloaded\":{reloaded}}}",
+                    r.files, r.changed
+                ),
             )
         }
         Err(e) => Response::json(500, &format!("{{\"error\":\"sync failed: {e}\"}}")),
@@ -1905,11 +1921,14 @@ fn apply_override(
         return Response::json(500, &format!("{{\"error\":\"cannot save: {e}\"}}"));
     }
     match sync::run(cfg, config_file, None) {
-        Ok(n) => {
-            let reloaded = sync::reload_mailscanner();
+        Ok(r) => {
+            let reloaded = r.changed > 0 && sync::reload_mailscanner();
             Response::json(
                 200,
-                &format!("{{\"ok\":true,\"files\":{n},\"reloaded\":{reloaded}}}"),
+                &format!(
+                    "{{\"ok\":true,\"files\":{},\"changed\":{},\"reloaded\":{reloaded}}}",
+                    r.files, r.changed
+                ),
             )
         }
         Err(e) => Response::json(500, &format!("{{\"error\":\"sync failed: {e}\"}}")),

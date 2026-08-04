@@ -183,8 +183,30 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
-/// Generate + write all rule files from the current policy. Returns (files, domains).
-pub fn run(cfg: &Config, policy_path: &Path, override_domains: Option<&str>) -> io::Result<usize> {
+/// Like [`atomic_write`], but skips the write (and the mtime bump) when the
+/// file already holds exactly `data`. Returns true when the file was written.
+pub fn atomic_write_if_changed(path: &Path, data: &[u8]) -> io::Result<bool> {
+    if std::fs::read(path).is_ok_and(|cur| cur == data) {
+        return Ok(false);
+    }
+    atomic_write(path, data)?;
+    Ok(true)
+}
+
+/// What a sync pass did: how many rule files the policy generates, and how
+/// many actually differed on disk. `changed == 0` means MailScanner already
+/// runs this exact ruleset — no reload is needed.
+pub struct SyncReport {
+    pub files: usize,
+    pub changed: usize,
+}
+
+/// Generate + write all rule files from the current policy.
+pub fn run(
+    cfg: &Config,
+    policy_path: &Path,
+    override_domains: Option<&str>,
+) -> io::Result<SyncReport> {
     let dir = policy_dir(policy_path);
     let (settings, wl, bl) = load_policy(&dir);
     let mut overrides = load_overrides(&dir);
@@ -208,13 +230,19 @@ pub fn run(cfg: &Config, policy_path: &Path, override_domains: Option<&str>) -> 
 
     let rules_dir = Path::new(&cfg.mailscanner_rules_dir);
     std::fs::create_dir_all(rules_dir)?;
+    let mut changed = 0usize;
     for f in &files {
-        atomic_write(&rules_dir.join(&f.name), f.contents.as_bytes())?;
+        if atomic_write_if_changed(&rules_dir.join(&f.name), f.contents.as_bytes())? {
+            changed += 1;
+        }
     }
     // Keep MailScanner's Archive Mail directive in step with the generated
     // ruleset (no-op when nothing changed, so the sync cron cannot loop).
     let _ = crate::engine::apply_archive(cfg, policy_path);
-    Ok(files.len())
+    Ok(SyncReport {
+        files: files.len(),
+        changed,
+    })
 }
 
 /// Canonical rule lines a managed file is expected to contain, regenerated from
@@ -343,5 +371,45 @@ mod tests {
         assert_eq!(mode, 0o640, "rewrite must not widen credential file perms");
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "secret = 2\n");
         std::fs::remove_file(&p).unwrap();
+    }
+
+    #[test]
+    fn atomic_write_if_changed_skips_identical_content() {
+        let p = std::env::temp_dir().join(format!("msfe-awc-{}.rules", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        assert!(atomic_write_if_changed(&p, b"a\n").unwrap(), "first write");
+        assert!(
+            !atomic_write_if_changed(&p, b"a\n").unwrap(),
+            "identical content must not rewrite the file"
+        );
+        assert!(atomic_write_if_changed(&p, b"b\n").unwrap(), "new content");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "b\n");
+        std::fs::remove_file(&p).unwrap();
+    }
+
+    // The sync cron reloads (= restarts, for LSB MailScanner) only when a rule
+    // file differed; a second pass over unchanged policy must report zero
+    // changes or the cron restarts MailScanner every 10 minutes forever.
+    #[test]
+    fn resync_without_policy_change_reports_nothing_changed() {
+        let base = std::env::temp_dir().join(format!("msfe-sync-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("policy")).unwrap();
+        let cfg = Config {
+            mailscanner_rules_dir: base.join("rules").display().to_string(),
+            mailscanner_conf: base.join("MailScanner.conf").display().to_string(),
+            archive_dir: base.join("archive").display().to_string(),
+            ..Default::default()
+        };
+        let config_file = base.join("msfe-ng.conf");
+
+        let first = run(&cfg, &config_file, Some("example.com")).unwrap();
+        assert!(first.files > 0, "policy generates rule files");
+        assert_eq!(first.changed, first.files, "first pass writes everything");
+
+        let second = run(&cfg, &config_file, Some("example.com")).unwrap();
+        assert_eq!(second.files, first.files);
+        assert_eq!(second.changed, 0, "unchanged policy must be a no-op");
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }

@@ -62,6 +62,9 @@ const el=(t,a={},...c)=>{const n=document.createElement(t);for(const k in a){if(
 const esc=s=>String(s??'').replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));
 api('/api/config').then(c=>{if(c&&!c.error)PREFS=Object.assign(PREFS,c);});
 function toast(msg){const t=$('#toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2200);}
+// Sync responses: reloaded=false is normal when nothing changed on disk —
+// only call it a failure when a change needed a reload that didn't happen.
+const rlbl=r=>r.reloaded?'reloaded':(r.changed===0?'no reload needed (unchanged)':'reload failed');
 
 // theme: cycle auto → light → dark, persisted; drives the CSS-variable palette.
 (function(){
@@ -184,7 +187,7 @@ async function showSender(addr){
     out.style.display='';out.textContent='▶ applying…';
     const r=await api('/api/sender/list',{method:'POST',body:{pattern,list,remove}});
     if(r&&r.ok){
-      out.textContent=`${remove?'removed from':'added to'} the ${list}list — ${r.files} rule files written, reload ${r.reloaded?'ok':'failed'}`;
+      out.textContent=`${remove?'removed from':'added to'} the ${list}list — ${r.files} rule files written, ${rlbl(r)}`;
       toast('Lists updated');
       // reflect the change without a reload
       if(pattern.startsWith('*@')){ if(list==='black')d.domain_blacklisted=!remove; else d.domain_whitelisted=!remove; }
@@ -890,7 +893,7 @@ async function renderRules(){
     saveBtn.disabled=true;
     const r=await api('/api/rules/custom',{method:'PUT',body:{file:fsel.value,rules}});
     saveBtn.disabled=false;
-    toast(r&&r.ok?`Saved — ${r.files} rule files written, reload ${r.reloaded?'ok':'failed'}`:(r.error||'save failed'));
+    toast(r&&r.ok?`Saved — ${r.files} rule files written, ${rlbl(r)}`:(r.error||'save failed'));
     if(r&&r.ok)loadLive();
   };
 
@@ -1052,7 +1055,7 @@ async function renderService(){
     syncBtn.disabled=true;
     const r=await api('/api/service/sync',{method:'POST'});
     syncBtn.disabled=false;
-    toast(r&&r.ok?`Rules updated — ${r.files} files, reload ${r.reloaded?'ok':'failed'}`:(r.error||'sync failed'));
+    toast(r&&r.ok?`Rules updated — ${r.files} files, ${rlbl(r)}`:(r.error||'sync failed'));
   };
   btns.append(cfgBtn,mfBtn,syncBtn);
 

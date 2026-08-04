@@ -158,6 +158,35 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
             fix,
         ));
     }
+    // The quarantine must be writable by the scanning children: spam-store and
+    // the max-attempts archive create per-day subdirs from inside a child, and
+    // a failed write there kills the child at batch build — one high-spam
+    // message then wedges the entire scanning queue (seen in production as a
+    // 15-hour mail outage with children dying before they could log a line).
+    let run_user = engine::run_user_for(cfg);
+    if let Ok(meta) = std::fs::metadata(&cfg.quarantine_dir) {
+        if let (Some(uid), Some(gid)) = (engine::uid_of(run_user), engine::gid_of("mail")) {
+            use std::os::unix::fs::MetadataExt;
+            let ok = dir_writable_by(meta.uid(), meta.gid(), meta.mode(), uid, &[gid]);
+            out.push(check(
+                "quarantine writable by scan user",
+                ok,
+                Level::Fail,
+                if ok {
+                    format!("{} is writable by {run_user}", cfg.quarantine_dir)
+                } else {
+                    format!(
+                        "{} is not writable by {run_user} — every quarantine/archive write kills a scanning child",
+                        cfg.quarantine_dir
+                    )
+                },
+                &format!(
+                    "chown {run_user}:mail {} (or msfe-ng engine apply)",
+                    cfg.quarantine_dir
+                ),
+            ));
+        }
+    }
     // Misplaced spool files are invisible to delivery: Exim lists them but
     // computes their path from the message id, so they wait forever.
     let (_, outq) = service::queue_dirs(cfg);
@@ -425,4 +454,41 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
 /// True when nothing failed (warnings allowed).
 pub fn healthy(checks: &[Check]) -> bool {
     checks.iter().all(|c| c.level != Level::Fail)
+}
+
+/// Can a user with `uid`/`gids` create entries in a directory owned by
+/// `meta_uid`:`meta_gid` with `mode`? Creating an entry needs both write and
+/// search (execute) permission on the directory.
+fn dir_writable_by(meta_uid: u32, meta_gid: u32, mode: u32, uid: u32, gids: &[u32]) -> bool {
+    if uid == 0 {
+        return true;
+    }
+    let class = if uid == meta_uid {
+        mode >> 6
+    } else if gids.contains(&meta_gid) {
+        mode >> 3
+    } else {
+        mode
+    };
+    class & 0o3 == 0o3 // write + search
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn root_owned_0750_quarantine_is_not_writable_by_scan_user() {
+        let (mailnull, mail) = (47, 12);
+        // the production incident: root:mail 0750 — group can only read/search
+        assert!(!dir_writable_by(0, mail, 0o750, mailnull, &[mail]));
+        // owner mailnull 0750 — fine
+        assert!(dir_writable_by(mailnull, mail, 0o750, mailnull, &[mail]));
+        // root-owned but group-writable 0770 — fine via the mail group
+        assert!(dir_writable_by(0, mail, 0o770, mailnull, &[mail]));
+        // group write without search bit still cannot create entries
+        assert!(!dir_writable_by(0, mail, 0o760, mailnull, &[mail]));
+        // root can always write
+        assert!(dir_writable_by(0, mail, 0o750, 0, &[]));
+    }
 }

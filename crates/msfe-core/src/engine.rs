@@ -46,14 +46,19 @@ pub struct ConfigureReport {
     pub restarted: bool,
 }
 
-/// Point MailScanner.conf at Exim and create the incoming spool skeleton.
-/// Idempotent; keeps a one-time backup of MailScanner.conf via `save_conf`.
-pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
-    let run_user = if cfg.panel == "directadmin" {
+/// The user MailScanner's scanning children run as on this panel.
+pub(crate) fn run_user_for(cfg: &Config) -> &'static str {
+    if cfg.panel == "directadmin" {
         "mail"
     } else {
         "mailnull"
-    };
+    }
+}
+
+/// Point MailScanner.conf at Exim and create the incoming spool skeleton.
+/// Idempotent; keeps a one-time backup of MailScanner.conf via `save_conf`.
+pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
+    let run_user = run_user_for(cfg);
     let (inc, out) = service::queue_dir_targets();
 
     let mut directives: Vec<(String, String)> = [
@@ -143,24 +148,16 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
     // MailScanner work dirs, owned by the run-as user: created root-owned (by
     // a pre-repair root run or the rpm), the mailnull children cannot write
     // Processing.db and every message stalls in the scanning queue.
-    let work_base = ms_work_dir();
-    let quarantine = Path::new(&cfg.quarantine_dir).to_path_buf();
-    let archive = Path::new(&cfg.archive_dir).to_path_buf();
-    for (d, owner) in [
-        (&work_base, run_user),
-        (&work_base.join("incoming"), run_user),
-        (&quarantine, "root"),
-        (&archive, run_user),
-    ] {
+    for (d, owner) in scanner_dir_owners(cfg, run_user) {
         if !d.exists() {
-            if std::fs::create_dir_all(d).is_err() {
+            if std::fs::create_dir_all(&d).is_err() {
                 chown_failed.push(format!("{} (create failed)", d.display()));
                 continue;
             }
             created.push(d.display().to_string());
         }
-        set_perms_0750(d);
-        if !chown_deep(d, owner) {
+        set_perms_0750(&d);
+        if !chown_deep(&d, &owner) {
             chown_failed.push(d.display().to_string());
         }
     }
@@ -242,12 +239,7 @@ pub fn apply_archive(cfg: &Config, config_file: &Path) -> io::Result<ArchiveRepo
         }
         if dir.exists() {
             set_perms_0750(dir);
-            let run_user = if cfg.panel == "directadmin" {
-                "mail"
-            } else {
-                "mailnull"
-            };
-            chown_user_mail(dir, run_user);
+            chown_user_mail(dir, run_user_for(cfg));
         }
     }
 
@@ -263,6 +255,28 @@ pub fn apply_archive(cfg: &Config, config_file: &Path) -> io::Result<ArchiveRepo
         changed,
         restarted,
     })
+}
+
+/// The directories MailScanner's children must be able to create entries in,
+/// each with the user that must own it. Every one of them — the quarantine
+/// included — is written as the run-as user: spam-store and the max-attempts
+/// archive both create per-day subdirs from a scanning child, and a root-owned
+/// 0750 quarantine makes every such write die, wedging the whole queue on the
+/// first high-spam message.
+fn scanner_dir_owners(cfg: &Config, run_user: &str) -> Vec<(std::path::PathBuf, String)> {
+    let work_base = ms_work_dir();
+    vec![
+        (work_base.clone(), run_user.to_string()),
+        (work_base.join("incoming"), run_user.to_string()),
+        (
+            Path::new(&cfg.quarantine_dir).to_path_buf(),
+            run_user.to_string(),
+        ),
+        (
+            Path::new(&cfg.archive_dir).to_path_buf(),
+            run_user.to_string(),
+        ),
+    ]
 }
 
 /// MailScanner's work directory (`Incoming Work Dir` parent).
@@ -601,6 +615,27 @@ mod tests {
 
     // Both tests mutate shared process env vars — serialize them.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    // Regression for a 15-hour production outage: the quarantine was chowned
+    // root 0750 while the scanning children run as mailnull, so spam-store and
+    // the max-attempts archive died on every write — killing each child at
+    // batch build and wedging the whole scanning queue.
+    #[test]
+    fn quarantine_is_owned_by_the_run_as_user() {
+        let cfg = Config {
+            quarantine_dir: "/var/spool/MailScanner/quarantine".into(),
+            archive_dir: "/var/spool/MailScanner/archive".into(),
+            ..Default::default()
+        };
+        for (dir, owner) in scanner_dir_owners(&cfg, "mailnull") {
+            assert_eq!(
+                owner,
+                "mailnull",
+                "{} must be writable by the scanning children",
+                dir.display()
+            );
+        }
+    }
 
     #[test]
     fn wire_and_unwire_roundtrip() {
