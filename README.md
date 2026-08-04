@@ -138,20 +138,6 @@ msfe-ng exim <status|enable-scanning|disable-scanning>
 msfe-ng backup <file.tgz> | restore <file.tgz>
 ```
 
-## Milestones
-
-| Delivered | |
-|-----------|-|
-| M0–M2 | Installable skeleton, MySQL schema + logging plugin, legacy importer, rule engine, lists, SpamBox, self-test |
-| M3–M6 | Admin + end-user SPAs, scoped user API, quarantine, digests, housekeeping, hardened creds, backup/restore, release tooling |
-| M7–M9 | MailScanner engine installer, Exim named-queue wiring, doctor, spool repair, dashboards |
-| M10 | Full message archive (every message, per-domain opt-out, retention) |
-| Parity | MailControl-parity pass: release modes (resend/forward/inbox), SpamCop, learn-on-reclassify, DB & Bayes maintenance, client-IP tools |
-| Queues | Spool-parsed queue listing, bulk actions, auto-clean rules, monitor cron, Telegram alerts |
-
-In progress: incremental UI redesign (left rail, instrument-panel theme, smart
-polling).
-
 ## Testing status
 
 The Rust core is unit-tested (`cargo test --workspace`) and CI enforces
