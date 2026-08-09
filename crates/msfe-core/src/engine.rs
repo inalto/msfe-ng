@@ -286,24 +286,79 @@ fn ms_work_dir() -> std::path::PathBuf {
         .into()
 }
 
-/// Find a live clamd socket (env override, cPanel's, then EL's clamd@scan).
-fn detect_clamd_socket() -> Option<String> {
+/// The `LocalSocket` path from a clamd.conf body, if uncommented. The socket
+/// path clamd's own config declares beats any hardcoded probe list — package
+/// updates move the socket (cpanel-clamav 1.5.3 moved it to
+/// /run/clamav/clamd.sock and silently dropped the TCP listener).
+pub(crate) fn parse_clamd_localsocket(conf: &str) -> Option<String> {
+    conf.lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .find_map(|l| {
+            let rest = l.strip_prefix("LocalSocket")?;
+            // not LocalSocketGroup / LocalSocketMode
+            if !rest.starts_with([' ', '\t', '=']) {
+                return None;
+            }
+            let v = rest.trim_start_matches([' ', '\t', '=']).trim();
+            (!v.is_empty()).then(|| v.to_string())
+        })
+}
+
+/// Find a live clamd socket: env override, then the path clamd's own config
+/// declares, then known packaging defaults.
+pub(crate) fn detect_clamd_socket() -> Option<String> {
     if let Ok(p) = std::env::var("MSFE_NG_CLAMD_SOCKET") {
         return Path::new(&p).exists().then_some(p);
     }
     use std::os::unix::fs::FileTypeExt;
+    let is_socket = |p: &str| {
+        std::fs::metadata(p)
+            .map(|m| m.file_type().is_socket())
+            .unwrap_or(false)
+    };
+    for conf in [
+        "/usr/local/cpanel/3rdparty/etc/clamd.conf",
+        "/etc/clamd.conf",
+        "/etc/clamd.d/scan.conf",
+    ] {
+        if let Some(p) = std::fs::read_to_string(conf)
+            .ok()
+            .as_deref()
+            .and_then(parse_clamd_localsocket)
+        {
+            if is_socket(&p) {
+                return Some(p);
+            }
+        }
+    }
     [
         "/var/clamd",
+        "/run/clamav/clamd.sock",
         "/run/clamd.scan/clamd.sock",
         "/run/clamd.socket",
     ]
     .iter()
-    .find(|p| {
-        std::fs::metadata(p)
-            .map(|m| m.file_type().is_socket())
-            .unwrap_or(false)
-    })
+    .find(|p| is_socket(p))
     .map(|p| p.to_string())
+}
+
+/// Can clamd be reached at the MailScanner `Clamd Socket` target? A leading
+/// `/` means a unix socket; anything else is a host reached over TCP `port`.
+/// One actual connect — a directive pointing at a dead socket wedges every
+/// scan batch in MailScanner's retry loop, silently.
+pub(crate) fn clamd_reachable(socket: &str, port: u16) -> bool {
+    use std::net::{TcpStream, ToSocketAddrs};
+    use std::time::Duration;
+    if socket.starts_with('/') {
+        return std::os::unix::net::UnixStream::connect(socket).is_ok();
+    }
+    (socket, port)
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut addrs| addrs.next())
+        .map(|addr| TcpStream::connect_timeout(&addr, Duration::from_secs(3)).is_ok())
+        .unwrap_or(false)
 }
 
 /// chown `path` (and its direct children) to `<user>:mail`; best-effort.
@@ -615,6 +670,45 @@ mod tests {
 
     // Both tests mutate shared process env vars — serialize them.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn parses_localsocket_from_clamd_conf() {
+        let conf = "# comment\n#LocalSocket /old/path\nLocalSocketGroup virusgroup\nLocalSocketMode 666\nTCPAddr 127.0.0.1\nLocalSocket /run/clamav/clamd.sock\n";
+        assert_eq!(
+            parse_clamd_localsocket(conf).as_deref(),
+            Some("/run/clamav/clamd.sock")
+        );
+        assert_eq!(parse_clamd_localsocket("#LocalSocket /x\n"), None);
+        assert_eq!(parse_clamd_localsocket("TCPSocket 3310\n"), None);
+    }
+
+    // Regression for a 2-day scanning outage: cpanel-clamav moved the clamd
+    // socket, MailScanner.conf kept pointing at the old target, and every scan
+    // batch wedged in the silent retry loop. Reachability must be a real
+    // connect, not a directive check.
+    #[test]
+    fn clamd_reachability_is_a_real_connect() {
+        let base = std::env::temp_dir().join(format!("msfe-clamd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let sock = base.join("clamd.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        assert!(clamd_reachable(&sock.display().to_string(), 3310));
+        assert!(
+            !clamd_reachable(&base.join("gone.sock").display().to_string(), 3310),
+            "missing unix socket must be unreachable"
+        );
+        // TCP mode: a live local listener is reachable, a dead port is not
+        let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = tcp.local_addr().unwrap().port();
+        assert!(clamd_reachable("127.0.0.1", port));
+        drop(tcp);
+        assert!(
+            !clamd_reachable("127.0.0.1", port),
+            "closed TCP port must be unreachable"
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 
     // Regression for a 15-hour production outage: the quarantine was chowned
     // root 0750 while the scanning children run as mailnull, so spam-store and

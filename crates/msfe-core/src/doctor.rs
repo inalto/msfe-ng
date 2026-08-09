@@ -231,17 +231,50 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
     let clam = mailscanner::get_directive(&conf, "Virus Scanners")
         .map(|v| v.contains("clamd"))
         .unwrap_or(false);
-    out.push(check(
-        "virus scanning (clamd)",
-        clam,
-        Level::Warn,
-        if clam {
-            "MailScanner uses clamd".into()
+    if clam {
+        // A directive is not a scanner: after a clamav package update moved
+        // the socket, MailScanner wedged every batch in its silent retry loop
+        // for two days while this check stayed green. Actually connect.
+        let sock = mailscanner::get_directive(&conf, "Clamd Socket")
+            .unwrap_or("/var/clamd")
+            .to_string();
+        let port: u16 = mailscanner::get_directive(&conf, "Clamd Port")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3310);
+        let target = if sock.starts_with('/') {
+            sock.clone()
         } else {
-            "no virus scanner configured".into()
-        },
-        "install clamd (msfe-ng engine install) then msfe-ng engine configure",
-    ));
+            format!("{sock}:{port}")
+        };
+        let alive = engine::clamd_reachable(&sock, port);
+        let fix = match engine::detect_clamd_socket() {
+            Some(live) if !alive => format!(
+                "clamd answers at {live} — run msfe-ng engine configure to repoint MailScanner, then restart it"
+            ),
+            _ => "start clamd (systemctl restart clamd) or msfe-ng engine configure to re-detect its socket".into(),
+        };
+        out.push(check(
+            "virus scanning (clamd)",
+            alive,
+            Level::Fail,
+            if alive {
+                format!("clamd reachable at {target}")
+            } else {
+                format!(
+                    "clamd is NOT reachable at {target} — every scan batch wedges in MailScanner's retry loop and mail stops flowing"
+                )
+            },
+            &fix,
+        ));
+    } else {
+        out.push(check(
+            "virus scanning (clamd)",
+            false,
+            Level::Warn,
+            "no virus scanner configured".into(),
+            "install clamd (msfe-ng engine install) then msfe-ng engine configure",
+        ));
+    }
 
     // ---- message bodies (archive) ----------------------------------------
     let (settings, _, _) = crate::sync::load_policy(&crate::sync::policy_dir(config_file));

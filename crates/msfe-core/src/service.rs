@@ -25,6 +25,74 @@ const DEFAULT_OUTGOING_QUEUE: &str = "/var/spool/exim/input";
 /// it is considered orphaned (Exim/MailScanner write -H and -D moments apart).
 const ORPHAN_MIN_AGE_SECS: u64 = 600;
 
+// ---- command execution with a deadline ----------------------------------------
+
+/// Result of a spawned command that is never allowed to block forever.
+pub struct CmdOutput {
+    pub ok: bool,
+    /// Exit code, when the command ran to completion and provided one.
+    pub code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub timed_out: bool,
+}
+
+/// Run `cmd`, killing it after `timeout`. The daemon serves requests one at a
+/// time, so any command that can block indefinitely — `exim -Mvh/-Mvb` waiting
+/// on a spool lock held by a wedged scanner child, `MailScanner --lint`
+/// entering a scanner retry loop — takes the whole UI down with it. Every
+/// spawn on the request path goes through here.
+pub fn run_with_timeout(cmd: &mut Command, timeout: std::time::Duration) -> io::Result<CmdOutput> {
+    use std::io::Read;
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    // drain the pipes on threads so a chatty child can never fill them and
+    // deadlock against our wait loop
+    let mut out_pipe = child.stdout.take();
+    let mut err_pipe = child.stderr.take();
+    let t_out = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(p) = out_pipe.as_mut() {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let t_err = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(p) = err_pipe.as_mut() {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    let start = std::time::Instant::now();
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait()? {
+            Some(st) => break Some(st),
+            None if start.elapsed() >= timeout => {
+                timed_out = true;
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    };
+    let stdout = t_out.join().unwrap_or_default();
+    let stderr = t_err.join().unwrap_or_default();
+    Ok(CmdOutput {
+        ok: status.map(|s| s.success()).unwrap_or(false),
+        code: status.and_then(|s| s.code()),
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        timed_out,
+    })
+}
+
 // ---- process status & control ------------------------------------------------
 
 pub struct ServiceStatus {
@@ -101,12 +169,23 @@ pub struct LintReport {
 /// perl modules, virus scanner and spam engine. Slow (tens of seconds).
 pub fn lint() -> LintReport {
     for bin in ["/usr/sbin/MailScanner", "MailScanner"] {
-        if let Ok(o) = Command::new(bin).arg("--lint").output() {
-            let mut output = String::from_utf8_lossy(&o.stdout).into_owned();
-            output.push_str(&String::from_utf8_lossy(&o.stderr));
+        let mut cmd = Command::new(bin);
+        cmd.arg("--lint");
+        // lint scans a real test batch: with a scanner unreachable it enters
+        // MailScanner's retry loop and never exits — it once held the daemon
+        // hostage for 90 minutes (WSOD in WHM)
+        if let Ok(o) = run_with_timeout(&mut cmd, std::time::Duration::from_secs(180)) {
+            if o.timed_out {
+                return LintReport {
+                    ok: false,
+                    output: "MailScanner --lint did not finish within 180s — \
+                             a virus/spam scanner is probably unreachable (check clamd and its socket)"
+                        .into(),
+                };
+            }
             return LintReport {
-                ok: o.status.success(),
-                output: output.trim().to_string(),
+                ok: o.ok,
+                output: format!("{}{}", o.stdout, o.stderr).trim().to_string(),
             };
         }
     }
@@ -429,21 +508,19 @@ pub fn queue_listing(named: Option<&str>) -> String {
             c.arg(format!("-qG{q}"));
         }
         c.arg("-bp");
-        match c.output() {
-            Ok(o) if o.status.success() => {
-                let s = String::from_utf8_lossy(&o.stdout).trim_end().to_string();
+        match run_with_timeout(&mut c, std::time::Duration::from_secs(30)) {
+            Ok(o) if o.ok => {
+                let s = o.stdout.trim_end().to_string();
                 return if s.is_empty() {
                     "(queue is empty)".into()
                 } else {
                     s
                 };
             }
-            Ok(o) => {
-                return format!(
-                    "exim -bp failed: {}",
-                    String::from_utf8_lossy(&o.stderr).trim()
-                )
+            Ok(o) if o.timed_out => {
+                return "exim -bp timed out — the queue may be locked by a scanning process".into()
             }
+            Ok(o) => return format!("exim -bp failed: {}", o.stderr.trim()),
             Err(_) => continue,
         }
     }
@@ -649,22 +726,33 @@ pub fn queue_bulk_action(
                 named.map(|q| format!("-qG{q} ")).unwrap_or_default(),
                 chunk.len()
             ));
-            match exim_cmd(named).arg("-Mrm").args(chunk).output() {
+            match run_with_timeout(
+                exim_cmd(named).arg("-Mrm").args(chunk),
+                std::time::Duration::from_secs(60),
+            ) {
                 Ok(o) => {
                     for stream in [&o.stdout, &o.stderr] {
-                        for l in String::from_utf8_lossy(stream).lines() {
+                        for l in stream.lines() {
                             if !l.trim().is_empty() {
                                 transcript.push(l.to_string());
                             }
                         }
                     }
+                    if o.timed_out {
+                        transcript.push(
+                            "→ timed out — some messages may be locked by a scanning process"
+                                .into(),
+                        );
+                        ok = false;
+                        continue;
+                    }
                     // a message delivered mid-flight makes -Mrm exit non-zero;
                     // that's a soft error, not a batch failure — the per-id
                     // lines above show what happened
-                    if !o.status.success() {
+                    if !o.ok {
                         transcript.push(format!(
                             "→ exit {} (some ids may already be gone)",
-                            o.status.code().unwrap_or(-1)
+                            o.code.unwrap_or(-1)
                         ));
                     }
                 }
@@ -718,28 +806,35 @@ pub fn queue_msg_view(cfg: &Config, named: Option<&str>, id: &str, what: &str) -
     if !valid_exim_id(id) {
         return "invalid message id".into();
     }
+    // `exim -Mvh/-Mvb` waits for the message's spool lock: a message held by a
+    // wedged scanner child would block this (and the whole daemon) forever
+    let view_timeout = std::time::Duration::from_secs(10);
     let out = match what {
-        "headers" => exim_cmd(named).args(["-Mvh", id]).output(),
-        "body" => exim_cmd(named).args(["-Mvb", id]).output(),
+        "headers" => run_with_timeout(exim_cmd(named).args(["-Mvh", id]), view_timeout),
+        "body" => run_with_timeout(exim_cmd(named).args(["-Mvb", id]), view_timeout),
         "log" => {
             // delivery history from the mainlog (exigrep threads it; plain
             // grep as fallback)
-            let ex = Command::new("/usr/sbin/exigrep")
-                .args([id, &cfg.exim_mainlog_path])
-                .output();
+            let ex = run_with_timeout(
+                Command::new("/usr/sbin/exigrep").args([id, &cfg.exim_mainlog_path]),
+                view_timeout,
+            );
             match ex {
-                Ok(o) if o.status.success() => Ok(o),
-                _ => Command::new("grep")
-                    .args([id, &cfg.exim_mainlog_path])
-                    .output(),
+                Ok(o) if o.ok => Ok(o),
+                _ => run_with_timeout(
+                    Command::new("grep").args([id, &cfg.exim_mainlog_path]),
+                    view_timeout,
+                ),
             }
         }
         _ => return "unknown view".into(),
     };
     match out {
+        Ok(o) if o.timed_out => {
+            "timed out — the message is probably locked by a scanning process right now".into()
+        }
         Ok(o) => {
-            let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
-            s.push_str(&String::from_utf8_lossy(&o.stderr));
+            let s = format!("{}{}", o.stdout, o.stderr);
             let s = s.trim();
             if s.is_empty() {
                 "(no output)".into()
@@ -775,20 +870,33 @@ pub fn queue_msg_action(named: Option<&str>, id: &str, action: &str) -> ControlO
         named.map(|q| format!("-qG{q} ")).unwrap_or_default(),
         args.join(" ")
     )];
-    match exim_cmd(named).args(args).arg(id).output() {
+    // deliveries legitimately take a while on slow remotes; deletes should be
+    // instant unless the message is locked by a scanning process
+    let timeout = std::time::Duration::from_secs(if action == "deliver" { 120 } else { 30 });
+    match run_with_timeout(exim_cmd(named).args(args).arg(id), timeout) {
         Ok(o) => {
             for stream in [&o.stdout, &o.stderr] {
-                for l in String::from_utf8_lossy(stream).lines() {
+                for l in stream.lines() {
                     if !l.trim().is_empty() {
                         transcript.push(l.to_string());
                     }
                 }
             }
-            let ok = o.status.success();
+            if o.timed_out {
+                transcript.push(format!(
+                    "→ timed out after {}s — the message may be locked by a scanning process",
+                    timeout.as_secs()
+                ));
+                return ControlOutcome {
+                    ok: false,
+                    transcript,
+                };
+            }
+            let ok = o.ok;
             transcript.push(if ok {
                 "→ ok".into()
             } else {
-                format!("→ exit {}", o.status.code().unwrap_or(-1))
+                format!("→ exit {}", o.code.unwrap_or(-1))
             });
             ControlOutcome { ok, transcript }
         }
@@ -967,6 +1075,33 @@ mod tests {
         assert!(!safe_name("../etc/passwd"));
         assert!(!safe_name("a/b"));
         assert!(!safe_name("a b"));
+    }
+
+    // Regression for a daemon wedge: `exim -Mvb` on a message locked by a
+    // stuck MailScanner child blocks forever, and the single-threaded daemon
+    // died with it (WSOD in WHM). Spawned commands must have a deadline.
+    #[test]
+    fn run_with_timeout_kills_a_hung_command() {
+        let start = std::time::Instant::now();
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 8"]);
+        let r = run_with_timeout(&mut cmd, std::time::Duration::from_millis(300)).unwrap();
+        assert!(r.timed_out, "must report the timeout");
+        assert!(!r.ok, "a killed command is not a success");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "must return promptly, not wait for the command"
+        );
+    }
+
+    #[test]
+    fn run_with_timeout_passes_through_fast_commands() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo out; echo err >&2"]);
+        let r = run_with_timeout(&mut cmd, std::time::Duration::from_secs(5)).unwrap();
+        assert!(r.ok && !r.timed_out);
+        assert_eq!(r.stdout.trim(), "out");
+        assert_eq!(r.stderr.trim(), "err");
     }
 
     #[test]
