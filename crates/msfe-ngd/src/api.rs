@@ -879,6 +879,54 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                 .to_string(),
             )
         }
+        // ---- admin quarantine browser + purge (disk is the source of truth) --
+        ("GET", "/api/quarantine") => {
+            let limit =
+                stats::clamp_int(req.query_param("limit").as_deref(), 1000, 1, 5000) as usize;
+            quarantine_listing(cfg, limit)
+        }
+        ("GET", "/api/quarantine/message") => {
+            let date = req.query_param("date").unwrap_or_default();
+            let id = req.query_param("id").unwrap_or_default();
+            Response::text(200, &quarantine_preview(cfg, &date, &id))
+        }
+        ("POST", "/api/quarantine/purge") => {
+            let v = Json::parse(&req.body).unwrap_or(Json::Null);
+            let dry = matches!(v.get("dry"), Some(Json::Bool(true)));
+            let items: Vec<(String, String)> = v
+                .get("items")
+                .and_then(|j| match j {
+                    Json::Array(a) => Some(
+                        a.iter()
+                            .map(|it| (it.str_field("date"), it.str_field("id")))
+                            .collect(),
+                    ),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            let r = quarantine::purge_items(Path::new(&cfg.quarantine_dir), &items, dry);
+            purge_json(r, dry)
+        }
+        ("POST", "/api/quarantine/purge-older") => {
+            let v = Json::parse(&req.body).unwrap_or(Json::Null);
+            let dry = matches!(v.get("dry"), Some(Json::Bool(true)));
+            let days = v
+                .get("days")
+                .and_then(|j| match j {
+                    Json::Int(n) => Some(*n),
+                    Json::Num(s) => s.parse().ok(),
+                    _ => None,
+                })
+                .filter(|d| (1..=3650).contains(d));
+            let Some(days) = days else {
+                return Response::json(400, r#"{"error":"days must be 1-3650"}"#);
+            };
+            let Some(cutoff) = quarantine::cutoff_days_ago(days as u32) else {
+                return Response::json(500, r#"{"error":"cannot compute cutoff date"}"#);
+            };
+            let r = quarantine::purge_older_than(Path::new(&cfg.quarantine_dir), &cutoff, dry);
+            purge_json(r, dry)
+        }
         ("POST", "/api/telegram/test") => {
             let mut transcript = Vec::new();
             let ok = match msfe_core::telegram::send(
@@ -1259,6 +1307,133 @@ fn rules_adopt(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                         })
                         .collect(),
                 ),
+            ),
+        ])
+        .to_string(),
+    )
+}
+
+// ---- admin quarantine handlers ------------------------------------------------
+
+/// Disk listing of the quarantine, enriched from `maillog` where a row
+/// exists. Ids are inlined into the IN clause only when their charset is
+/// SQL-safe (they are filesystem names, not trusted input).
+fn quarantine_listing(cfg: &Config, limit: usize) -> Response {
+    let l = quarantine::list_quarantine(Path::new(&cfg.quarantine_dir), limit);
+    let sql_safe = |id: &str| {
+        !id.is_empty()
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'%'))
+    };
+    let quoted: Vec<String> = l
+        .entries
+        .iter()
+        .filter(|e| sql_safe(&e.id))
+        .map(|e| format!("'{}'", e.id))
+        .collect();
+    let mut info: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    if !quoted.is_empty() {
+        if let Ok(rows) = msfe_core::db::query(
+            cfg,
+            &format!(
+                "SELECT message_id, from_address, to_address, subject, sascore \
+                 FROM maillog WHERE message_id IN ({})",
+                quoted.join(",")
+            ),
+        ) {
+            for r in rows {
+                if r.len() >= 5 {
+                    info.insert(r[0].clone(), r[1..].to_vec());
+                }
+            }
+        }
+    }
+    let entries: Vec<Json> = l
+        .entries
+        .iter()
+        .map(|e| {
+            let mut o = vec![
+                ("date".into(), Json::str(&e.date)),
+                ("id".into(), Json::str(&e.id)),
+                ("kind".into(), Json::str(e.kind)),
+                ("size".into(), Json::Int(e.size as i64)),
+                ("mtime".into(), Json::Int(e.mtime as i64)),
+            ];
+            if let Some(m) = info.get(&e.id) {
+                o.push(("from".into(), Json::str(&m[0])));
+                o.push(("to".into(), Json::str(&m[1])));
+                o.push(("subject".into(), Json::str(&m[2])));
+                o.push(("sascore".into(), Json::str(&m[3])));
+            }
+            Json::Object(o)
+        })
+        .collect();
+    Response::json(
+        200,
+        &Json::Object(vec![
+            ("total".into(), Json::Int(l.total as i64)),
+            ("bytes".into(), Json::Int(l.bytes as i64)),
+            ("truncated".into(), Json::Bool(l.truncated)),
+            ("entries".into(), Json::Array(entries)),
+        ])
+        .to_string(),
+    )
+}
+
+/// Headers preview for a quarantine item without a DB row: the message's
+/// header block, size-capped, via the same validated resolver purge uses.
+fn quarantine_preview(cfg: &Config, date: &str, id: &str) -> String {
+    let Some(path) = quarantine::item_path(Path::new(&cfg.quarantine_dir), date, id) else {
+        return "not found".into();
+    };
+    // a held message is a directory: prefer its `message` file
+    let file = if path.is_dir() {
+        let named = path.join("message");
+        if named.exists() {
+            named
+        } else {
+            match std::fs::read_dir(&path)
+                .ok()
+                .and_then(|mut rd| rd.next())
+                .and_then(|e| e.ok())
+            {
+                Some(e) => e.path(),
+                None => return "(empty)".into(),
+            }
+        }
+    } else {
+        path
+    };
+    match quarantine::read_message(&file) {
+        Ok(bytes) => {
+            let text = String::from_utf8_lossy(&bytes[..bytes.len().min(16 * 1024)]).into_owned();
+            let headers: String = text
+                .lines()
+                .take_while(|l| !l.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if headers.is_empty() {
+                "(no headers)".into()
+            } else {
+                headers
+            }
+        }
+        Err(e) => format!("cannot read message: {e}"),
+    }
+}
+
+fn purge_json(r: msfe_core::quarantine::PurgeReport, dry: bool) -> Response {
+    Response::json(
+        200,
+        &Json::Object(vec![
+            ("ok".into(), Json::Bool(r.errors.is_empty())),
+            ("dry".into(), Json::Bool(dry)),
+            ("removed".into(), Json::Int(r.removed as i64)),
+            ("bytes".into(), Json::Int(r.bytes as i64)),
+            (
+                "errors".into(),
+                Json::Array(r.errors.iter().map(Json::str).collect()),
             ),
         ])
         .to_string(),

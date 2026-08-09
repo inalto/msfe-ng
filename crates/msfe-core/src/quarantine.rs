@@ -325,9 +325,341 @@ pub fn valid_recipient(s: &str) -> bool {
         })
 }
 
+// ---- admin quarantine browser + purge -----------------------------------------
+
+/// One item in the on-disk quarantine: a spam copy (`<date>/spam/<id>`) or a
+/// held message (`<date>/<id>` file or directory).
+pub struct QuarantineEntry {
+    pub date: String,
+    pub id: String,
+    pub kind: &'static str,
+    pub size: u64,
+    pub mtime: u64,
+}
+
+pub struct QuarantineListing {
+    pub total: usize,
+    pub bytes: u64,
+    pub truncated: bool,
+    pub entries: Vec<QuarantineEntry>,
+}
+
+pub struct PurgeReport {
+    pub removed: usize,
+    pub bytes: u64,
+    pub errors: Vec<String>,
+}
+
+/// What is actually in the quarantine directory, newest date first, capped at
+/// `cap` entries (`total`/`bytes` always reflect everything found). The disk
+/// is the source of truth here: files the DB never logged still appear.
+pub fn list_quarantine(base: &Path, cap: usize) -> QuarantineListing {
+    let mut entries: Vec<QuarantineEntry> = Vec::new();
+    for date in date_dirs(base) {
+        let ddir = base.join(&date);
+        let Ok(rd) = std::fs::read_dir(&ddir) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if name == "spam" && is_dir {
+                if let Ok(sd) = std::fs::read_dir(e.path()) {
+                    for s in sd.flatten() {
+                        entries.push(entry_for(
+                            &date,
+                            &s.file_name().to_string_lossy(),
+                            "spam",
+                            &s.path(),
+                        ));
+                    }
+                }
+            } else {
+                entries.push(entry_for(&date, &name, "held", &e.path()));
+            }
+        }
+    }
+    // newest first, stable within a date
+    entries.sort_by(|a, b| b.date.cmp(&a.date).then(a.id.cmp(&b.id)));
+    let total = entries.len();
+    let bytes = entries.iter().map(|e| e.size).sum();
+    let truncated = total > cap;
+    entries.truncate(cap);
+    QuarantineListing {
+        total,
+        bytes,
+        truncated,
+        entries,
+    }
+}
+
+/// `YYYYMMDD`-named subdirectories of the quarantine root.
+fn date_dirs(base: &Path) -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(base) else {
+        return Vec::new();
+    };
+    rd.flatten()
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.len() == 8 && n.bytes().all(|b| b.is_ascii_digit()))
+        .collect()
+}
+
+fn entry_for(date: &str, id: &str, kind: &'static str, path: &Path) -> QuarantineEntry {
+    QuarantineEntry {
+        date: date.to_string(),
+        id: id.to_string(),
+        kind,
+        size: size_of(path),
+        mtime: std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    }
+}
+
+/// File size, or the recursive size of a held-message directory.
+fn size_of(path: &Path) -> u64 {
+    match std::fs::metadata(path) {
+        Ok(m) if m.is_file() => m.len(),
+        Ok(m) if m.is_dir() => std::fs::read_dir(path)
+            .map(|rd| rd.flatten().map(|e| size_of(&e.path())).sum())
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// A (date, id) purge address is sound: a real date-dir name and a plain
+/// entry name with no path tricks.
+fn valid_purge_pair(date: &str, id: &str) -> bool {
+    date.len() == 8
+        && date.bytes().all(|b| b.is_ascii_digit())
+        && !id.is_empty()
+        && id.len() <= 128
+        && !id.contains('/')
+        && !id.contains("..")
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'%'))
+}
+
+/// Delete specific quarantine items, each addressed as a (date, id) pair —
+/// never a path, so nothing can escape the quarantine root. Invalid pairs are
+/// reported, not silently skipped. `dry` counts without deleting.
+/// Resolve a validated (date, id) pair to its on-disk location under `base`
+/// (spam copy first, then held entry). None when the pair is malformed or the
+/// item is gone — the only way callers may address quarantine content.
+pub fn item_path(base: &Path, date: &str, id: &str) -> Option<std::path::PathBuf> {
+    if !valid_purge_pair(date, id) {
+        return None;
+    }
+    [
+        base.join(date).join("spam").join(id),
+        base.join(date).join(id),
+    ]
+    .into_iter()
+    .find(|p| p.exists())
+}
+
+pub fn purge_items(base: &Path, items: &[(String, String)], dry: bool) -> PurgeReport {
+    let mut removed = 0usize;
+    let mut bytes = 0u64;
+    let mut errors = Vec::new();
+    for (date, id) in items {
+        if !valid_purge_pair(date, id) {
+            errors.push(format!("invalid item '{date}/{id}' — skipped"));
+            continue;
+        }
+        let Some(path) = item_path(base, date, id) else {
+            errors.push(format!("{date}/{id}: not found"));
+            continue;
+        };
+        let sz = size_of(&path);
+        if !dry {
+            let res = if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            if let Err(e) = res {
+                errors.push(format!("{date}/{id}: {e}"));
+                continue;
+            }
+            // tidy now-empty spam/ and date dirs (best-effort)
+            let _ = std::fs::remove_dir(base.join(date).join("spam"));
+            let _ = std::fs::remove_dir(base.join(date));
+        }
+        removed += 1;
+        bytes += sz;
+    }
+    PurgeReport {
+        removed,
+        bytes,
+        errors,
+    }
+}
+
+/// Delete whole date directories strictly older than `cutoff` (a `YYYYMMDD`
+/// string — the format sorts lexicographically). The date dir is the natural
+/// purge unit; the dir exactly at the cutoff survives.
+pub fn purge_older_than(base: &Path, cutoff: &str, dry: bool) -> PurgeReport {
+    let mut removed = 0usize;
+    let mut bytes = 0u64;
+    let mut errors = Vec::new();
+    for date in date_dirs(base) {
+        if date.as_str() >= cutoff {
+            continue; // YYYYMMDD sorts lexicographically
+        }
+        let ddir = base.join(&date);
+        // count entries the way the listing does, so preview and purge agree
+        let in_dir = list_quarantine_date(&ddir, &date);
+        if !dry {
+            if let Err(e) = std::fs::remove_dir_all(&ddir) {
+                errors.push(format!("{date}: {e}"));
+                continue;
+            }
+        }
+        removed += in_dir.0;
+        bytes += in_dir.1;
+    }
+    PurgeReport {
+        removed,
+        bytes,
+        errors,
+    }
+}
+
+/// (entries, bytes) inside one date dir, counted like `list_quarantine`.
+fn list_quarantine_date(ddir: &Path, _date: &str) -> (usize, u64) {
+    let mut n = 0usize;
+    let mut b = 0u64;
+    if let Ok(rd) = std::fs::read_dir(ddir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if name == "spam" && is_dir {
+                if let Ok(sd) = std::fs::read_dir(e.path()) {
+                    for s in sd.flatten() {
+                        n += 1;
+                        b += size_of(&s.path());
+                    }
+                }
+            } else {
+                n += 1;
+                b += size_of(&e.path());
+            }
+        }
+    }
+    (n, b)
+}
+
+/// Today minus `days`, as `YYYYMMDD`, via GNU date (EL9/cPanel — same pattern
+/// as the monitor's burst window).
+pub fn cutoff_days_ago(days: u32) -> Option<String> {
+    let out = std::process::Command::new("date")
+        .args(["-d", &format!("{days} days ago"), "+%Y%m%d"])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (s.len() == 8 && s.bytes().all(|b| b.is_ascii_digit())).then_some(s)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fixture matching production layouts: `<date>/spam/<id>` flat files and
+    /// `<date>/<id>/message` held dirs, plus junk that must be ignored.
+    fn fixture(tag: &str) -> std::path::PathBuf {
+        let base = std::env::temp_dir().join(format!("msfe-quar-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("20260801/spam")).unwrap();
+        std::fs::write(
+            base.join("20260801/spam/1waaaa-000000000001-aaaa"),
+            b"old spam",
+        )
+        .unwrap();
+        std::fs::create_dir_all(base.join("20260804/spam")).unwrap();
+        std::fs::write(
+            base.join("20260804/spam/1wbbbb-000000000002-bbbb"),
+            b"spam!",
+        )
+        .unwrap();
+        std::fs::create_dir_all(base.join("20260804/1wcccc-000000000003-cccc")).unwrap();
+        std::fs::write(
+            base.join("20260804/1wcccc-000000000003-cccc/message"),
+            b"held message body",
+        )
+        .unwrap();
+        std::fs::create_dir_all(base.join("not-a-date")).unwrap();
+        std::fs::write(base.join("not-a-date/junk"), b"ignored").unwrap();
+        base
+    }
+
+    #[test]
+    fn lists_both_layouts_newest_first_and_ignores_junk() {
+        let base = fixture("list");
+        let l = list_quarantine(&base, 100);
+        assert_eq!(l.total, 3);
+        assert!(!l.truncated);
+        assert_eq!(l.bytes, 8 + 5 + 17);
+        let keys: Vec<(String, String, &str)> = l
+            .entries
+            .iter()
+            .map(|e| (e.date.clone(), e.id.clone(), e.kind))
+            .collect();
+        assert_eq!(keys[0].0, "20260804", "newest date first");
+        assert!(keys.contains(&("20260804".into(), "1wcccc-000000000003-cccc".into(), "held")));
+        assert!(keys.contains(&("20260801".into(), "1waaaa-000000000001-aaaa".into(), "spam")));
+        // cap: totals stay true while entries truncate
+        let capped = list_quarantine(&base, 1);
+        assert_eq!(capped.total, 3);
+        assert!(capped.truncated);
+        assert_eq!(capped.entries.len(), 1);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn purge_items_deletes_only_validated_pairs() {
+        let base = fixture("purge");
+        let items = vec![
+            ("20260804".into(), "1wbbbb-000000000002-bbbb".into()),
+            ("20260804".into(), "1wcccc-000000000003-cccc".into()),
+            ("../../etc".into(), "passwd".into()),
+            ("20260804".into(), "../spam".into()),
+        ];
+        let r = purge_items(&base, &items, false);
+        assert_eq!(r.removed, 2);
+        assert_eq!(r.bytes, 5 + 17);
+        assert_eq!(r.errors.len(), 2, "traversal attempts are reported");
+        assert!(!base.join("20260804/spam/1wbbbb-000000000002-bbbb").exists());
+        assert!(!base.join("20260804/1wcccc-000000000003-cccc").exists());
+        assert!(base.join("20260801/spam/1waaaa-000000000001-aaaa").exists());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn purge_older_than_keeps_the_cutoff_date_and_honors_dry_run() {
+        let base = fixture("older");
+        let dry = purge_older_than(&base, "20260804", true);
+        assert_eq!(dry.removed, 1, "only the 20260801 entry is older");
+        assert_eq!(dry.bytes, 8);
+        assert!(
+            base.join("20260801/spam/1waaaa-000000000001-aaaa").exists(),
+            "dry-run must not delete"
+        );
+        let real = purge_older_than(&base, "20260804", false);
+        assert_eq!(real.removed, dry.removed);
+        assert_eq!(real.bytes, dry.bytes);
+        assert!(!base.join("20260801").exists());
+        assert!(
+            base.join("20260804").exists(),
+            "the dir at the cutoff survives"
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 
     #[test]
     fn forward_rewrite_replaces_headers_and_prepends_body() {

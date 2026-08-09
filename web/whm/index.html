@@ -18,6 +18,7 @@
         <button data-tab="service" aria-selected="false"><span class="ico">◉</span>Service</button>
         <button data-tab="logs" aria-selected="false"><span class="ico">≡</span>Logs</button>
         <button data-tab="queues" aria-selected="false"><span class="ico">⇥</span>Queues</button>
+        <button data-tab="quarantine" aria-selected="false"><span class="ico">🔒</span>Quarantine</button>
         <button data-tab="config" aria-selected="false"><span class="ico">⛭</span>Config</button>
       </nav>
       <div class="foot">
@@ -322,7 +323,7 @@ let policy=null; // {settings:{}, whitelist:[], blacklist:[]}
 let PREFS={refresh_secs:0,rows_per_page:50,view_new_window:false}; // /api/config prefs
 let days=7;
 
-const tabs={dash:renderDash,settings:renderSettings,lists:renderLists,messages:renderMessages,rules:renderRules,service:renderService,logs:renderLogs,queues:renderQueues,config:renderConfig};
+const tabs={dash:renderDash,settings:renderSettings,lists:renderLists,messages:renderMessages,rules:renderRules,service:renderService,logs:renderLogs,queues:renderQueues,quarantine:renderQuarantine,config:renderConfig};
 let dashTimer=null; // dashboard auto-refresh; cleared on every tab switch
 let logTimer=null; // maillog auto-refresh; cleared on every tab switch
 let jrnTimer=null; // restart-console journal polling; cleared on every tab switch
@@ -1190,6 +1191,86 @@ async function renderLogs(){
     auto,el('label',{for:'logauto',class:'muted'},'follow (5s)'));
   lc.append(pre);
   refreshLog();
+}
+
+// ---- Quarantine (on-disk browser + purge) ------------------------------------
+async function renderQuarantine(){
+  const v=$('#view');v.innerHTML='';
+  const card=el('div',{class:'card'},el('h2',{},'Quarantine contents'),
+    el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},
+      'What is actually on disk in the quarantine directory — including files no database row knows about. Purging deletes the stored copy permanently; the message log entry (if any) is kept.'));
+  v.append(card);
+  const totals=el('span',{class:'muted',style:'margin-left:auto;font-size:.8rem'});
+  const table=el('table');
+  const fmtB=b=>b>=1048576?(b/1048576).toFixed(1)+' MB':b>=1024?Math.round(b/1024)+' KB':b+' B';
+  const fmtD=d=>d.slice(0,4)+'-'+d.slice(4,6)+'-'+d.slice(6,8);
+  let ENTRIES=[],SEL=new Set();
+  const key=e=>e.date+'/'+e.id;
+  const purgeSel=el('button',{class:'act danger'},'Purge selected');
+  const days=el('input',{type:'number',min:'1',value:'30',style:'width:5rem'});
+  const prevBtn=el('button',{class:'act plain'},'Preview');
+  const oldBtn=el('button',{class:'act danger'},'Purge older');
+  const out=el('pre',{class:'log',style:'display:none'},'');
+  const ctl=el('div',{class:'ctl'},purgeSel,
+    el('span',{class:'muted',style:'margin-left:1rem'},'Older than'),days,
+    el('span',{class:'muted'},'days:'),prevBtn,oldBtn,totals);
+  card.append(ctl,out,table);
+
+  function draw(){
+    table.innerHTML='';
+    table.append(el('tr',{},el('th',{},''),...['Date','Message','Type','Size','From','Subject','Score'].map(h=>el('th',{},h))));
+    if(!ENTRIES.length){table.append(el('tr',{},el('td',{colspan:'8',class:'empty'},'Quarantine is empty.')));return;}
+    ENTRIES.forEach(e=>{
+      const cb=el('input',{type:'checkbox',...(SEL.has(key(e))?{checked:'checked'}:{})});
+      cb.onchange=()=>{cb.checked?SEL.add(key(e)):SEL.delete(key(e));purgeSel.textContent=SEL.size?`Purge selected (${SEL.size})`:'Purge selected';};
+      const row=el('tr',{},el('td',{},cb),
+        el('td',{},fmtD(e.date)),
+        el('td',{style:'font-family:var(--font-mono,monospace);font-size:.85em'},e.id),
+        el('td',{},el('span',{class:'badge',style:'background:'+(e.kind==='spam'?'var(--warning)':'var(--ink2)')},e.kind)),
+        el('td',{class:'num'},fmtB(e.size)),
+        el('td',{},e.from||el('span',{class:'muted'},'—')),
+        el('td',{},e.subject||el('span',{class:'muted'},'(not in message log)')),
+        el('td',{class:'num'},e.sascore||'—'));
+      row.style.cursor='pointer';
+      row.onclick=ev=>{if(ev.target.tagName==='INPUT')return;view(e);};
+      table.append(row);
+    });
+  }
+  async function view(e){
+    const m=modal(`${e.id} — ${fmtD(e.date)}`);
+    m.body.append(el('div',{class:'muted',style:'font-size:.8rem;margin-bottom:.5rem'},'Message headers as stored in the quarantine.'));
+    const pre=el('pre',{class:'log'},'Loading…');m.body.append(pre);
+    pre.textContent=await api('/api/quarantine/message?date='+e.date+'&id='+encodeURIComponent(e.id),{raw:true})||'(no output)';
+  }
+  async function load(){
+    table.innerHTML='';table.append(el('tr',{},el('td',{class:'empty'},'Loading…')));
+    const d=await api('/api/quarantine?limit=2000');
+    ENTRIES=(d&&d.entries)||[];SEL=new Set();purgeSel.textContent='Purge selected';
+    totals.textContent=d?`${d.total} item(s), ${fmtB(d.bytes)}${d.truncated?' — showing first '+ENTRIES.length:''}`:'';
+    draw();
+  }
+  purgeSel.onclick=async()=>{
+    if(!SEL.size)return toast('Select messages first');
+    if(!confirm(`Permanently delete ${SEL.size} quarantined message(s) from disk?`))return;
+    const items=ENTRIES.filter(e=>SEL.has(key(e))).map(e=>({date:e.date,id:e.id}));
+    const r=await api('/api/quarantine/purge',{method:'POST',body:{items,dry:false}});
+    out.style.display='';out.textContent=r?`removed ${r.removed} item(s), ${fmtB(r.bytes)} freed`+(r.errors&&r.errors.length?'\n'+r.errors.join('\n'):''):'no response';
+    toast(r&&r.ok?`Purged ${r.removed} message(s)`:'Purge finished with errors — see output');
+    load();
+  };
+  prevBtn.onclick=async()=>{
+    const r=await api('/api/quarantine/purge-older',{method:'POST',body:{days:+days.value||30,dry:true}});
+    out.style.display='';out.textContent=r&&!r.error?`dry-run: would remove ${r.removed} item(s), ${fmtB(r.bytes)}`:(r&&r.error||'no response');
+  };
+  oldBtn.onclick=async()=>{
+    const n=+days.value||30;
+    if(!confirm(`Permanently delete ALL quarantined messages older than ${n} days?\n\nUse Preview first to see what this removes.`))return;
+    const r=await api('/api/quarantine/purge-older',{method:'POST',body:{days:n,dry:false}});
+    out.style.display='';out.textContent=r&&!r.error?`removed ${r.removed} item(s), ${fmtB(r.bytes)} freed`:(r&&r.error||'no response');
+    toast(r&&r.ok?`Purged ${r.removed} message(s)`:'Purge finished with errors — see output');
+    load();
+  };
+  load();
 }
 
 // ---- Queues (contents + per-message management) ------------------------------
