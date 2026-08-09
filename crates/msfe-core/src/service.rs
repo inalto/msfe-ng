@@ -43,30 +43,50 @@ pub struct CmdOutput {
 /// entering a scanner retry loop — takes the whole UI down with it. Every
 /// spawn on the request path goes through here.
 pub fn run_with_timeout(cmd: &mut Command, timeout: std::time::Duration) -> io::Result<CmdOutput> {
-    use std::io::Read;
+    use std::os::unix::process::CommandExt;
+    use std::sync::mpsc;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    // Own process group, so the deadline can kill the command's whole tree:
+    // killing only the direct child leaves grandchildren (a shell's fork, a
+    // scanner's workers) alive AND holding the output pipes open.
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0)
         .spawn()?;
-    // drain the pipes on threads so a chatty child can never fill them and
-    // deadlock against our wait loop
-    let mut out_pipe = child.stdout.take();
-    let mut err_pipe = child.stderr.take();
-    let t_out = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(p) = out_pipe.as_mut() {
-            let _ = p.read_to_end(&mut buf);
-        }
-        buf
-    });
-    let t_err = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(p) = err_pipe.as_mut() {
-            let _ = p.read_to_end(&mut buf);
-        }
-        buf
-    });
+
+    // Drain each pipe on a thread into a shared buffer. The threads are never
+    // joined: a detached descendant (e.g. a daemonized grandchild) can hold
+    // the pipe open forever, and a join would block the deadline with it.
+    fn drain<R: std::io::Read + Send + 'static>(
+        mut pipe: R,
+        buf: Arc<Mutex<Vec<u8>>>,
+        done: mpsc::Sender<()>,
+    ) {
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 4096];
+            loop {
+                match pipe.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buf.lock().unwrap().extend_from_slice(&chunk[..n]),
+                }
+            }
+            let _ = done.send(());
+        });
+    }
+    let out_buf = Arc::new(Mutex::new(Vec::new()));
+    let err_buf = Arc::new(Mutex::new(Vec::new()));
+    let (done_tx, done_rx) = mpsc::channel();
+    if let Some(p) = child.stdout.take() {
+        drain(p, Arc::clone(&out_buf), done_tx.clone());
+    }
+    if let Some(p) = child.stderr.take() {
+        drain(p, Arc::clone(&err_buf), done_tx.clone());
+    }
+    drop(done_tx);
 
     let start = std::time::Instant::now();
     let mut timed_out = false;
@@ -75,15 +95,29 @@ pub fn run_with_timeout(cmd: &mut Command, timeout: std::time::Duration) -> io::
             Some(st) => break Some(st),
             None if start.elapsed() >= timeout => {
                 timed_out = true;
+                // negative pid = the whole process group
+                let _ = Command::new("kill")
+                    .args(["-9", "--", &format!("-{}", child.id())])
+                    .stderr(Stdio::null())
+                    .status();
                 let _ = child.kill();
                 let _ = child.wait();
                 break None;
             }
-            None => std::thread::sleep(std::time::Duration::from_millis(50)),
+            None => std::thread::sleep(Duration::from_millis(50)),
         }
     };
-    let stdout = t_out.join().unwrap_or_default();
-    let stderr = t_err.join().unwrap_or_default();
+    // Bounded grace for the readers to hit EOF (immediate in the normal case);
+    // a pipe held open by an escaped descendant just yields what we have.
+    let deadline = std::time::Instant::now() + Duration::from_millis(500);
+    for _ in 0..2 {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if done_rx.recv_timeout(left).is_err() {
+            break;
+        }
+    }
+    let stdout = out_buf.lock().unwrap().clone();
+    let stderr = err_buf.lock().unwrap().clone();
     Ok(CmdOutput {
         ok: status.map(|s| s.success()).unwrap_or(false),
         code: status.and_then(|s| s.code()),
@@ -1084,7 +1118,9 @@ mod tests {
     fn run_with_timeout_kills_a_hung_command() {
         let start = std::time::Instant::now();
         let mut cmd = Command::new("sh");
-        cmd.args(["-c", "sleep 8"]);
+        // `sh` forks the sleeps (no exec): killing only the direct child would
+        // leave grandchildren alive holding the pipes — CI caught exactly that
+        cmd.args(["-c", "sleep 8 & sleep 8"]);
         let r = run_with_timeout(&mut cmd, std::time::Duration::from_millis(300)).unwrap();
         assert!(r.timed_out, "must report the timeout");
         assert!(!r.ok, "a killed command is not a success");
