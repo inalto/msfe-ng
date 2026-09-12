@@ -273,9 +273,15 @@ pub fn reverse_dns(ip: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Two tests set/remove MSFE_NG_OWN_IPS; process env is shared across test
+    // threads, so without this the other test's remove_var races the assert.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn validates_addresses_and_masks() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("MSFE_NG_OWN_IPS", "203.0.113.5");
         assert!(validate_target("49.12.174.167", false).is_ok());
         assert!(validate_target("49.12.174.0/24", false).is_ok());
@@ -304,6 +310,7 @@ mod tests {
         assert_eq!(normalize_ip("2a00:1450:4025::200e"), "2a00:1450:4025::200e");
         assert_eq!(normalize_ip("[2a00:1450::1]:25"), "2a00:1450::1");
         // and the normalized form validates
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("MSFE_NG_OWN_IPS", "203.0.113.5");
         assert!(validate_target(&normalize_ip("[35.247.160.179]:45570"), false).is_ok());
         std::env::remove_var("MSFE_NG_OWN_IPS");
