@@ -256,6 +256,9 @@
     border-radius: 14px;
     padding: 1rem 1.15rem;
     margin-bottom: 1rem;
+    /* a wide table scrolls inside the card instead of overflowing it on
+       narrow screens (a collapsed table can't shrink below its content) */
+    overflow-x: auto;
   }
   .card h2 {
     font-size: 0.9rem;
@@ -407,6 +410,7 @@
     text-align: right;
     font-variant-numeric: tabular-nums;
     font-family: var(--font-mono);
+    white-space: nowrap;
   }
 
   /* ---- misc bits ------------------------------------------------------- */
@@ -532,6 +536,19 @@
   @media (max-width: 720px) {
     .app {
       grid-template-columns: 1fr;
+    }
+    /* let tables keep their natural width and scroll inside the card rather
+       than wrapping every cell word-by-word into very tall rows */
+    .card table {
+      width: max-content;
+      min-width: 100%;
+    }
+    .card td,
+    .card th {
+      white-space: nowrap;
+      max-width: 16rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     .rail {
       position: static;
