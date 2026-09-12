@@ -23,6 +23,7 @@ pub mod legacy;
 pub mod mailflow;
 pub mod mailscanner;
 pub mod migrate;
+pub mod mime;
 pub mod monitor;
 pub mod panel;
 pub mod quarantine;

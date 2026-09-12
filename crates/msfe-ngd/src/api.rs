@@ -313,6 +313,19 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                 None => Response::text(404, "the message body is no longer available"),
             }
         }
+        // MIME-decoded HTML fragment for the "rendered" preview: the browser
+        // wraps it in a no-network CSP document, so inline images come as data:
+        // URIs and the plain-text fallback is pre-escaped.
+        ("GET", "/api/messages/preview") => {
+            let id = req.query_param("id").unwrap_or_default();
+            if !service::valid_exim_id(&id) {
+                return Response::text(200, "bad message id");
+            }
+            match read_full_message(cfg, &id) {
+                Some(bytes) => Response::html(200, &msfe_core::mime::preview(&bytes).html),
+                None => Response::text(404, "the message body is no longer available"),
+            }
+        }
         ("POST", "/api/messages/learn") => {
             let v = Json::parse(&req.body).unwrap_or(Json::Null);
             let id = v.str_field("id");

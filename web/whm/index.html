@@ -815,20 +815,20 @@ async function renderMessageView(id){
 
 // Open a quarantined message's raw source or rendered HTML in a new tab.
 async function openRaw(id,mode){
-  const r=await apiRaw('/api/messages/raw?id='+encodeURIComponent(id));
+  // 'source' shows the message verbatim; 'render' asks the daemon for the
+  // MIME-decoded HTML (or text) part, so multipart/quoted-printable bodies
+  // come back readable instead of as raw encoded soup
+  const r=await apiRaw((mode==='source'?'/api/messages/raw?id=':'/api/messages/preview?id=')+encodeURIComponent(id));
   if(!r.ok){toast(r.text||'the message body is no longer available');return;}
-  const raw=r.text;
   const w=window.open('','_blank');
   if(!w){toast('Pop-up blocked — allow pop-ups to view');return;}
   if(mode==='source'){
     w.document.write('<pre style="white-space:pre-wrap;word-break:break-word;font:13px ui-monospace,monospace;padding:1rem">'+
-      raw.replace(/[&<>]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]))+'</pre>');
+      r.text.replace(/[&<>]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]))+'</pre>');
   } else {
-    // split headers/body; render the body sandboxed (no scripts, no network by CSP)
-    const i=raw.search(/\r?\n\r?\n/);
-    const body=i>=0?raw.slice(i).replace(/^\s+/,''):raw;
-    w.document.write('<!doctype html><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; img-src data:">'+
-      '<div style="font:13px system-ui;padding:.5rem;background:#fffbe6;border-bottom:1px solid #e5c07b">Rendered preview — scripts and remote content are blocked for safety.</div>'+body);
+    // render sandboxed: no scripts, no network by CSP (inline images arrive as data: URIs)
+    w.document.write('<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; img-src data:">'+
+      '<div style="font:13px system-ui;padding:.5rem;background:#fffbe6;border-bottom:1px solid #e5c07b">Rendered preview — scripts and remote content are blocked for safety.</div>'+r.text);
   }
   w.document.close();
 }
