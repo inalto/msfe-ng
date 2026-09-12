@@ -11,7 +11,7 @@ ConfigServer MailScanner Front-End (MSFE). It reads MSFE's old config files so
 you can migrate, but ships **no licensing, no phone-home, and no obfuscation** —
 just maintainable, auditable code.
 
-> **Status: v0.0.37 — in production.** Runs on a live cPanel/Exim server:
+> **Status: v0.0.38 — in production.** Runs on a live cPanel/Exim server:
 > installs (optionally including MailScanner itself), wires Exim to the scanner,
 > logs and archives every message to MySQL, manages the queues, and alerts via
 > Telegram. Releases are tagged continuously; upgrade in place with the same
