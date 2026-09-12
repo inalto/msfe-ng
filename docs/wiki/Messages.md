@@ -40,10 +40,13 @@ be trusted) and the full **headers**.
 
 **Message content** (needs a stored copy — quarantine or archive):
 - **View source** — the raw message, escaped, in a new tab.
-- **View rendered** — the decoded message in a sandboxed tab: the HTML part if
-  there is one (else the text part), transfer encodings and charsets decoded,
-  inline `cid:` images embedded; scripts and any network access are blocked by
-  a Content-Security-Policy.
+- **View rendered** — the decoded message in a sandboxed tab, transfer
+  encodings and charsets decoded, inline `cid:` images embedded; scripts and
+  any network access are blocked by a Content-Security-Policy. Alternative
+  parts show HTML over plain text; everything else is shown in order, so a
+  bounce reads as notification → delivery status → returned headers, a
+  forwarded/encapsulated message gets a From/To/Date/Subject summary plus its
+  own rendered body, and other attachments are listed by name, type and size.
 
 **Actions** (also need the stored copy):
 - **Learn as ham / spam / spam & report / Forget** — trains SpamAssassin's Bayes

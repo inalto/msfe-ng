@@ -9,12 +9,13 @@
 
 use std::collections::HashMap;
 
-/// One leaf part after decoding. `body` is raw bytes (already transfer-decoded).
-struct Part {
+/// One MIME entity: decoded body plus children for `multipart/*`.
+struct Entity {
     ctype: String, // lowercased media type, e.g. "text/html"
     params: HashMap<String, String>,
-    body: Vec<u8>,
-    content_id: Option<String>,
+    headers: Vec<String>, // unfolded header lines
+    body: Vec<u8>,        // transfer-decoded; for multiparts, the raw body
+    children: Vec<Entity>,
 }
 
 /// Decoded representation of a message ready for display.
@@ -24,79 +25,225 @@ pub struct Preview {
     pub html: String,
 }
 
+const PRE_STYLE: &str =
+    "white-space:pre-wrap;word-break:break-word;font:13px ui-monospace,monospace;margin:0;padding:1rem";
+const CAPTION_STYLE: &str =
+    "font:12px system-ui;color:#555;background:#f3f4f6;border-top:1px solid #ddd;border-bottom:1px solid #ddd;padding:.3rem 1rem;margin-top:.5rem";
+const NESTED_STYLE: &str =
+    "border-left:3px solid #cbd5e1;margin:.5rem 0 .5rem 1rem;padding-left:.5rem";
+
 /// Build the HTML preview of a raw message. Always succeeds: a message with no
 /// displayable part yields a short notice instead of nothing.
+///
+/// `multipart/alternative` shows the best variant (HTML over plain text);
+/// every other multipart shows its parts in order, so a bounce
+/// (`multipart/report`) reads as notification → delivery status → returned
+/// headers. Encapsulated `message/rfc822` parts get a header summary and
+/// their own rendered body; remaining attachments are listed by name.
 pub fn preview(raw: &[u8]) -> Preview {
-    let mut leaves = Vec::new();
-    collect_parts(raw, &mut leaves, 0);
-
-    let html_part = leaves.iter().find(|p| p.ctype == "text/html");
-    let text_part = leaves.iter().find(|p| p.ctype == "text/plain");
-
-    let html = match (html_part, text_part) {
-        (Some(h), _) => {
-            let s = decode_charset(&h.body, h.params.get("charset").map(String::as_str));
-            inline_cid_images(&s, &leaves)
-        }
-        (None, Some(t)) => {
-            let s = decode_charset(&t.body, t.params.get("charset").map(String::as_str));
-            format!(
-                "<pre style=\"white-space:pre-wrap;word-break:break-word;font:13px ui-monospace,monospace;padding:1rem\">{}</pre>",
-                escape_html(&s)
-            )
-        }
-        (None, None) => {
-            let kinds: Vec<&str> = leaves.iter().map(|p| p.ctype.as_str()).collect();
-            format!(
-                "<p style=\"font:13px system-ui;padding:1rem\">No text part to display ({}).</p>",
-                escape_html(&if kinds.is_empty() {
-                    "empty message".to_string()
-                } else {
-                    kinds.join(", ")
-                })
-            )
-        }
-    };
-    Preview { html }
+    let root = parse_entity(raw, 0);
+    let mut images = HashMap::new();
+    collect_cid_images(&root, &mut images);
+    let mut out = String::new();
+    render(&root, &images, 0, &mut out);
+    if out.is_empty() {
+        let mut kinds = Vec::new();
+        list_types(&root, &mut kinds);
+        out = format!(
+            "<p style=\"font:13px system-ui;padding:1rem\">No text part to display ({}).</p>",
+            escape_html(&if kinds.is_empty() {
+                "empty message".to_string()
+            } else {
+                kinds.join(", ")
+            })
+        );
+    }
+    Preview { html: out }
 }
 
-/// Recursively flatten a (sub)message into leaf parts.
-fn collect_parts(raw: &[u8], out: &mut Vec<Part>, depth: usize) {
+/// Parse a (sub)message into an entity tree.
+fn parse_entity(raw: &[u8], depth: usize) -> Entity {
     let (headers, body) = split_headers(raw);
     let ct = header(&headers, "content-type").unwrap_or_else(|| "text/plain".to_string());
     let (ctype, params) = parse_content_type(&ct);
+    let cte = header(&headers, "content-transfer-encoding");
 
+    let mut children = Vec::new();
     if ctype.starts_with("multipart/") && depth < 16 {
         if let Some(boundary) = params.get("boundary") {
-            for sub in split_multipart(body, boundary) {
-                collect_parts(sub, out, depth + 1);
-            }
-            return;
+            children = split_multipart(body, boundary)
+                .into_iter()
+                .map(|sub| parse_entity(sub, depth + 1))
+                .collect();
         }
-        // multipart without a boundary: fall through and show as text
     }
-    if ctype == "message/rfc822" && depth < 16 {
-        let decoded = transfer_decode(
-            body,
-            header(&headers, "content-transfer-encoding").as_deref(),
-        );
-        collect_parts(&decoded, out, depth + 1);
-        return;
-    }
-
-    let cte = header(&headers, "content-transfer-encoding");
-    let content_id = header(&headers, "content-id").map(|s| {
-        s.trim()
-            .trim_start_matches('<')
-            .trim_end_matches('>')
-            .to_string()
-    });
-    out.push(Part {
+    // a multipart without a usable boundary is shown as text
+    let ctype = if ctype.starts_with("multipart/") && children.is_empty() {
+        "text/plain".to_string()
+    } else {
+        ctype
+    };
+    let body = if children.is_empty() {
+        transfer_decode(body, cte.as_deref())
+    } else {
+        Vec::new()
+    };
+    Entity {
         ctype,
         params,
-        body: transfer_decode(body, cte.as_deref()),
-        content_id,
+        headers,
+        body,
+        children,
+    }
+}
+
+fn collect_cid_images(e: &Entity, out: &mut HashMap<String, (String, Vec<u8>)>) {
+    if e.ctype.starts_with("image/") {
+        if let Some(cid) = header(&e.headers, "content-id") {
+            let cid = cid
+                .trim()
+                .trim_start_matches('<')
+                .trim_end_matches('>')
+                .to_string();
+            out.insert(cid, (e.ctype.clone(), e.body.clone()));
+        }
+    }
+    for c in &e.children {
+        collect_cid_images(c, out);
+    }
+}
+
+fn list_types(e: &Entity, out: &mut Vec<String>) {
+    if e.children.is_empty() {
+        out.push(e.ctype.clone());
+    }
+    for c in &e.children {
+        list_types(c, out);
+    }
+}
+
+fn charset_of(e: &Entity) -> Option<&str> {
+    e.params.get("charset").map(String::as_str)
+}
+
+/// Render an entity into `out`. `depth` counts `message/rfc822` nesting.
+fn render(e: &Entity, images: &HashMap<String, (String, Vec<u8>)>, depth: usize, out: &mut String) {
+    match e.ctype.as_str() {
+        "multipart/alternative" => {
+            // best variant only: html, else plain, else the last part
+            let pick = e
+                .children
+                .iter()
+                .find(|c| c.ctype == "text/html" || contains_html(c))
+                .or_else(|| e.children.iter().find(|c| c.ctype == "text/plain"))
+                .or_else(|| e.children.last());
+            if let Some(c) = pick {
+                render(c, images, depth, out);
+            }
+        }
+        t if t.starts_with("multipart/") => {
+            for c in &e.children {
+                render(c, images, depth, out);
+            }
+        }
+        "text/html" => {
+            let s = decode_charset(&e.body, charset_of(e));
+            out.push_str(&inline_cid_images(&s, images));
+        }
+        "text/plain"
+        | "text/rfc822-headers"
+        | "message/delivery-status"
+        | "message/feedback-report"
+        | "message/disposition-notification" => {
+            if e.ctype != "text/plain" {
+                caption(e, out);
+            }
+            let s = decode_charset(&e.body, charset_of(e));
+            out.push_str(&format!(
+                "<pre style=\"{PRE_STYLE}\">{}</pre>",
+                escape_html(&s)
+            ));
+        }
+        "message/rfc822" if depth < 8 => {
+            caption(e, out);
+            let inner = parse_entity(&e.body, 0);
+            out.push_str(&format!("<div style=\"{NESTED_STYLE}\">"));
+            out.push_str(
+                "<table style=\"font:12px system-ui;border-collapse:collapse;margin:.3rem 0\">",
+            );
+            for name in ["From", "To", "Date", "Subject"] {
+                if let Some(v) = header(&inner.headers, &name.to_ascii_lowercase()) {
+                    out.push_str(&format!(
+                        "<tr><th style=\"text-align:left;padding:.1rem .6rem .1rem 0;color:#555\">{name}</th><td>{}</td></tr>",
+                        escape_html(&crate::queueview::decode_rfc2047(&v))
+                    ));
+                }
+            }
+            out.push_str("</table>");
+            let mut inner_imgs = images.clone();
+            collect_cid_images(&inner, &mut inner_imgs);
+            render(&inner, &inner_imgs, depth + 1, out);
+            out.push_str("</div>");
+        }
+        t if t.starts_with("image/") && header(&e.headers, "content-id").is_some() => {
+            // inline image referenced by cid: — already embedded where used
+        }
+        _ => {
+            // anything else is an attachment: name it, don't show it
+            let name = e
+                .params
+                .get("name")
+                .cloned()
+                .or_else(|| {
+                    header(&e.headers, "content-disposition")
+                        .map(|d| parse_content_type(&d).1)
+                        .and_then(|p| p.get("filename").cloned())
+                })
+                .unwrap_or_else(|| "(unnamed)".to_string());
+            out.push_str(&format!(
+                "<div style=\"{CAPTION_STYLE}\">📎 {} — {} · {}</div>",
+                escape_html(&crate::queueview::decode_rfc2047(&name)),
+                escape_html(&e.ctype),
+                human_size(e.body.len())
+            ));
+        }
+    }
+}
+
+/// True when an alternative branch (e.g. `multipart/related`) holds HTML.
+fn contains_html(e: &Entity) -> bool {
+    e.ctype == "text/html" || e.children.iter().any(contains_html)
+}
+
+/// A small labelled bar before a non-primary part (bounce report, returned
+/// headers, encapsulated message).
+fn caption(e: &Entity, out: &mut String) {
+    let label = header(&e.headers, "content-description").unwrap_or_else(|| {
+        match e.ctype.as_str() {
+            "message/rfc822" => "Encapsulated message",
+            "message/delivery-status" => "Delivery status",
+            "text/rfc822-headers" => "Returned message headers",
+            "message/feedback-report" => "Feedback report",
+            "message/disposition-notification" => "Disposition notification",
+            _ => "Part",
+        }
+        .to_string()
     });
+    out.push_str(&format!(
+        "<div style=\"{CAPTION_STYLE}\">{} <span style=\"opacity:.7\">({})</span></div>",
+        escape_html(&label),
+        escape_html(&e.ctype)
+    ));
+}
+
+fn human_size(n: usize) -> String {
+    if n >= 1_048_576 {
+        format!("{:.1} MB", n as f64 / 1_048_576.0)
+    } else if n >= 1024 {
+        format!("{} KB", n / 1024)
+    } else {
+        format!("{n} B")
+    }
 }
 
 /// Split at the first blank line into (unfolded header lines, body).
@@ -313,17 +460,13 @@ fn cp1252_char(c: u8) -> char {
 }
 
 /// Replace `src="cid:xyz"` references with `data:` URIs of the matching part.
-fn inline_cid_images(html: &str, parts: &[Part]) -> String {
+fn inline_cid_images(html: &str, images: &HashMap<String, (String, Vec<u8>)>) -> String {
     if !html.contains("cid:") {
         return html.to_string();
     }
     let mut out = html.to_string();
-    for p in parts {
-        let Some(cid) = &p.content_id else { continue };
-        if !p.ctype.starts_with("image/") {
-            continue;
-        }
-        let data = format!("data:{};base64,{}", p.ctype, encode_base64(&p.body));
+    for (cid, (ctype, body)) in images {
+        let data = format!("data:{};base64,{}", ctype, encode_base64(body));
         for quote in ['"', '\''] {
             let needle = format!("{}cid:{}{}", quote, cid, quote);
             let repl = format!("{}{}{}", quote, data, quote);
@@ -470,6 +613,115 @@ mod tests {
         assert!(preview(raw).html.contains("<i>hi</i>"));
     }
 
+    /// Postfix bounce: multipart/report → notification, delivery-status,
+    /// returned headers — all three must be shown, in order, and the MIME
+    /// preamble/boundaries must not.
+    #[test]
+    fn dsn_shows_every_report_part_in_order() {
+        let raw = concat!(
+            "From: MAILER-DAEMON@ls229.example (Mail Delivery System)\n",
+            "Subject: Undelivered Mail Returned to Sender\n",
+            "Content-Type: multipart/report; report-type=delivery-status;\n",
+            "\tboundary=\"9F6D265894D.1789175732/ls229.example\"\n",
+            "\n",
+            "This is a MIME-encapsulated message.\n",
+            "\n",
+            "--9F6D265894D.1789175732/ls229.example\n",
+            "Content-Description: Notification\n",
+            "Content-Type: text/plain; charset=us-ascii\n",
+            "\n",
+            "This is the mail system at host ls229.example.\n",
+            "<jsm@x.example>: host mx01 said: 550 5.1.1 does not exist\n",
+            "\n",
+            "--9F6D265894D.1789175732/ls229.example\n",
+            "Content-Description: Delivery report\n",
+            "Content-Type: message/delivery-status\n",
+            "\n",
+            "Reporting-MTA: dns; ls229.example\n",
+            "\n",
+            "Final-Recipient: rfc822; jsm@x.example\n",
+            "Action: failed\n",
+            "Status: 5.1.1\n",
+            "\n",
+            "--9F6D265894D.1789175732/ls229.example\n",
+            "Content-Description: Undelivered Message Headers\n",
+            "Content-Type: text/rfc822-headers\n",
+            "\n",
+            "From: Crypto <support@spoofed.example>\n",
+            "Subject: Connect Your External Wallet\n",
+            "\n",
+            "--9F6D265894D.1789175732/ls229.example--\n"
+        );
+        let h = preview(raw.as_bytes()).html;
+        let i1 = h.find("This is the mail system").expect("notification");
+        let i2 = h.find("Delivery report").expect("delivery caption");
+        let i3 = h.find("Action: failed").expect("status");
+        let i4 = h
+            .find("Undelivered Message Headers")
+            .expect("headers caption");
+        let i5 = h
+            .find("Connect Your External Wallet")
+            .expect("returned subject");
+        assert!(i1 < i2 && i2 < i3 && i3 < i4 && i4 < i5, "{h}");
+        assert!(
+            !h.contains("MIME-encapsulated") && !h.contains("--9F6D"),
+            "{h}"
+        );
+        assert!(h.contains("&lt;jsm@x.example&gt;"), "text is escaped: {h}");
+    }
+
+    /// A forwarded message as message/rfc822: header summary + its own body,
+    /// with the outer text shown first.
+    #[test]
+    fn encapsulated_rfc822_gets_summary_and_rendered_body() {
+        let raw = concat!(
+            "Content-Type: multipart/mixed; boundary=out\n\n",
+            "--out\n",
+            "Content-Type: text/plain\n\nFYI see below\n",
+            "--out\n",
+            "Content-Type: message/rfc822\n\n",
+            "From: =?utf-8?Q?Andr=C3=A9?= <a@x.example>\n",
+            "To: b@y.example\n",
+            "Subject: inner subject\n",
+            "Content-Type: multipart/alternative; boundary=in\n\n",
+            "--in\n",
+            "Content-Type: text/plain\n\nplain inner\n",
+            "--in\n",
+            "Content-Type: text/html\n\n<b>html inner</b>\n",
+            "--in--\n",
+            "--out--\n"
+        );
+        let h = preview(raw.as_bytes()).html;
+        let a = h.find("FYI see below").unwrap();
+        let b = h.find("Encapsulated message").unwrap();
+        let c = h.find("inner subject").unwrap();
+        let d = h.find("<b>html inner</b>").unwrap();
+        assert!(a < b && b < c && c < d, "{h}");
+        assert!(h.contains("André"), "rfc2047 in summary: {h}");
+        assert!(
+            !h.contains("plain inner"),
+            "alternative picks html only: {h}"
+        );
+    }
+
+    #[test]
+    fn attachments_are_listed_not_shown() {
+        let raw = concat!(
+            "Content-Type: multipart/mixed; boundary=xx\n\n",
+            "--xx\n",
+            "Content-Type: text/plain\n\nsee attached\n",
+            "--xx\n",
+            "Content-Type: application/pdf; name=\"report.pdf\"\nContent-Transfer-Encoding: base64\n\nAAAAAAAA\n",
+            "--xx--\n"
+        );
+        let h = preview(raw.as_bytes()).html;
+        assert!(
+            h.contains("report.pdf") && h.contains("application/pdf") && h.contains("6 B"),
+            "{h}"
+        );
+        assert!(!h.contains("AAAAAAAA"), "{h}");
+    }
+
     #[test]
     fn nested_mixed_with_attachment_still_finds_text() {
         let raw = concat!(
@@ -492,12 +744,24 @@ mod tests {
     }
 
     #[test]
-    fn no_text_part_gives_notice() {
+    fn lone_attachment_is_listed_and_empty_message_gets_notice() {
         let raw =
             b"Content-Type: application/octet-stream\nContent-Transfer-Encoding: base64\n\nAAAA\n";
         let p = preview(raw);
-        assert!(p.html.contains("No text part"), "{}", p.html);
-        assert!(p.html.contains("application/octet-stream"), "{}", p.html);
+        assert!(
+            p.html.contains("(unnamed)") && p.html.contains("application/octet-stream"),
+            "{}",
+            p.html
+        );
+        assert!(p.html.contains("3 B"), "{}", p.html);
+        // an inline image nothing references renders nothing → the notice
+        let raw = b"Content-Type: image/png\nContent-ID: <x>\nContent-Transfer-Encoding: base64\n\nAAAA\n";
+        let p = preview(raw);
+        assert!(
+            p.html.contains("No text part") && p.html.contains("image/png"),
+            "{}",
+            p.html
+        );
     }
 
     #[test]

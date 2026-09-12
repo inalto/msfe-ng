@@ -56,22 +56,51 @@ fn base_cmd(cfg: &Config, df: &DefaultsFile) -> Command {
 }
 
 /// Run a read query, returning rows of column strings (NULLs become empty).
-/// `-N` skips headers, `-B` is batch/tab-separated, `--raw` avoids escaping.
+/// `-N` skips headers, `-B` is batch/tab-separated. Batch mode escapes the
+/// characters that would break that framing (newline, tab, NUL, backslash)
+/// as `\n` `\t` `\0` `\\`, which `parse_batch` undoes — multi-line values
+/// such as `maillog.headers` come back whole. (`--raw` would emit them
+/// verbatim and split one value across rows and columns.)
 pub fn query(cfg: &Config, sql: &str) -> io::Result<Vec<Vec<String>>> {
     let df = defaults_file(cfg)?;
-    let out = base_cmd(cfg, &df)
-        .args(["-N", "-B", "--raw", "-e", sql])
-        .output()?;
+    let out = base_cmd(cfg, &df).args(["-N", "-B", "-e", sql]).output()?;
     if !out.status.success() {
         return Err(io::Error::other(format!(
             "mysql query failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         )));
     }
-    Ok(String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(|l| l.split('\t').map(|c| c.to_string()).collect())
-        .collect())
+    Ok(parse_batch(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// Split `mysql -B` output into rows and columns, decoding its escapes.
+fn parse_batch(out: &str) -> Vec<Vec<String>> {
+    out.lines()
+        .map(|l| l.split('\t').map(unescape_batch).collect())
+        .collect()
+}
+
+fn unescape_batch(cell: &str) -> String {
+    let mut s = String::with_capacity(cell.len());
+    let mut it = cell.chars();
+    while let Some(c) = it.next() {
+        if c != '\\' {
+            s.push(c);
+            continue;
+        }
+        match it.next() {
+            Some('n') => s.push('\n'),
+            Some('t') => s.push('\t'),
+            Some('0') => s.push('\0'),
+            Some('\\') => s.push('\\'),
+            Some(o) => {
+                s.push('\\');
+                s.push(o);
+            }
+            None => s.push('\\'),
+        }
+    }
+    s
 }
 
 /// Read a global key from the `msfe_config` kv table (daemon-writable state:
@@ -153,6 +182,28 @@ pub fn exec_stdin(cfg: &Config, sql: &str) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    /// A `headers` column folded with a tab and spanning lines must come back
+    /// as one cell — the preview/release code rebuilds the message from it.
+    #[test]
+    fn batch_output_decodes_escaped_newlines_and_tabs() {
+        let out = "/var/spool/x/1abc-D\tContent-Type: multipart/report;\\n\\tboundary=\"b\"\\nX-A: 1\\\\2\\0\n\t\n";
+        let rows = parse_batch(out);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][0], "/var/spool/x/1abc-D");
+        assert_eq!(
+            rows[0][1],
+            "Content-Type: multipart/report;\n\tboundary=\"b\"\nX-A: 1\\2\0"
+        );
+        // second row: two empty cells (NULL-ish), not a crash
+        assert_eq!(rows[1], vec!["", ""]);
+    }
+
+    #[test]
+    fn batch_unescape_leaves_unknown_escapes_alone() {
+        assert_eq!(unescape_batch("a\\qb\\"), "a\\qb\\");
+        assert_eq!(unescape_batch("plain"), "plain");
+    }
 
     #[test]
     fn defaults_file_is_private_and_removed() {
