@@ -11,11 +11,24 @@ ConfigServer MailScanner Front-End (MSFE). It reads MSFE's old config files so
 you can migrate, but ships **no licensing, no phone-home, and no obfuscation** —
 just maintainable, auditable code.
 
-> **Status: v0.0.33 — in production.** Runs on a live cPanel/Exim server:
+> **Status: v0.0.37 — in production.** Runs on a live cPanel/Exim server:
 > installs (optionally including MailScanner itself), wires Exim to the scanner,
 > logs and archives every message to MySQL, manages the queues, and alerts via
 > Telegram. Releases are tagged continuously; upgrade in place with the same
 > one-liner as the install.
+
+## Screenshots
+
+| Dashboard | Messages |
+|---|---|
+| ![Dashboard](docs/img/dashboard.png) | ![Messages](docs/img/messages.png) |
+
+| Service | Queues |
+|---|---|
+| ![Service](docs/img/service.png) | ![Queues](docs/img/queues.png) |
+
+More in the **[usage wiki](https://github.com/inalto/msfe-ng/wiki)** — one page
+per tab of the admin UI, plus the end-user panel, CLI and troubleshooting.
 
 ## Features
 
@@ -79,7 +92,8 @@ msfe-ng doctor                     # verify the whole chain, with fixes per find
 Open **WHM → Plugins → MSFE-NG** (or **DirectAdmin → MSFE-NG**). Check the daemon
 any time with `msfe-ng health`.
 
-Full documentation: **[Admin guide](docs/admin-guide.md)** ·
+Full documentation: **[Usage wiki](https://github.com/inalto/msfe-ng/wiki)** ·
+**[Admin guide](docs/admin-guide.md)** ·
 **[User guide](docs/user-guide.md)** · **[Migration guide](docs/migration.md)** ·
 **[Architecture](docs/architecture.md)**.
 
