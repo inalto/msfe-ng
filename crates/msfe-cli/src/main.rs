@@ -546,14 +546,17 @@ fn cmd_housekeeping() -> ExitCode {
 }
 
 /// Periodic queue monitor (cron, every 5 min): auto-clean the delivery queue
-/// per the queue_clean_* rules and send Telegram alerts for queue growth,
-/// stuck scanning and per-account sending bursts. `--dry-run` previews both.
+/// per the queue_clean_* rules, relocate misfiled spool files, and send
+/// Telegram alerts for queue growth, stuck scanning and per-account sending
+/// bursts. `--dry-run` previews everything.
 fn cmd_monitor(flag: Option<&str>) -> ExitCode {
     let cfg = Config::load(&config_path());
     let dry = flag == Some("--dry-run");
     let r = msfe_core::monitor::run(&cfg, dry);
     if r.notes.is_empty() {
-        println!("monitor: nothing to do (no cleanup rules or alerts configured)");
+        println!(
+            "monitor: nothing to do (spool files in place; no cleanup rules or alerts configured)"
+        );
     }
     for n in &r.notes {
         println!("{n}");
@@ -1148,7 +1151,7 @@ COMMANDS:
     selftest            Send GTUBE/EICAR/clean test mail through the MTA
     digest [--dry-run]  Email quarantine digests to digest-enabled domains
     housekeeping        Prune old mail-log rows (cleanmysql retention)
-    monitor [--dry-run] Auto-clean the delivery queue + send Telegram alerts (cron)
+    monitor [--dry-run] Auto-clean the delivery queue, fix misfiled spool files, send Telegram alerts (cron)
     exim <status|enable-scanning|disable-scanning>   Toggle MailScanner scanning
     service <status|start|stop|reload|restart|queue-fix|spool-repair>   MailScanner service & queues
     doctor              Check every link of the scanning chain; names each fix

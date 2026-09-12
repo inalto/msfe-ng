@@ -14,5 +14,8 @@ PATH=/usr/bin:/bin:/opt/msfe-ng/bin
 
 # Queue monitor: auto-clean the delivery queue per the queue_clean_* rules and
 # send Telegram alerts (queue growth, stuck scanning, sending bursts). All
-# rules ship disabled, so this is a no-op until configured in the WHM UI.
+# rules ship disabled, so this is a no-op until configured in the WHM UI —
+# except spool repair, which is always on: delivery-queue files MailScanner
+# filed in the wrong split subdirectory are moved where Exim looks (never
+# deleted) and the event is alerted.
 */5 * * * * root /opt/msfe-ng/bin/msfe-ng monitor >/dev/null 2>&1

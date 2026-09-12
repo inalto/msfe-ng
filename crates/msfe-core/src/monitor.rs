@@ -9,11 +9,18 @@
 //!    per-account outbound sending bursts (parsed from exim_mainlog `A=`
 //!    authentication tags). Each alert repeats no more often than
 //!    `alert_cooldown_mins`, tracked in the msfe_config kv table.
+//!
+//! Always on: **spool repair** — delivery-queue files MailScanner filed under
+//! the wrong split-spool subdirectory (its Exim message-id probe misreads
+//! Exim 4.100) are moved where Exim looks, so mail keeps flowing until the
+//! root cause is fixed; the move is reported as an alert since it needs a
+//! human (`msfe-ng doctor`). Never deletes anything.
 
 use crate::config::Config;
 use crate::{db, queueview, service, telegram};
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
 use std::process::Command;
 
 /// How much of the end of exim_mainlog is examined for the burst window.
@@ -21,6 +28,8 @@ const LOG_TAIL_BYTES: u64 = 8 * 1024 * 1024;
 
 pub struct MonitorReport {
     pub cleaned: usize,
+    /// Misfiled delivery-queue messages moved to the subdir Exim expects.
+    pub spool_repaired: usize,
     pub alerts_sent: usize,
     pub notes: Vec<String>,
 }
@@ -45,16 +54,20 @@ fn cooled_down(cfg: &Config, key: &str, now: u64) -> bool {
 /// One monitor pass. `dry` previews everything: rules select but nothing is
 /// removed, alerts print but nothing is sent.
 pub fn run(cfg: &Config, dry: bool) -> MonitorReport {
+    let (in_dir, out_dir) = service::queue_dirs(cfg);
+    run_with_dirs(cfg, dry, &in_dir, &out_dir)
+}
+
+fn run_with_dirs(cfg: &Config, dry: bool, in_dir: &Path, out_dir: &Path) -> MonitorReport {
     let mut notes = Vec::new();
     let mut cleaned = 0usize;
     let mut alerts: Vec<String> = Vec::new();
     let now = now_epoch();
-    let (in_dir, out_dir) = service::queue_dirs(cfg);
 
     // ---- 1. auto-clean (delivery queue ONLY) -------------------------------
     let criteria = queueview::CleanCriteria::from_config(cfg);
     if criteria.any_enabled() {
-        let listing = queueview::list_queue(&out_dir, 100_000);
+        let listing = queueview::list_queue(out_dir, 100_000);
         let ids = queueview::select_removals(&listing.msgs, &criteria);
         if ids.is_empty() {
             notes.push("auto-clean: no queued message matches the rules".into());
@@ -77,10 +90,37 @@ pub fn run(cfg: &Config, dry: bool) -> MonitorReport {
         }
     }
 
-    // ---- 2. alert checks ---------------------------------------------------
+    // ---- 2. spool repair (always on; never deletes) ------------------------
+    let spool_repaired = service::misplaced_spool(out_dir).len();
+    if spool_repaired > 0 {
+        let verb = if dry { "would relocate" } else { "relocated" };
+        let msg = format!(
+            "{verb} {spool_repaired} misfiled spool message(s) to the subdirectory Exim expects — MailScanner is misreading the Exim message-id format (run msfe-ng doctor; msfe-ng engine configure fixes it)"
+        );
+        notes.push(format!("spool repair: {msg}"));
+        match service::repair_spool(out_dir, dry) {
+            Ok(r) => {
+                notes.extend(r.actions.into_iter().map(|l| format!("  {l}")));
+                if r.flush_started {
+                    notes.push("  delivery run started".into());
+                }
+                // the files keep flowing every pass; the human only needs
+                // telling once per cooldown
+                if cooled_down(cfg, "alert_spoolfix", now) {
+                    alerts.push(msg);
+                    if !dry {
+                        let _ = db::kv_set(cfg, "alert_spoolfix", &now.to_string());
+                    }
+                }
+            }
+            Err(e) => alerts.push(format!("spool repair failed: {e}")),
+        }
+    }
+
+    // ---- 3. alert checks ---------------------------------------------------
     let tg = telegram::configured(cfg);
     if cfg.alert_queue_size > 0 {
-        let n = service::count_queue(&out_dir);
+        let n = service::count_queue(out_dir);
         if n >= cfg.alert_queue_size as usize && cooled_down(cfg, "alert_qsize", now) {
             alerts.push(format!(
                 "Delivery queue holds {n} messages (limit {}).",
@@ -91,8 +131,8 @@ pub fn run(cfg: &Config, dry: bool) -> MonitorReport {
             }
         }
     }
-    if cfg.alert_scan_stuck_mins > 0 && service::count_queue(&in_dir) > 0 {
-        if let Some(age) = service::oldest_queue_age(&in_dir) {
+    if cfg.alert_scan_stuck_mins > 0 && service::count_queue(in_dir) > 0 {
+        if let Some(age) = service::oldest_queue_age(in_dir) {
             if age >= cfg.alert_scan_stuck_mins as u64 * 60
                 && cooled_down(cfg, "alert_scanstuck", now)
             {
@@ -150,6 +190,7 @@ pub fn run(cfg: &Config, dry: bool) -> MonitorReport {
 
     MonitorReport {
         cleaned,
+        spool_repaired,
         alerts_sent,
         notes,
     }
@@ -254,6 +295,70 @@ mod tests {
         let later = count_auth_sends(LOG, "2026-07-28 09:30:00");
         assert_eq!(later.get("boss@corp.example"), None);
         assert_eq!(later.get("mule@hacked.example"), Some(&1));
+    }
+
+    /// A delivery-queue message filed under the wrong split subdir, aged past
+    /// the in-flight guard (files newer than a minute are never touched).
+    fn misfiled_message(out_dir: &std::path::Path, id: &str, wrong_sub: &str) {
+        let sub = out_dir.join(wrong_sub);
+        std::fs::create_dir_all(&sub).unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(600);
+        for suffix in ["H", "D"] {
+            let p = sub.join(format!("{id}-{suffix}"));
+            std::fs::write(&p, format!("{id}-{suffix}\n")).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&p)
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        }
+    }
+
+    // Safety net for a broken MailScanner message-id probe (Exim 4.100): the
+    // cron pass moves misfiled spool files where Exim looks and says so.
+    #[test]
+    fn monitor_relocates_misfiled_spool_files() {
+        std::env::set_var("MSFE_NG_SKIP_QUEUE_RUN", "1");
+        let base = std::env::temp_dir().join(format!("msfe-monitor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let in_dir = base.join("msqueue/input");
+        let out_dir = base.join("exim/input");
+        std::fs::create_dir_all(&in_dir).unwrap();
+        // 6th char 'V' → Exim reads input/V/; MailScanner filed it in input/0/
+        misfiled_message(&out_dir, "1wnE6V-00000004Oi2-3lJH", "0");
+        // correctly placed message must be left alone
+        misfiled_message(&out_dir, "1wnE6A-00000004Oi3-3lJH", "A");
+
+        let cfg = Config::default();
+        let r = run_with_dirs(&cfg, false, &in_dir, &out_dir);
+        assert_eq!(r.spool_repaired, 1);
+        assert!(out_dir.join("V/1wnE6V-00000004Oi2-3lJH-H").is_file());
+        assert!(out_dir.join("V/1wnE6V-00000004Oi2-3lJH-D").is_file());
+        assert!(!out_dir.join("0/1wnE6V-00000004Oi2-3lJH-H").exists());
+        assert!(out_dir.join("A/1wnE6A-00000004Oi3-3lJH-H").is_file());
+        // it is an alert-worthy event (root cause needs a human), even
+        // though nothing is configured to deliver it
+        assert!(
+            r.notes
+                .iter()
+                .any(|n| n.starts_with("alert:") && n.contains("misfiled")),
+            "{:?}",
+            r.notes
+        );
+
+        // dry run: reports, moves nothing
+        misfiled_message(&out_dir, "1wnE6B-00000004Oi4-3lJH", "0");
+        let r = run_with_dirs(&cfg, true, &in_dir, &out_dir);
+        assert_eq!(r.spool_repaired, 1);
+        assert!(out_dir.join("0/1wnE6B-00000004Oi4-3lJH-H").is_file());
+
+        // nothing misfiled → silent
+        std::fs::remove_dir_all(out_dir.join("0")).unwrap();
+        let r = run_with_dirs(&cfg, false, &in_dir, &out_dir);
+        assert_eq!(r.spool_repaired, 0);
+        assert!(!r.notes.iter().any(|n| n.contains("misfiled")));
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

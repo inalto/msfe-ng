@@ -7,6 +7,7 @@
 
 use crate::{db, engine, mailflow, mailscanner, migrate, service, setup, Config};
 use std::path::Path;
+use std::process::Command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
@@ -77,6 +78,25 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
         },
         "msfe-ng engine configure (or Service tab → Configure for Exim)",
     ));
+    // MailScanner decides long vs short Exim message ids from `Exim Command
+    // -bV` at startup with a naive numeric compare that misreads "4.100"
+    // (cPanel 138) as 4.1: outgoing spool files then land in the wrong split
+    // subdirectory and every quarantined/archived body is copied from the
+    // wrong offset. Run both the real binary and the configured probe and
+    // compare what each says.
+    if configured {
+        let probe_cmd = mailscanner::get_directive(&conf, "Exim Command").unwrap_or_default();
+        let real_bv = exim_bv("/usr/sbin/exim");
+        let probe_bv = exim_bv(probe_cmd);
+        let (ok, detail) = exim_probe_verdict(&real_bv, &probe_bv);
+        out.push(check(
+            "MailScanner reads the Exim message-id format",
+            ok,
+            Level::Fail,
+            detail,
+            "msfe-ng engine configure (points Exim Command at the msfe-ng-exim shim), then restart MailScanner and run msfe-ng service spool-repair",
+        ));
+    }
 
     let latch = service::engine_run_enabled();
     out.push(check(
@@ -506,6 +526,70 @@ fn dir_writable_by(meta_uid: u32, meta_gid: u32, mode: u32, uid: u32, gids: &[u3
     class & 0o3 == 0o3 // write + search
 }
 
+/// `<cmd> -bV` output, empty when the command cannot run or hangs.
+fn exim_bv(cmd: &str) -> String {
+    if cmd.is_empty() {
+        return String::new();
+    }
+    service::run_with_timeout(
+        Command::new(cmd).arg("-bV"),
+        std::time::Duration::from_secs(10),
+    )
+    .map(|o| o.stdout)
+    .unwrap_or_default()
+}
+
+/// Compare the real Exim version with what MailScanner's startup probe will
+/// conclude from the configured `Exim Command`. `(ok, detail)`.
+pub fn exim_probe_verdict(real_bv: &str, probe_bv: &str) -> (bool, String) {
+    let Some(real) = engine::exim_version(real_bv) else {
+        return (
+            false,
+            "cannot read the Exim version from /usr/sbin/exim -bV".into(),
+        );
+    };
+    let (major, minor) = real;
+    let want_long = engine::exim_long_ids(real);
+    let reads_long = engine::mailscanner_probe_long_ids(probe_bv);
+    let fmt = |long: bool| if long { "long" } else { "short" };
+    if want_long == reads_long {
+        let via = if probe_bv.contains("msfe-ng shim") {
+            " via the msfe-ng-exim shim"
+        } else {
+            ""
+        };
+        return (
+            true,
+            format!(
+                "Exim {major}.{minor}: MailScanner reads {} message ids{via}",
+                fmt(want_long)
+            ),
+        );
+    }
+    if probe_bv.trim().is_empty() {
+        return (
+            false,
+            format!(
+                "Exim {major}.{minor} writes {} ids but `Exim Command -bV` gives no output — MailScanner assumes short ids",
+                fmt(want_long)
+            ),
+        );
+    }
+    let token = probe_bv
+        .lines()
+        .next()
+        .and_then(|l| l.split(' ').nth(2))
+        .unwrap_or("?");
+    (
+        false,
+        format!(
+            "Exim {major}.{minor} writes {} ids but MailScanner's probe reads '{token}' as {} — outgoing spool files misfiled, quarantined bodies copied from the wrong offset",
+            fmt(want_long),
+            fmt(reads_long)
+        ),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,5 +607,37 @@ mod tests {
         assert!(!dir_writable_by(0, mail, 0o760, mailnull, &[mail]));
         // root can always write
         assert!(dir_writable_by(0, mail, 0o750, 0, &[]));
+    }
+
+    // Exim 4.100 (cPanel 138): MailScanner's `$ver >= 4.97` reads "4.100" as
+    // 4.1 and drops back to short message ids — the check must catch it.
+    #[test]
+    fn exim_probe_verdict_catches_the_4_100_misread() {
+        let real = "Exim version 4.100 #2 built 20-Aug-2026\n";
+        let (ok, detail) = exim_probe_verdict(real, real);
+        assert!(!ok);
+        assert!(
+            detail.contains("4.100") && detail.contains("4.1"),
+            "{detail}"
+        );
+
+        let shimmed = "Exim version 4.99 #2 built 20-Aug-2026 (msfe-ng shim: real 4.100)\n";
+        let (ok, detail) = exim_probe_verdict(real, shimmed);
+        assert!(ok, "{detail}");
+        assert!(detail.contains("long"), "{detail}");
+
+        // pre-4.100 versions read correctly with or without the shim
+        let v499 = "Exim version 4.99.2 #2 built\n";
+        assert!(exim_probe_verdict(v499, v499).0);
+        let v496 = "Exim version 4.96 #2 built\n";
+        assert!(exim_probe_verdict(v496, v496).0);
+
+        // probe command missing/broken → MailScanner sees short ids → fail
+        let (ok, detail) = exim_probe_verdict(real, "");
+        assert!(!ok);
+        assert!(detail.contains("no output"), "{detail}");
+
+        // real exim unreadable → cannot vouch → fail
+        assert!(!exim_probe_verdict("", shimmed).0);
     }
 }

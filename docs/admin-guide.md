@@ -57,6 +57,24 @@ Verify: `msfe-ng health` and **WHM → Plugins → MSFE-NG**.
 - **Scanning toggle** — `msfe-ng exim status | enable-scanning | disable-scanning`
   (uses `/etc/exiscandisable`).
 - **Self-test** — `msfe-ng selftest` sends GTUBE/EICAR/clean mail through the MTA.
+- **Doctor** — `msfe-ng doctor` checks every link of the chain and names the fix.
+- **Monitor** — `msfe-ng monitor` (cron, every 5 min) applies the queue
+  auto-clean rules, sends Telegram alerts, and always relocates delivery-queue
+  files that MailScanner filed in the wrong split-spool subdirectory (never
+  deletes). Preview with `--dry-run`.
+
+### Exim 4.100 and MailScanner's message-id probe
+
+MailScanner 5.5.3 decides whether Exim writes long message ids by running
+`Exim Command -bV` at startup and comparing the version with a plain numeric
+`>= 4.97` — which reads Exim **4.100** (shipped by cPanel 138) as 4.1. It then
+files every outgoing spool file under `input/0/` where Exim never looks, and
+copies quarantined/archived bodies from the wrong offset. MSFE-NG handles this
+without patching MailScanner: `engine configure` points `Exim Command` at
+`/opt/msfe-ng/bin/msfe-ng-exim`, a shim that only normalises that banner line;
+`msfe-ng doctor` fails "MailScanner reads the Exim message-id format" when the
+probe would go wrong; and the monitor cron keeps mail flowing meanwhile by
+moving misfiled files (`msfe-ng service spool-repair` does the same by hand).
 
 ## Backup / upgrade / uninstall
 

@@ -60,6 +60,7 @@ pub(crate) fn run_user_for(cfg: &Config) -> &'static str {
 pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
     let run_user = run_user_for(cfg);
     let (inc, out) = service::queue_dir_targets();
+    let exim_cmd = exim_command();
 
     let mut directives: Vec<(String, String)> = [
         ("MTA", "exim"),
@@ -70,8 +71,9 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
         // Without an explicit path, MailScanner 5.5.3's `which exim` fallback
         // leaves a trailing newline, its exim version probe silently fails,
         // and it assumes short message IDs — placing outgoing spool files in
-        // the wrong split subdirectory, where Exim never finds them.
-        ("Exim Command", "/usr/sbin/exim"),
+        // the wrong split subdirectory, where Exim never finds them. The same
+        // probe misreads "4.100" as 4.1, so it goes through our shim.
+        ("Exim Command", exim_cmd.as_str()),
         ("Incoming Work Group", "mail"),
         ("Incoming Work Permissions", "0640"),
         ("Quarantine Group", "mail"),
@@ -417,6 +419,69 @@ fn include_line(cfg: &Config) -> String {
     format!(".include_if_exists {}", cfg.mailscannerq_conf)
 }
 
+/// Where the installer puts the `Exim Command` shim (packaging/exim-shim.sh).
+pub const EXIM_SHIM: &str = "/opt/msfe-ng/bin/msfe-ng-exim";
+
+/// The value for MailScanner's `Exim Command`: our shim when installed, else
+/// the real binary. MailScanner uses it only to run `-bV` at startup and
+/// decide long vs short message ids with `(split / /, $out[0])[2] >= 4.97` —
+/// Perl reads "4.100" (Exim 4.100, cPanel 138) as 4.1, so with the real
+/// binary every outgoing spool file is misfiled and every quarantined body is
+/// copied from the wrong offset. The shim rewrites that banner line only.
+pub fn exim_command() -> String {
+    let shim = std::env::var("MSFE_NG_EXIM_SHIM").unwrap_or_else(|_| EXIM_SHIM.into());
+    if Path::new(&shim).is_file() {
+        shim
+    } else {
+        "/usr/sbin/exim".into()
+    }
+}
+
+/// `(major, minor)` from an `exim -bV` banner ("Exim version 4.100 #2 …").
+pub fn exim_version(bv_output: &str) -> Option<(u32, u32)> {
+    let first = bv_output.lines().next()?;
+    let mut words = first.split(' ');
+    if words.next()? != "Exim" || words.next()? != "version" {
+        return None;
+    }
+    let mut parts = words.next()?.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next().unwrap_or("0").parse().ok()?;
+    Some((major, minor))
+}
+
+/// Exim writes long message ids from 4.97.
+pub fn exim_long_ids(version: (u32, u32)) -> bool {
+    version >= (4, 97)
+}
+
+/// What MailScanner 5.5.3 concludes from this `Exim Command -bV` output —
+/// its exact Perl: `$ver = (split / /, $out[0])[2]; $ver >= 4.97`, where a
+/// string numifies to its leading decimal prefix ("4.100" → 4.1, junk → 0).
+pub fn mailscanner_probe_long_ids(bv_output: &str) -> bool {
+    let token = bv_output
+        .lines()
+        .next()
+        .and_then(|l| l.split(' ').nth(2))
+        .unwrap_or("");
+    perl_numify(token) >= 4.97
+}
+
+fn perl_numify(s: &str) -> f64 {
+    let s = s.trim_start();
+    let mut end = 0;
+    let mut seen_dot = false;
+    for (i, c) in s.char_indices() {
+        if c.is_ascii_digit() || (c == '.' && !seen_dot) {
+            seen_dot |= c == '.';
+            end = i + 1;
+        } else {
+            break;
+        }
+    }
+    s[..end].parse().unwrap_or(0.0)
+}
+
 /// Does cPanel's generated exim.conf use a split spool? Decides whether the
 /// named queue needs single-character subdirs and the `/*` glob.
 pub fn exim_split_spool() -> bool {
@@ -510,6 +575,7 @@ pub fn wire(cfg: &Config, dry: bool) -> io::Result<WireReport> {
     } else {
         input.display().to_string()
     };
+    let exim_cmd = exim_command();
     let directives = [
         ("Incoming Queue Dir", incoming.as_str()),
         ("Outgoing Queue Dir", &outgoing.display().to_string()),
@@ -518,7 +584,7 @@ pub fn wire(cfg: &Config, dry: bool) -> io::Result<WireReport> {
         ("Sendmail2", "/usr/sbin/exim"),
         // See configure(): required for MailScanner's long-message-ID
         // detection on Exim >= 4.97 (wrong split subdir otherwise).
-        ("Exim Command", "/usr/sbin/exim"),
+        ("Exim Command", exim_cmd.as_str()),
     ];
     let conf_path = Path::new(&cfg.mailscanner_conf);
     if let Ok(original) = std::fs::read_to_string(conf_path) {
@@ -670,6 +736,54 @@ mod tests {
 
     // Both tests mutate shared process env vars — serialize them.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    // MailScanner 5.5.3 (usr/sbin/MailScanner) probes `Exim Command -bV` and
+    // tests `(split / /, $out[0])[2] >= 4.97` — Perl numifies "4.100" to 4.1.
+    #[test]
+    fn exim_version_reads_the_bv_banner() {
+        assert_eq!(
+            exim_version("Exim version 4.100 #2 built 20-Aug-2026\nSupport for: TLS\n"),
+            Some((4, 100))
+        );
+        assert_eq!(exim_version("Exim version 4.98.2 #2 built"), Some((4, 98)));
+        assert_eq!(exim_version("Exim version 5.0 #1"), Some((5, 0)));
+        assert_eq!(exim_version(""), None);
+        assert_eq!(exim_version("exim: permission denied\n"), None);
+    }
+
+    #[test]
+    fn mailscanner_probe_mirrors_perls_numeric_read() {
+        // the trap: a real 4.100 reads as 4.1 < 4.97 → short ids
+        assert!(!mailscanner_probe_long_ids(
+            "Exim version 4.100 #2 built 20-Aug-2026"
+        ));
+        assert!(mailscanner_probe_long_ids("Exim version 4.99.2 #2 built"));
+        assert!(mailscanner_probe_long_ids("Exim version 4.97 #2 built"));
+        assert!(!mailscanner_probe_long_ids("Exim version 4.96 #2 built"));
+        // what the shim emits
+        assert!(mailscanner_probe_long_ids(
+            "Exim version 4.99 #2 built 20-Aug-2026 (msfe-ng shim: real 4.100)"
+        ));
+        // empty/garbage output: `$ver` undef → 0 >= 4.97 is false
+        assert!(!mailscanner_probe_long_ids(""));
+        assert!(!mailscanner_probe_long_ids("Something unexpected"));
+    }
+
+    #[test]
+    fn exim_command_prefers_the_installed_shim() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("msfe-eximcmd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let shim = base.join("msfe-ng-exim");
+        std::env::set_var("MSFE_NG_EXIM_SHIM", &shim);
+        // not installed yet → the real binary
+        assert_eq!(exim_command(), "/usr/sbin/exim");
+        std::fs::write(&shim, "#!/bin/sh\n").unwrap();
+        assert_eq!(exim_command(), shim.display().to_string());
+        std::env::remove_var("MSFE_NG_EXIM_SHIM");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 
     #[test]
     fn parses_localsocket_from_clamd_conf() {
@@ -836,6 +950,9 @@ mod tests {
         std::env::set_var("MSFE_NG_INCOMING_QUEUE", &inc);
         std::env::set_var("MSFE_NG_OUTGOING_QUEUE", &out);
         std::env::set_var("MSFE_NG_MS_WORK_DIR", base.join("work"));
+        let shim = base.join("msfe-ng-exim");
+        std::fs::write(&shim, "#!/bin/sh\n").unwrap();
+        std::env::set_var("MSFE_NG_EXIM_SHIM", &shim);
 
         let cfg = Config {
             panel: "cpanel".into(),
@@ -846,6 +963,11 @@ mod tests {
         let r = configure(&cfg).unwrap();
         let text = std::fs::read_to_string(&conf).unwrap();
         assert_eq!(mailscanner::get_directive(&text, "MTA"), Some("exim"));
+        // the version probe goes through our shim (Exim 4.100 banner fix)
+        assert_eq!(
+            mailscanner::get_directive(&text, "Exim Command"),
+            Some(shim.display().to_string().as_str())
+        );
         assert_eq!(
             mailscanner::get_directive(&text, "Run As User"),
             Some("mailnull")
@@ -869,6 +991,7 @@ mod tests {
         std::env::remove_var("MSFE_NG_INCOMING_QUEUE");
         std::env::remove_var("MSFE_NG_OUTGOING_QUEUE");
         std::env::remove_var("MSFE_NG_MS_WORK_DIR");
+        std::env::remove_var("MSFE_NG_EXIM_SHIM");
         std::fs::remove_dir_all(&base).unwrap();
     }
 }

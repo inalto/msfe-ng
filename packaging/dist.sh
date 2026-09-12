@@ -27,7 +27,8 @@ cp -r web panel db packaging "$OUT/"
 # Ship only the compiled web assets — the Tailwind build tooling stays out of
 # the tarball (the committed whm/app.css + user/app.css are what get served).
 rm -rf "$OUT/web/node_modules" "$OUT/web/src" "$OUT/web/package.json" \
-       "$OUT/web/package-lock.json" "$OUT/web/tailwind.config.js" "$OUT/web/.gitignore"
+       "$OUT/web/package-lock.json" "$OUT/web/tailwind.config.js" "$OUT/web/.gitignore" \
+       "$OUT/packaging/tests"
 cp LICENSE README.md "$OUT/" 2>/dev/null || true
 echo "$VER" > "$OUT/VERSION"
 

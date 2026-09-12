@@ -60,6 +60,10 @@ install -m 0755 "$BINSRC/msfe-ng"  "$BINDIR/msfe-ng"
 ln -sf "$BINDIR/msfe-ng" /usr/local/bin/msfe-ng
 # engine installer kept on disk so `msfe-ng engine install` works post-install
 install -m 0755 "$HERE/engine-install.sh" "$BINDIR/msfe-ng-engine-install"
+# `Exim Command` shim: MailScanner 5.5.3 misreads Exim 4.100's version banner
+# (cPanel 138) and misfiles every outgoing spool file; `engine configure`
+# points MailScanner.conf here (see exim-shim.sh).
+install -m 0755 "$HERE/exim-shim.sh" "$BINDIR/msfe-ng-exim"
 cp -a "$REPO/web/." "$WEBROOT/"
 # M1: SQL migrations and the MailScanner logging plugin
 install -m 0644 "$REPO"/db/migrations/*.sql "$PREFIX/db/migrations/"

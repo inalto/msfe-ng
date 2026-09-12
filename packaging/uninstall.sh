@@ -65,6 +65,12 @@ if [ -x "$BINDIR/msfe-ng" ]; then
     info "disabling MailScanner logging (if enabled)"
     "$BINDIR/msfe-ng" mailscanner disable-logging >/dev/null 2>&1 || true
 fi
+# MailScanner's `Exim Command` must not point at the shim we are removing
+# (MailScanner would then silently assume short message ids).
+if grep -q "^Exim Command = $BINDIR/msfe-ng-exim" /etc/MailScanner/MailScanner.conf 2>/dev/null; then
+    sed -i "s|^Exim Command = $BINDIR/msfe-ng-exim.*|Exim Command = /usr/sbin/exim|" /etc/MailScanner/MailScanner.conf \
+        && info "restored MailScanner 'Exim Command' to /usr/sbin/exim"
+fi
 
 # ---- core files --------------------------------------------------------------
 info "removing core files"
