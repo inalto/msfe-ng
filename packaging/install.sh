@@ -155,7 +155,6 @@ cpanel_install() {
     mkdir -p "$CP_WHM_CGI_DIR" "$CP_JUP_DIR" "$CP_HOOK_DIR" "$(dirname "$CP_UAPI")" "$(dirname "$CP_DYNUI")"
     install -m 0700 "$REPO/panel/cpanel/whm/msfe-ng.cgi" "$CP_WHM_CGI_DIR/msfe-ng.cgi"
     install -m 0644 "$REPO/panel/cpanel/msfe-ng.png"     "$CP_WHM_CGI_DIR/msfe-ng.png"
-    install -m 0644 "$REPO/panel/cpanel/msfe-ng.conf"    "$CP_APPCONF"
     install -m 0644 "$REPO/panel/cpanel/uapi/MSFE_NG.pm" "$CP_UAPI"
     install -m 0755 "$REPO/panel/cpanel/jupiter/msfe-ng.live.cgi" "$CP_JUP_DIR/msfe-ng.live.cgi"
     install -m 0644 "$REPO/panel/cpanel/jupiter/install.json"  "$CP_JUP_DIR/install.json"
@@ -164,7 +163,11 @@ cpanel_install() {
     install -m 0644 "$REPO/panel/hooks/UpcpHook.pm"      "$CP_HOOK_DIR/UpcpHook.pm"
     install -m 0644 "$REPO/panel/hooks/EximHook.pm"      "$CP_HOOK_DIR/EximHook.pm"
 
-    /usr/local/cpanel/bin/register_appconfig "$CP_APPCONF" || warn "register_appconfig failed"
+    # register_appconfig keeps its own copy at $CP_APPCONF; never place a second
+    # descriptor in /var/cpanel/apps (installers < 0.0.39 did, and the leftover
+    # kept the plugin in the WHM menu after uninstall).
+    rm -f "$CP_APPCONF_LEGACY"
+    /usr/local/cpanel/bin/register_appconfig "$REPO/panel/cpanel/msfe-ng.conf" || warn "register_appconfig failed"
     /usr/local/cpanel/bin/manage_hooks add module MSFE_NG::UpcpHook || warn "manage_hooks add MSFE_NG::UpcpHook failed"
     /usr/local/cpanel/bin/manage_hooks add module MSFE_NG::EximHook || warn "manage_hooks add MSFE_NG::EximHook failed"
     [ -x /usr/local/cpanel/scripts/rebuild_sprites ] && /usr/local/cpanel/scripts/rebuild_sprites jupiter || true

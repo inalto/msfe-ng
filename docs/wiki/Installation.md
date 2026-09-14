@@ -61,3 +61,12 @@ msfe-ng restore /root/msfe-ng-backup.tar.gz
 Uninstall unhooks the logging plugin, deregisters the plugin and removes all
 MSFE-NG files. It never drops the database — it prints the `DROP DATABASE`
 command for you to run if you want the mail log gone.
+
+If a server was uninstalled with a release older than 0.0.39 and WHM still
+shows *Plugins → MailscannerNG*, the menu cache was rebuilt before the last
+descriptor was removed. Refresh it once:
+
+```sh
+rm -f /var/cpanel/apps/msfe-ng.conf /var/cpanel/apps/msfe_ng.conf
+/usr/local/cpanel/bin/refresh_plugin_cache && /usr/local/cpanel/scripts/rebuild_whm_chrome
+```

@@ -28,6 +28,11 @@ cpanel_uninstall() {
     info "deregistering cPanel plugin"
     /usr/local/cpanel/bin/manage_hooks delete module MSFE_NG::UpcpHook 2>/dev/null || true
     /usr/local/cpanel/bin/manage_hooks delete module MSFE_NG::EximHook 2>/dev/null || true
+    # The WHM Plugins menu is rendered from /var/cpanel/pluginscache.yaml, which
+    # unregister_appconfig rebuilds from whatever is still in /var/cpanel/apps.
+    # Any stray descriptor must go BEFORE that call or the plugin is written
+    # straight back into the cache (installers < 0.0.39 left a second copy).
+    rm -f "$CP_APPCONF_LEGACY"
     if [ -x /usr/local/cpanel/bin/unregister_appconfig ]; then
         /usr/local/cpanel/bin/unregister_appconfig msfe_ng 2>/dev/null || true
     fi
@@ -35,6 +40,12 @@ cpanel_uninstall() {
     rm -f "$CP_APPCONF"
     rm -rf "$CP_WHM_CGI_DIR" "$CP_JUP_DIR" "$CP_HOOK_DIR"
     rm -f  "$CP_UAPI" "$CP_DYNUI"
+    # unregister_appconfig skips the cache rebuild when its conf was already
+    # gone; never let the menu entry outlive the files.
+    if grep -q 'msfe-ng' /var/cpanel/pluginscache.yaml 2>/dev/null; then
+        [ -x /usr/local/cpanel/bin/refresh_plugin_cache ] && /usr/local/cpanel/bin/refresh_plugin_cache >/dev/null 2>&1 || true
+        [ -x /usr/local/cpanel/scripts/rebuild_whm_chrome ] && /usr/local/cpanel/scripts/rebuild_whm_chrome >/dev/null 2>&1 || true
+    fi
     [ -x /usr/local/cpanel/scripts/rebuild_sprites ] && /usr/local/cpanel/scripts/rebuild_sprites jupiter || true
     ok "cPanel plugin removed"
 }
@@ -51,7 +62,7 @@ case "$panel" in
     cpanel)      cpanel_uninstall ;;
     directadmin) da_uninstall ;;
     none)
-        if [ -e "$CP_APPCONF" ] || [ -d "$CP_JUP_DIR" ] || [ -d "$CP_HOOK_DIR" ]; then
+        if [ -e "$CP_APPCONF" ] || [ -e "$CP_APPCONF_LEGACY" ] || [ -d "$CP_JUP_DIR" ] || [ -d "$CP_HOOK_DIR" ]; then
             cpanel_uninstall
         fi
         if [ -d "$DA_PLUGIN_DIR" ]; then

@@ -16,7 +16,8 @@ MANIFEST="$CONFDIR/install.manifest"
 
 # ----- cPanel paths -----------------------------------------------------------
 CP_MARKER="/usr/local/cpanel/version"
-CP_APPCONF="/var/cpanel/apps/msfe-ng.conf"
+CP_APPCONF="/var/cpanel/apps/msfe_ng.conf"          # written by register_appconfig (name=msfe_ng)
+CP_APPCONF_LEGACY="/var/cpanel/apps/msfe-ng.conf"   # second copy left by installers < 0.0.39
 CP_WHM_CGI_DIR="/usr/local/cpanel/whostmgr/docroot/cgi/msfe-ng"
 CP_UAPI="/usr/local/cpanel/Cpanel/API/MSFE_NG.pm"
 CP_JUP_DIR="/usr/local/cpanel/base/frontend/jupiter/msfe_ng"
