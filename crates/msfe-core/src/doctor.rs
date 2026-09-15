@@ -910,9 +910,57 @@ pub fn dnsbl_verdict(
     (false, detail.join("; "), fix.join(". "))
 }
 
+/// How long one round of list probes stands: the UI's health poll runs the
+/// doctor every minute, the lists need not hear from us that often.
+pub const DNSBL_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+#[derive(Default)]
+pub struct DnsblCache {
+    at: Option<std::time::Instant>,
+    results: Vec<(String, ListState)>,
+}
+
+impl DnsblCache {
+    pub fn stale(&self, now: std::time::Instant) -> bool {
+        match self.at {
+            None => true,
+            Some(t) => now.saturating_duration_since(t) > DNSBL_CACHE_TTL,
+        }
+    }
+    /// Store a fresh round; true when the verdict differs from the last one
+    /// (a first round counts as a change).
+    pub fn store(&mut self, results: Vec<(String, ListState)>, now: std::time::Instant) -> bool {
+        let changed = self.at.is_none() || self.results != results;
+        self.at = Some(now);
+        self.results = results;
+        changed
+    }
+    pub fn results(&self) -> Vec<(String, ListState)> {
+        self.results.clone()
+    }
+}
+
+static DNSBL_CACHE: std::sync::Mutex<Option<DnsblCache>> = std::sync::Mutex::new(None);
+
 fn dnsbl_check(ms_conf: &str, conf_path: &Path) -> Check {
-    let probes = dnsbl_probes(ms_conf, conf_path);
-    let results = dnsbl_results(&probes);
+    let now = std::time::Instant::now();
+    let mut guard = DNSBL_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let cache = guard.get_or_insert_with(DnsblCache::default);
+    if cache.stale(now) {
+        let probes = dnsbl_probes(ms_conf, conf_path);
+        let fresh = dnsbl_results(&probes);
+        if cache.store(fresh, now) {
+            // journal trail for a verdict that comes and goes
+            let line: Vec<String> = cache
+                .results()
+                .iter()
+                .map(|(n, s)| format!("{n}={s:?}"))
+                .collect();
+            eprintln!("doctor: DNS blocklists: {}", line.join(" "));
+        }
+    }
+    let results = cache.results();
+    drop(guard);
     let results: Vec<(&str, ListState)> = results
         .iter()
         .map(|(n, s)| (n.as_str(), s.clone()))
@@ -1208,6 +1256,25 @@ mod tests {
             "SELECT COALESCE(SUM(spamreport LIKE '%too large%' AND size > 2000000),0), COUNT(*) \
              FROM maillog WHERE msg_ts >= (NOW() - INTERVAL 30 DAY)"
         );
+    }
+
+    // The health poll runs the doctor every minute: the lists are asked at
+    // most once per TTL, and a changed verdict is what gets logged.
+    #[test]
+    fn dnsbl_cache_serves_within_ttl_and_reports_changes() {
+        use std::time::{Duration, Instant};
+        let mut c = DnsblCache::default();
+        let a = vec![("zen".to_string(), ListState::Ok)];
+        let b = vec![("zen".to_string(), ListState::NoAnswer)];
+        let t0 = Instant::now();
+        assert!(c.stale(t0));
+        assert!(c.store(a.clone(), t0), "first result is a change");
+        assert!(!c.stale(t0 + Duration::from_secs(60)));
+        assert!(c.stale(t0 + DNSBL_CACHE_TTL + Duration::from_secs(1)));
+        assert_eq!(c.results(), a);
+        assert!(!c.store(a.clone(), t0), "same verdict, nothing to log");
+        assert!(c.store(b.clone(), t0), "verdict changed");
+        assert_eq!(c.results(), b);
     }
 
     // The scanning children ran with no Bayes DB for months while the UI

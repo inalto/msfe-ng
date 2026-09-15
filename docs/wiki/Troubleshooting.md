@@ -101,7 +101,9 @@ scores without its most valuable lists, silently. The doctor check *DNS
 blocklists answering* asks each list (Spamhaus ZEN and DBL, DNSWL, URIBL, and
 every entry of MailScanner's `Spam List`) for its documented test record
 through the system resolver and reports which ones refuse or never answer,
-plus the resolver in use when it is not on loopback.
+plus the resolver in use when it is not on loopback. The lists are probed at
+most every ten minutes; each change of verdict is logged by the daemon
+(`journalctl -u msfe-ng | grep 'DNS blocklists'`).
 
 The fix is a private recursive resolver on the server itself. On cPanel the
 port is held by PowerDNS (authoritative), so bind it to the public addresses
@@ -118,9 +120,11 @@ echo "local-address=<public IPv4>, <public IPv6>" >> /etc/pdns/pdns.conf
 #   access-control: 127.0.0.0/8 allow
 #   access-control: ::1 allow
 systemctl enable --now unbound
-# /etc/resolv.conf: nameserver 127.0.0.1 first, the provider's as fallback;
-# with network-scripts set PEERDNS=no and DNS1=127.0.0.1 in ifcfg-eth0 so
-# dhclient does not write it back.
+# /etc/resolv.conf: nameserver 127.0.0.1 ONLY — do not keep the provider's
+# resolver as a fallback: glibc and SpamAssassin switch to it on any error
+# and the lists' refusal codes come back. With network-scripts set
+# PEERDNS=no and DNS1=127.0.0.1 in ifcfg-eth0 so dhclient does not write it
+# back; give unbound Restart=on-failure.
 dig +short 2.0.0.127.zen.spamhaus.org   # expect 127.0.0.2/4/10, not 127.255.255.254
 ```
 
