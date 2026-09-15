@@ -6,8 +6,38 @@
 //! rule/score component rows the full-email view shows.
 
 use crate::service::ControlOutcome;
+use crate::{engine, mailscanner, Config};
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
+
+/// The Bayes DB MailScanner scans with: `<SpamAssassin User State Dir>/bayes`
+/// from MailScanner.conf, or `None` when no state dir is set (sa-learn's own
+/// default then — root's `~/.spamassassin`, which the scanning children never
+/// see; `engine configure` sets the directive).
+pub fn bayes_dbpath(cfg: &Config) -> Option<PathBuf> {
+    let conf = std::fs::read_to_string(&cfg.mailscanner_conf).ok()?;
+    let dir = mailscanner::get_directive(&conf, "SpamAssassin User State Dir")?;
+    let dir = dir.trim();
+    (!dir.is_empty()).then(|| PathBuf::from(dir).join("bayes"))
+}
+
+/// `--dbpath <db>` for every sa-learn run, when a shared DB is configured.
+fn dbpath_args(cfg: &Config) -> Vec<String> {
+    bayes_dbpath(cfg)
+        .map(|p| vec!["--dbpath".to_string(), p.display().to_string()])
+        .unwrap_or_default()
+}
+
+/// Files sa-learn creates run as root; hand them to the run-as user so the
+/// scanning children can read (and auto-learn into) the DB.
+fn own_bayes_db(cfg: &Config) {
+    if let Some(db) = bayes_dbpath(cfg) {
+        if let Some(dir) = db.parent() {
+            engine::chown_state_dir(cfg, dir);
+        }
+    }
+}
 
 /// A parsed spam-report component: rule name, score, optional description.
 pub struct Component {
@@ -123,8 +153,9 @@ fn extract_helo(s: &str) -> Option<String> {
 
 /// Bayes training / reporting on a raw message. Actions:
 /// `ham` | `spam` | `forget` (sa-learn) and `report` (network report + learn).
-pub fn learn(message: &[u8], action: &str) -> ControlOutcome {
+pub fn learn(cfg: &Config, message: &[u8], action: &str) -> ControlOutcome {
     let mut transcript = Vec::new();
+    let dbpath = dbpath_args(cfg);
     let steps: &[(&str, &[&str])] = match action {
         "ham" => &[("sa-learn", &["--ham", "--no-sync"])],
         "spam" => &[("sa-learn", &["--spam", "--no-sync"])],
@@ -143,8 +174,12 @@ pub fn learn(message: &[u8], action: &str) -> ControlOutcome {
     };
     let mut ok = true;
     for (cmd, args) in steps {
+        let mut args: Vec<&str> = args.to_vec();
+        if *cmd == "sa-learn" {
+            args.extend(dbpath.iter().map(String::as_str));
+        }
         transcript.push(format!("$ {cmd} {}", args.join(" ")));
-        match run_with_stdin(cmd, args, message) {
+        match run_with_stdin(cmd, &args, message) {
             Ok((success, output)) => {
                 for l in output.lines() {
                     if !l.trim().is_empty() {
@@ -166,16 +201,23 @@ pub fn learn(message: &[u8], action: &str) -> ControlOutcome {
     }
     if ok {
         // one sync after training so the bayes db is written
-        let _ = Command::new("sa-learn").arg("--sync").output();
+        let _ = Command::new("sa-learn")
+            .arg("--sync")
+            .args(&dbpath)
+            .output();
     }
+    own_bayes_db(cfg);
     ControlOutcome { ok, transcript }
 }
 
 /// SpamAssassin's Bayes database status (`sa-learn --dump magic`), parsed into
 /// the handful of numbers that matter: how much ham/spam it has learned, token
 /// count, and when it last expired old tokens.
-pub fn bayes_status() -> Vec<(String, String)> {
-    let out = Command::new("sa-learn").args(["--dump", "magic"]).output();
+pub fn bayes_status(cfg: &Config) -> Vec<(String, String)> {
+    let out = Command::new("sa-learn")
+        .args(["--dump", "magic"])
+        .args(dbpath_args(cfg))
+        .output();
     let Ok(o) = out else {
         return vec![("error".into(), "sa-learn is not installed".into())];
     };
@@ -259,9 +301,13 @@ pub fn lint() -> (bool, String) {
 
 /// Run a `sa-learn` maintenance command and capture its combined output as a
 /// transcript, mirroring `learn`'s shape so the UI renders both the same way.
-fn sa_learn(args: &[&str]) -> ControlOutcome {
+fn sa_learn(cfg: &Config, args: &[&str]) -> ControlOutcome {
+    let mut args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    args.extend(dbpath_args(cfg));
     let mut transcript = vec![format!("$ sa-learn {}", args.join(" "))];
-    match Command::new("sa-learn").args(args).output() {
+    let out = Command::new("sa-learn").args(&args).output();
+    own_bayes_db(cfg);
+    match out {
         Ok(o) => {
             let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
             s.push_str(&String::from_utf8_lossy(&o.stderr));
@@ -292,15 +338,15 @@ fn sa_learn(args: &[&str]) -> ControlOutcome {
 
 /// Repair the Bayes database: expire old tokens and sync to disk. Non-destructive
 /// — it prunes and rebalances what's learned without discarding training.
-pub fn bayes_repair() -> ControlOutcome {
-    sa_learn(&["--force-expire", "--sync"])
+pub fn bayes_repair(cfg: &Config) -> ControlOutcome {
+    sa_learn(cfg, &["--force-expire", "--sync"])
 }
 
 /// Wipe the Bayes database entirely (`sa-learn --clear`). Destructive: all ham/
 /// spam training is discarded and Bayes starts over. Callers back up first and
 /// confirm.
-pub fn bayes_reset() -> ControlOutcome {
-    sa_learn(&["--clear"])
+pub fn bayes_reset(cfg: &Config) -> ControlOutcome {
+    sa_learn(cfg, &["--clear"])
 }
 
 fn run_with_stdin(cmd: &str, args: &[&str], input: &[u8]) -> std::io::Result<(bool, String)> {
@@ -320,6 +366,7 @@ fn run_with_stdin(cmd: &str, args: &[&str], input: &[u8]) -> std::io::Result<(bo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Config;
 
     #[test]
     fn parses_report_components() {
@@ -352,6 +399,55 @@ mod tests {
 
     #[test]
     fn rejects_bad_learn_action() {
-        assert!(!learn(b"x", "delete-everything").ok);
+        assert!(!learn(&Config::default(), b"x", "delete-everything").ok);
+    }
+
+    fn cfg_with_state_dir(dir: &str) -> (Config, std::path::PathBuf) {
+        let conf =
+            std::env::temp_dir().join(format!("msfe-sa-{}-{}.conf", std::process::id(), dir.len()));
+        std::fs::write(
+            &conf,
+            format!("Run As User = mailnull\nSpamAssassin User State Dir = {dir}\n"),
+        )
+        .unwrap();
+        (
+            Config {
+                mailscanner_conf: conf.display().to_string(),
+                ..Default::default()
+            },
+            conf,
+        )
+    }
+
+    // Training as root went into /root/.spamassassin — a DB the scanning
+    // children (mailnull) never read. Every sa-learn must target the DB
+    // MailScanner is configured to use.
+    #[test]
+    fn sa_learn_targets_mailscanners_bayes_db() {
+        let (cfg, conf) = cfg_with_state_dir("/var/spool/MailScanner/spamassassin");
+        assert_eq!(
+            bayes_dbpath(&cfg),
+            Some("/var/spool/MailScanner/spamassassin/bayes".into())
+        );
+        let out = learn(&cfg, b"From: a\n\nx\n", "spam");
+        assert_eq!(
+            out.transcript[0],
+            "$ sa-learn --spam --no-sync --dbpath /var/spool/MailScanner/spamassassin/bayes"
+        );
+        let out = bayes_repair(&cfg);
+        assert_eq!(
+            out.transcript[0],
+            "$ sa-learn --force-expire --sync --dbpath /var/spool/MailScanner/spamassassin/bayes"
+        );
+        std::fs::remove_file(conf).unwrap();
+    }
+
+    #[test]
+    fn sa_learn_uses_the_default_db_when_no_state_dir_is_set() {
+        let (cfg, conf) = cfg_with_state_dir("");
+        assert_eq!(bayes_dbpath(&cfg), None);
+        let out = learn(&cfg, b"x", "ham");
+        assert_eq!(out.transcript[0], "$ sa-learn --ham --no-sync");
+        std::fs::remove_file(conf).unwrap();
     }
 }

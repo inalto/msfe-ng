@@ -674,6 +674,9 @@ fn cmd_engine(sub: Option<&str>) -> ExitCode {
                     for p in &r.repaired {
                         println!("repaired: {p}");
                     }
+                    for w in &r.warnings {
+                        println!("WARNING: {w}");
+                    }
                     if r.restarted {
                         println!("restarted MailScanner to apply the changes");
                     }
@@ -1044,9 +1047,9 @@ fn cmd_db(sub: Option<&str>) -> ExitCode {
                 }
             }
             let out = if a == "bayes-repair" {
-                sa::bayes_repair()
+                sa::bayes_repair(&cfg)
             } else {
-                sa::bayes_reset()
+                sa::bayes_reset(&cfg)
             };
             for l in &out.transcript {
                 println!("{l}");

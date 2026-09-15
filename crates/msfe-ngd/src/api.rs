@@ -65,7 +65,7 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             Response::json(200, &Json::Object(obj).to_string())
         }
         ("GET", "/api/sa/bayes") => {
-            let rows: Vec<Json> = msfe_core::sa::bayes_status()
+            let rows: Vec<Json> = msfe_core::sa::bayes_status(cfg)
                 .into_iter()
                 .map(|(k, v)| {
                     Json::Object(vec![
@@ -340,7 +340,7 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                     r#"{"error":"Bayes training needs the message body, which is no longer available (see the body retention setting)"}"#,
                 );
             };
-            let o = msfe_core::sa::learn(&bytes, &action);
+            let o = msfe_core::sa::learn(cfg, &bytes, &action);
             // reflect the correction in the database when enabled
             if o.ok && cfg.learn_updates_db {
                 match action.as_str() {
@@ -515,14 +515,14 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                 .to_string(),
             )
         }
-        ("POST", "/api/db/bayes-repair") => outcome_json(msfe_core::sa::bayes_repair()),
+        ("POST", "/api/db/bayes-repair") => outcome_json(msfe_core::sa::bayes_repair(cfg)),
         ("POST", "/api/db/bayes-reset") => {
             // destructive: snapshot the SQL side first (Bayes lives outside the
             // DB, but a backup gives a recovery point for the whole operation)
             let backup = msfe_core::dbtools::backup(cfg)
                 .map(|p| p.display().to_string())
                 .unwrap_or_default();
-            let mut out = msfe_core::sa::bayes_reset();
+            let mut out = msfe_core::sa::bayes_reset(cfg);
             if !backup.is_empty() {
                 out.transcript
                     .insert(0, format!("backed up database to {backup}"));
@@ -624,6 +624,7 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                         ("chown_failed".into(), arr(&r.chown_failed)),
                         ("restarted".into(), Json::Bool(r.restarted)),
                         ("repaired".into(), arr(&r.repaired)),
+                        ("warnings".into(), arr(&r.warnings)),
                     ])
                     .to_string(),
                 )

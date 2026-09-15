@@ -50,7 +50,8 @@ be trusted) and the full **headers**.
 
 **Actions** (also need the stored copy):
 - **Learn as ham / spam / spam & report / Forget** — trains SpamAssassin's Bayes
-  filter (*report* also submits to Razor/Pyzor/DCC). With "Reclassify the
+  filter (*report* also submits to Razor/Pyzor — see Troubleshooting for the
+  one-time setup `engine configure` does). With "Reclassify the
   database" on, the log entry's spam flag follows.
 - **Release (resend)** — to the original recipients. **Release (forward)** —
   to the address typed in the box. **Deliver to INBOX** — straight into a local

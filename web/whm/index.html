@@ -1048,6 +1048,7 @@ async function renderService(){
       const n=(r.set||[]).length+(r.created||[]).length+(r.repaired||[]).length;
       toast(n?`Configured (${(r.set||[]).length} settings, ${(r.created||[]).length} directories, ${(r.repaired||[]).length} repairs) — now run the health check`:'Already configured — nothing to change');
       if((r.chown_failed||[]).length)toast('Warning: ownership not set on '+r.chown_failed.join(', '));
+      for(const w of (r.warnings||[]))toast('Warning: '+w);
     } else toast(r.error||'configure failed');
     refreshStatus();
   };

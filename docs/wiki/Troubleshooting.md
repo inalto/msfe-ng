@@ -65,6 +65,32 @@ MailScanner package upgrade reverts the patch, which the next `engine
 configure` reapplies. Set `ms_cron_ps=0` in `/etc/MailScanner/defaults` to turn
 the daily update off instead — the doctor then reports the check as OK.
 
+## Spam report: `razor2 report failed: ... report requires authentication`
+
+`spamassassin -r` (the *spam & report* action) submits the message to Razor
+and Pyzor. Razor only accepts reports from a registered identity, and
+SpamAssassin's Bayes DB and the Razor/Pyzor client state all live in the
+*home directory of whoever runs them* — a problem on cPanel, where
+MailScanner's scanning children run as `mailnull` but inherit root's `HOME`,
+which they cannot read. The symptoms: `BAYES_*` and `PYZOR_CHECK` never fire
+under MailScanner, training from the UI goes into root's `~/.spamassassin`
+(a DB MailScanner never opens), and reports fail as above.
+
+*Configure for Exim* (`msfe-ng engine configure`, also run on every upgrade)
+sets it up the way MailScanner documents it:
+
+- `SpamAssassin User State Dir = /var/spool/MailScanner/spamassassin`, owned by
+  the scan user — the one Bayes DB that MailScanner scans with and every UI
+  learn action trains (`sa-learn --dbpath` on that DB).
+- Shared, world-readable `.razor` and `.pyzor` homes under
+  `/etc/mail/spamassassin`, referenced from `spamassassin.conf` via
+  `razor_config` and `pyzor_options --homedir` (managed block, backup kept).
+  `razor-admin -register` runs once to create the reporting identity.
+
+The doctor checks *Bayes DB shared with MailScanner*, *Razor reporting
+identity* and *Pyzor shared home* warn when any piece is missing. DCC is
+not set up: it is not open source and not packaged for EL.
+
 ## Quarantine writes fail / gaps in the date directories
 
 The quarantine must be owned by the user MailScanner runs as. *Configure for

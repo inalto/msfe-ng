@@ -14,6 +14,7 @@
 use crate::{mailscanner, service, Config};
 use std::io;
 use std::path::Path;
+use std::process::Command;
 
 /// Force MailScanner to spam-check every domain by setting the global
 /// `Spam Checks = yes` directive in MailScanner.conf. This is the authoritative
@@ -47,6 +48,9 @@ pub struct ConfigureReport {
     /// Phishing-list updater repairs: the script patched in place, junk
     /// downloads removed (never a reason to restart).
     pub repaired: Vec<String>,
+    /// Non-fatal problems setting up the shared network-check homes (razor
+    /// registration needs razor-admin and the network).
+    pub warnings: Vec<String>,
 }
 
 /// The user MailScanner's scanning children run as on this panel.
@@ -85,6 +89,14 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
     .into_iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect();
+    // The scanning children run as the run-as user but inherit root's HOME,
+    // which they cannot read: with no state dir of their own SpamAssassin has
+    // no Bayes DB at all, and what the UI trains (as root) never reaches them.
+    let sa_state = sa_state_dir();
+    directives.push((
+        "SpamAssassin User State Dir".into(),
+        sa_state.display().to_string(),
+    ));
     // When the Exim wiring is active, the queue dirs belong to it: re-assert
     // the named-queue values instead of resetting them to the unwired defaults
     // (which would leave MailScanner watching an empty directory while the
@@ -167,6 +179,23 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
         }
     }
 
+    // Shared razor/pyzor homes for the network checks: readable by everyone
+    // (the scanning children, cPanel's per-user spamd), written by root, and
+    // the one place a razor reporting identity lives.
+    let mut warnings = Vec::new();
+    let site = sa_site_rules_dir(&text);
+    let sa_conf = conf_path.with_file_name("spamassassin.conf");
+    if let Ok(sa_text) = std::fs::read_to_string(&sa_conf) {
+        if let Some(fixed) = ensure_sa_network_config(&sa_text, &site) {
+            service::save_conf(&sa_conf, &fixed)?;
+            set.push(format!(
+                "{}: razor_config + pyzor_options (shared network-check homes)",
+                sa_conf.display()
+            ));
+        }
+    }
+    setup_network_homes(&site, &mut created, &mut warnings);
+
     // MailScanner reads its config only at startup: leaving it running with
     // stale directives is how misfiled spool files kept happening after the
     // Exim Command fix was written to disk.
@@ -207,7 +236,183 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
         chown_failed,
         restarted,
         repaired,
+        warnings,
     })
+}
+
+/// The shared SpamAssassin per-user state dir (Bayes DB, auto-whitelist) the
+/// scanning children use — MailScanner's canonical `%spool-dir%/spamassassin`.
+pub fn sa_state_dir() -> std::path::PathBuf {
+    ms_work_dir().join("spamassassin")
+}
+
+/// MailScanner's `SpamAssassin Site Rules Dir`, where the shared razor/pyzor
+/// homes live (world-readable, unlike the run-as user's state dir).
+pub fn sa_site_rules_dir(ms_conf: &str) -> std::path::PathBuf {
+    mailscanner::get_directive(ms_conf, "SpamAssassin Site Rules Dir")
+        .filter(|v| !v.is_empty())
+        .unwrap_or("/etc/mail/spamassassin")
+        .into()
+}
+
+pub fn razor_home(site: &Path) -> std::path::PathBuf {
+    site.join(".razor")
+}
+pub fn pyzor_home(site: &Path) -> std::path::PathBuf {
+    site.join(".pyzor")
+}
+/// The registered identity `razor-admin -register` leaves behind; reporting
+/// (`spamassassin -r`) dies with "report requires authentication" without it.
+pub fn razor_identity(site: &Path) -> std::path::PathBuf {
+    razor_home(site).join("identity")
+}
+
+pub(crate) const SA_NETWORK_BEGIN: &str =
+    "# --- managed by msfe-ng (engine configure): shared homes for network checks ---";
+const SA_NETWORK_END: &str = "# --- end msfe-ng ---";
+
+/// spamassassin.conf with our razor/pyzor block pointing at `site`'s shared
+/// homes; `None` when it already does. The block is replaced in place, so a
+/// moved site dir never leaves a stale duplicate behind.
+pub fn ensure_sa_network_config(text: &str, site: &Path) -> Option<String> {
+    let block = format!(
+        "{SA_NETWORK_BEGIN}\n\
+         ifplugin Mail::SpamAssassin::Plugin::Razor2\n\
+         razor_config {razor}/razor-agent.conf\n\
+         endif\n\
+         ifplugin Mail::SpamAssassin::Plugin::Pyzor\n\
+         pyzor_options --homedir {pyzor}\n\
+         endif\n\
+         {SA_NETWORK_END}\n",
+        razor = razor_home(site).display(),
+        pyzor = pyzor_home(site).display(),
+    );
+    let out = match (text.find(SA_NETWORK_BEGIN), text.find(SA_NETWORK_END)) {
+        (Some(b), Some(e)) if e > b => {
+            let end = e + SA_NETWORK_END.len();
+            let end = if text[end..].starts_with('\n') {
+                end + 1
+            } else {
+                end
+            };
+            format!("{}{}{}", &text[..b], block, &text[end..])
+        }
+        _ => {
+            let sep = if text.is_empty() || text.ends_with('\n') {
+                ""
+            } else {
+                "\n"
+            };
+            format!("{text}{sep}\n{block}")
+        }
+    };
+    (out != text).then_some(out)
+}
+
+/// razor-agent.conf with `razorhome` pinned to `home`; `None` when it already
+/// is. `razor-admin -create` writes no razorhome, so without this every razor
+/// run falls back to $HOME/.razor.
+pub fn razor_conf_with_home(conf: &str, home: &Path) -> Option<String> {
+    let want = format!("razorhome = {}", home.display());
+    let mut found = false;
+    let mut lines: Vec<String> = conf
+        .lines()
+        .map(|l| {
+            let key = l.trim_start().split(['=', ' ', '\t']).next().unwrap_or("");
+            if key == "razorhome" {
+                found = true;
+                want.clone()
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    if !found {
+        lines.push(want);
+    }
+    let out = lines.join("\n") + "\n";
+    (out != conf).then_some(out)
+}
+
+pub(crate) fn razor_admin_available() -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("razor-admin").is_file()))
+}
+
+/// Create the shared razor/pyzor homes under the site rules dir and register
+/// a razor identity. Everything world-readable: the scanning children and
+/// cPanel's per-user spamd read here; only root (reporting) writes.
+fn setup_network_homes(site: &Path, created: &mut Vec<String>, warnings: &mut Vec<String>) {
+    use std::os::unix::fs::PermissionsExt;
+    let readable = |p: &Path, mode: u32| {
+        let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode));
+    };
+    let pyzor = pyzor_home(site);
+    if !pyzor.is_dir() {
+        match std::fs::create_dir_all(&pyzor) {
+            Ok(()) => created.push(pyzor.display().to_string()),
+            Err(e) => warnings.push(format!("cannot create {}: {e}", pyzor.display())),
+        }
+    }
+    readable(&pyzor, 0o755);
+
+    let razor = razor_home(site);
+    if !razor_admin_available() {
+        warnings.push(
+            "razor-admin not installed (perl-Razor-Agent): razor checks and reports unavailable"
+                .into(),
+        );
+        return;
+    }
+    let home_arg = format!("-home={}", razor.display());
+    let razor_admin = |args: &[&str]| -> Result<(), String> {
+        let mut cmd = Command::new("razor-admin");
+        cmd.arg(&home_arg).args(args);
+        match service::run_with_timeout(&mut cmd, std::time::Duration::from_secs(60)) {
+            Ok(o) if o.ok => Ok(()),
+            Ok(o) => Err(o.stderr.trim().to_string()),
+            Err(e) => Err(e.to_string()),
+        }
+    };
+    let conf = razor.join("razor-agent.conf");
+    if !conf.exists() {
+        if let Err(e) = razor_admin(&["-create"]) {
+            warnings.push(format!("razor-admin -create failed: {e}"));
+            return;
+        }
+        created.push(razor.display().to_string());
+    }
+    if let Ok(text) = std::fs::read_to_string(&conf) {
+        if let Some(fixed) = razor_conf_with_home(&text, &razor) {
+            let _ = std::fs::write(&conf, fixed);
+        }
+    }
+    if !razor.join("servers.catalogue.lst").exists() {
+        if let Err(e) = razor_admin(&["-discover"]) {
+            warnings.push(format!("razor-admin -discover failed: {e}"));
+        }
+    }
+    if !razor_identity(site).exists() {
+        match razor_admin(&["-register"]) {
+            Ok(()) => created.push(format!(
+                "{} (razor reporting identity)",
+                razor_identity(site).display()
+            )),
+            Err(e) => warnings.push(format!(
+                "razor-admin -register failed (spam reports to Razor need it): {e}"
+            )),
+        }
+    }
+    readable(&razor, 0o755);
+    if let Ok(entries) = std::fs::read_dir(&razor) {
+        for e in entries.flatten() {
+            let name = e.file_name();
+            // the identity is a per-server secret: root-only, as registered
+            if !name.to_string_lossy().starts_with("identity") {
+                readable(&e.path(), 0o644);
+            }
+        }
+    }
 }
 
 /// `.master.gz` files in MailScanner's etc dir that are not gzip data — what
@@ -333,6 +538,7 @@ fn scanner_dir_owners(cfg: &Config, run_user: &str) -> Vec<(std::path::PathBuf, 
     vec![
         (work_base.clone(), run_user.to_string()),
         (work_base.join("incoming"), run_user.to_string()),
+        (sa_state_dir(), run_user.to_string()),
         (
             Path::new(&cfg.quarantine_dir).to_path_buf(),
             run_user.to_string(),
@@ -424,6 +630,14 @@ pub(crate) fn clamd_reachable(socket: &str, port: u16) -> bool {
         .and_then(|mut addrs| addrs.next())
         .map(|addr| TcpStream::connect_timeout(&addr, Duration::from_secs(3)).is_ok())
         .unwrap_or(false)
+}
+
+/// Hand a SpamAssassin state dir (and the Bayes files in it) to the run-as
+/// user after root wrote to it; best-effort, no-op for a missing dir.
+pub(crate) fn chown_state_dir(cfg: &Config, dir: &Path) {
+    if dir.is_dir() {
+        chown_deep(dir, run_user_for(cfg));
+    }
 }
 
 /// chown `path` (and its direct children) to `<user>:mail`; best-effort.
@@ -1112,6 +1326,137 @@ if [ $CURLORWGET = 'curl' ]; then\n  curl -S -A \"msv5 Update Script v0.3.1\" -z
         std::env::remove_var("MSFE_NG_MS_WORK_DIR");
         std::env::remove_var("MSFE_NG_EXIM_SHIM");
         std::env::remove_var("MSFE_NG_PHISHING_UPDATER");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    // MailScanner's children run as the scan user with root's HOME, so without
+    // a state dir of their own SpamAssassin has no Bayes DB (no BAYES_* hits at
+    // all in production) and pyzor dies on "Permission denied: /root/.pyzor".
+    #[test]
+    fn sa_state_dir_is_shared_and_owned_by_the_run_as_user() {
+        let cfg = Config::default();
+        let owners = scanner_dir_owners(&cfg, "mailnull");
+        let state = sa_state_dir();
+        assert!(state.ends_with("spamassassin"));
+        assert!(
+            owners.iter().any(|(d, o)| *d == state && o == "mailnull"),
+            "{:?}",
+            owners
+        );
+    }
+
+    #[test]
+    fn sa_network_block_points_razor_and_pyzor_at_shared_homes() {
+        let site = Path::new("/etc/mail/spamassassin");
+        let text = "bayes_ignore_header X-Foo\n";
+        let out = ensure_sa_network_config(text, site).expect("block added");
+        assert!(out.starts_with(text));
+        assert!(out.contains("\nrazor_config /etc/mail/spamassassin/.razor/razor-agent.conf\n"));
+        assert!(
+            out.ends_with(&format!("\nendif\n{SA_NETWORK_END}\n")),
+            "{out:?}"
+        );
+        assert!(out.contains("pyzor_options --homedir /etc/mail/spamassassin/.pyzor\n"));
+        // guarded so a config without the plugins still lints clean
+        assert!(out.contains("ifplugin Mail::SpamAssassin::Plugin::Razor2\n"));
+        assert!(out.contains("ifplugin Mail::SpamAssassin::Plugin::Pyzor\n"));
+        // idempotent
+        assert_eq!(ensure_sa_network_config(&out, site), None);
+        // a moved site dir rewrites the block in place, without duplicating it
+        let moved = ensure_sa_network_config(&out, Path::new("/opt/sa")).unwrap();
+        assert!(moved.contains("razor_config /opt/sa/.razor/razor-agent.conf\n"));
+        assert!(!moved.contains("/etc/mail/spamassassin/.razor"));
+        assert_eq!(moved.matches(SA_NETWORK_BEGIN).count(), 1);
+    }
+
+    // razor-admin -create writes no razorhome, so every razor run would fall
+    // back to $HOME/.razor — the unreadable /root for the scanning children.
+    #[test]
+    fn razor_conf_gets_an_explicit_home() {
+        let home = Path::new("/etc/mail/spamassassin/.razor");
+        let conf = "debuglevel = 3\nlogfile = razor-agent.log\n";
+        let out = razor_conf_with_home(conf, home).unwrap();
+        assert!(out.ends_with("razorhome = /etc/mail/spamassassin/.razor\n"));
+        assert_eq!(razor_conf_with_home(&out, home), None);
+        let stale = "razorhome = /root/.razor\ndebuglevel = 3\n";
+        let fixed = razor_conf_with_home(stale, home).unwrap();
+        assert_eq!(
+            fixed,
+            "razorhome = /etc/mail/spamassassin/.razor\ndebuglevel = 3\n"
+        );
+    }
+
+    #[test]
+    fn configure_sets_up_bayes_state_dir_and_network_check_homes() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("msfe-engine-sa-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let site = base.join("sa-site");
+        std::fs::create_dir_all(&site).unwrap();
+        let conf = base.join("MailScanner.conf");
+        std::fs::write(
+            &conf,
+            format!(
+                "MTA = exim\nSpamAssassin User State Dir =\nSpamAssassin Site Rules Dir = {}\n",
+                site.display()
+            ),
+        )
+        .unwrap();
+        let sa_conf = base.join("spamassassin.conf");
+        std::fs::write(&sa_conf, "lock_method flock\n").unwrap();
+        std::env::set_var("MSFE_NG_INCOMING_QUEUE", base.join("in/input"));
+        std::env::set_var("MSFE_NG_OUTGOING_QUEUE", base.join("exim/input"));
+        std::env::set_var("MSFE_NG_MS_WORK_DIR", base.join("work"));
+        std::env::set_var("MSFE_NG_SKIP_EXIM_CMDS", "1");
+        let cfg = Config {
+            panel: "cpanel".into(),
+            mailscanner_conf: conf.display().to_string(),
+            quarantine_dir: base.join("quarantine").display().to_string(),
+            archive_dir: base.join("archive").display().to_string(),
+            ..Default::default()
+        };
+
+        let r = configure(&cfg).unwrap();
+        let text = std::fs::read_to_string(&conf).unwrap();
+        let state = base.join("work/spamassassin");
+        assert_eq!(
+            mailscanner::get_directive(&text, "SpamAssassin User State Dir"),
+            Some(state.display().to_string().as_str())
+        );
+        assert!(state.is_dir(), "shared Bayes state dir created");
+        assert!(site.join(".pyzor").is_dir(), "shared pyzor home created");
+        let sa_text = std::fs::read_to_string(&sa_conf).unwrap();
+        assert!(sa_text.starts_with("lock_method flock\n"));
+        assert!(sa_text.contains(&format!(
+            "pyzor_options --homedir {}/.pyzor\n",
+            site.display()
+        )));
+        assert!(base.join("spamassassin.conf.msfe-ng.bak").exists());
+        // the SA config is read at MailScanner startup: a restart-worthy change
+        assert!(
+            r.set.iter().any(|s| s.contains("spamassassin.conf")),
+            "{:?}",
+            r.set
+        );
+        // razor registration needs razor-admin (not on the build box) — that
+        // is reported, never fatal
+        if !razor_admin_available() {
+            assert!(
+                r.warnings.iter().any(|w| w.contains("razor-admin")),
+                "{:?}",
+                r.warnings
+            );
+        }
+
+        let r2 = configure(&cfg).unwrap();
+        assert!(r2.set.is_empty(), "{:?}", r2.set);
+        assert!(r2.created.is_empty(), "{:?}", r2.created);
+
+        std::env::remove_var("MSFE_NG_INCOMING_QUEUE");
+        std::env::remove_var("MSFE_NG_OUTGOING_QUEUE");
+        std::env::remove_var("MSFE_NG_MS_WORK_DIR");
+        std::env::remove_var("MSFE_NG_SKIP_EXIM_CMDS");
         std::fs::remove_dir_all(&base).unwrap();
     }
 }

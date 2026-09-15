@@ -207,6 +207,63 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
             ));
         }
     }
+    // Bayes and the network checks live in per-user homes, and the children
+    // inherit root's HOME: without a shared state dir they scan with no Bayes
+    // DB at all while the UI trains root's, and pyzor dies on /root/.pyzor.
+    {
+        use std::os::unix::fs::MetadataExt;
+        let state = mailscanner::get_directive(&conf, "SpamAssassin User State Dir")
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(|dir| {
+                let writable = std::fs::metadata(dir).ok().is_some_and(|meta| {
+                    match (engine::uid_of(run_user), engine::gid_of("mail")) {
+                        (Some(uid), Some(gid)) => {
+                            dir_writable_by(meta.uid(), meta.gid(), meta.mode(), uid, &[gid])
+                        }
+                        _ => false,
+                    }
+                });
+                (dir, Path::new(dir).is_dir(), writable)
+            });
+        let (ok, detail) = bayes_verdict(state, run_user);
+        out.push(check(
+            "Bayes DB shared with MailScanner",
+            ok,
+            Level::Warn,
+            detail,
+            "msfe-ng engine configure (sets SpamAssassin User State Dir and hands the dir to the scan user)",
+        ));
+        let site = engine::sa_site_rules_dir(&conf);
+        let (ok, detail) = razor_verdict(
+            engine::razor_admin_available(),
+            engine::razor_home(&site).join("razor-agent.conf").is_file(),
+            engine::razor_identity(&site).exists(),
+        );
+        out.push(check(
+            "Razor reporting identity",
+            ok,
+            Level::Warn,
+            detail,
+            "msfe-ng engine configure (creates the shared razor home and runs razor-admin -register)",
+        ));
+        let pyzor = engine::pyzor_home(&site);
+        let ok = pyzor.is_dir();
+        out.push(check(
+            "Pyzor shared home",
+            ok,
+            Level::Warn,
+            if ok {
+                format!("{} present", pyzor.display())
+            } else {
+                format!(
+                    "{} missing — PYZOR_CHECK never fires under MailScanner",
+                    pyzor.display()
+                )
+            },
+            "msfe-ng engine configure (creates the shared pyzor home)",
+        ));
+    }
     // Misplaced spool files are invisible to delivery: Exim lists them but
     // computes their path from the message id, so they wait forever.
     let (_, outq) = service::queue_dirs(cfg);
@@ -582,6 +639,49 @@ fn phishing_lists_check(cfg: &Config) -> Check {
     )
 }
 
+/// `(ok, detail)` for the shared Bayes state dir: `state` is the configured
+/// `SpamAssassin User State Dir` as `(path, exists, writable by run_user)`.
+pub fn bayes_verdict(state: Option<(&str, bool, bool)>, run_user: &str) -> (bool, String) {
+    match state {
+        None => (
+            false,
+            "SpamAssassin User State Dir is not set — MailScanner scans with no Bayes DB and UI training goes to root's ~/.spamassassin".into(),
+        ),
+        Some((dir, false, _)) => (false, format!("{dir} is missing")),
+        Some((dir, true, false)) => (
+            false,
+            format!("{dir} is not writable by {run_user} — Bayes cannot auto-learn or read UI training"),
+        ),
+        Some((dir, true, true)) => (true, format!("{dir} is writable by {run_user}")),
+    }
+}
+
+/// `(ok, detail)` for Razor reporting: needs the client, a shared home, and
+/// the identity `razor-admin -register` creates.
+pub fn razor_verdict(razor_admin: bool, home: bool, identity: bool) -> (bool, String) {
+    if !razor_admin {
+        return (
+            false,
+            "razor-admin not installed (perl-Razor-Agent) — no Razor checks or reports".into(),
+        );
+    }
+    if !home {
+        return (
+            false,
+            "no shared razor home — razor falls back to $HOME/.razor, unreadable for the scan user"
+                .into(),
+        );
+    }
+    if !identity {
+        return (
+            false,
+            "no registered identity — spam reports fail with \"report requires authentication\""
+                .into(),
+        );
+    }
+    (true, "shared home with a registered identity".into())
+}
+
 /// `(ok, detail, fix)` for the phishing-list state.
 pub fn phishing_lists_verdict(s: &PhishingListState) -> (bool, String, String) {
     if !s.enabled {
@@ -695,6 +795,40 @@ pub fn exim_probe_verdict(real_bv: &str, probe_bv: &str) -> (bool, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The scanning children ran with no Bayes DB for months while the UI
+    // trained root's: the check must fail on a missing directive, a missing
+    // dir and a dir the run-as user cannot write, and pass only on a live one.
+    #[test]
+    fn bayes_verdict_requires_a_shared_writable_state_dir() {
+        let (ok, d) = bayes_verdict(None, "mailnull");
+        assert!(!ok);
+        assert!(d.contains("SpamAssassin User State Dir"), "{d}");
+        let (ok, d) = bayes_verdict(Some(("/x", false, false)), "mailnull");
+        assert!(!ok);
+        assert!(d.contains("/x") && d.contains("missing"), "{d}");
+        let (ok, d) = bayes_verdict(Some(("/x", true, false)), "mailnull");
+        assert!(!ok);
+        assert!(d.contains("not writable by mailnull"), "{d}");
+        let (ok, d) = bayes_verdict(Some(("/x", true, true)), "mailnull");
+        assert!(ok, "{d}");
+    }
+
+    // "razor2 report failed: ... report requires authentication": a home
+    // with no registered identity, or no razor at all.
+    #[test]
+    fn razor_verdict_needs_a_registered_identity() {
+        let (ok, d) = razor_verdict(false, false, false);
+        assert!(!ok);
+        assert!(d.contains("razor-admin"), "{d}");
+        let (ok, d) = razor_verdict(true, false, false);
+        assert!(!ok);
+        assert!(d.contains("home"), "{d}");
+        let (ok, d) = razor_verdict(true, true, false);
+        assert!(!ok);
+        assert!(d.contains("identity"), "{d}");
+        assert!(razor_verdict(true, true, true).0);
+    }
 
     #[test]
     fn root_owned_0750_quarantine_is_not_writable_by_scan_user() {
