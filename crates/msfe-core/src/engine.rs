@@ -44,6 +44,9 @@ pub struct ConfigureReport {
     pub chown_failed: Vec<String>,
     /// MailScanner was restarted to apply changed directives.
     pub restarted: bool,
+    /// Phishing-list updater repairs: the script patched in place, junk
+    /// downloads removed (never a reason to restart).
+    pub repaired: Vec<String>,
 }
 
 /// The user MailScanner's scanning children run as on this panel.
@@ -173,12 +176,72 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
         false
     };
 
+    let mut repaired = Vec::new();
+    let updater = phishing_updater_path();
+    if let Ok(script) = std::fs::read_to_string(&updater) {
+        if let Some(fixed) = patch_phishing_updater(&script) {
+            service::save_conf(&updater, &fixed)?;
+            repaired.push(format!(
+                "{} (phishing-list download over HTTP/1.1)",
+                updater.display()
+            ));
+        }
+    }
+    // A challenge page saved as .gz keeps failing even with the patched
+    // script: `curl -z` sends its mtime as If-Modified-Since, gets a 304, and
+    // gunzip chokes on the same HTML again the next night.
+    if let Some(etc) = conf_path.parent() {
+        for junk in phishing_junk_downloads(etc) {
+            if std::fs::remove_file(&junk).is_ok() {
+                repaired.push(format!(
+                    "{} (removed: an HTML page, not gzip data)",
+                    junk.display()
+                ));
+            }
+        }
+    }
+
     Ok(ConfigureReport {
         set,
         created,
         chown_failed,
         restarted,
+        repaired,
     })
+}
+
+/// `.master.gz` files in MailScanner's etc dir that are not gzip data — what
+/// ms-update-phishing leaves behind when the download returns a challenge page.
+pub fn phishing_junk_downloads(etc: &Path) -> Vec<std::path::PathBuf> {
+    ["phishing.bad.sites", "phishing.safe.sites"]
+        .iter()
+        .map(|n| etc.join(format!("{n}.conf.master.gz")))
+        .filter(|p| std::fs::read(p).is_ok_and(|b| !b.starts_with(&[0x1f, 0x8b])))
+        .collect()
+}
+
+/// MailScanner's daily phishing-list updater (run from cron.daily via ms-cron).
+pub fn phishing_updater_path() -> std::path::PathBuf {
+    std::env::var("MSFE_NG_PHISHING_UPDATER")
+        .unwrap_or_else(|_| "/usr/sbin/ms-update-phishing".into())
+        .into()
+}
+
+/// Make ms-update-phishing fetch over HTTP/1.1. phishing.mailscanner.info sits
+/// behind Cloudflare, which answers the HTTP/2 fingerprint of older curls
+/// (7.61 on EL8-era panel builds) with a 403 challenge page; plain `curl -S`
+/// saves that HTML as the .gz, gunzip rejects it, and the lists never update.
+/// The same request over HTTP/1.1 is served. `-f` turns any future 403 into a
+/// curl failure so the script's own wget fallback runs instead of gunzipping
+/// HTML. Returns the rewritten script, or `None` when there is nothing to do
+/// (already patched, or not the known upstream form — never guess).
+pub fn patch_phishing_updater(script: &str) -> Option<String> {
+    const UPSTREAM: &str = "curl -S -A \"msv5";
+    const PATCHED: &str = "curl -fS --http1.1 -A \"msv5";
+    if !script.contains(UPSTREAM) {
+        return None;
+    }
+    Some(script.replace(UPSTREAM, PATCHED))
 }
 
 pub struct ArchiveReport {
@@ -732,6 +795,7 @@ pub(crate) fn gid_of(name: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
 
     // Both tests mutate shared process env vars — serialize them.
@@ -933,6 +997,34 @@ mod tests {
         std::fs::remove_dir_all(&base).unwrap();
     }
 
+    // MailScanner 5.5.3's ms-update-phishing fetches phishing.mailscanner.info
+    // with plain curl; Cloudflare challenges the HTTP/2 fingerprint of older
+    // curls (403 + HTML saved as .gz) but serves the same request over HTTP/1.1.
+    const UPDATER: &str = "#!/usr/bin/env bash\nCONFIGDIR='/etc/MailScanner';\n\
+if [ $CURLORWGET = 'curl' ]; then\n  curl -S -A \"msv5 Update Script v0.3.1\" -z $CONFIGDIR/phishing.bad.sites.conf.master.gz -o $CONFIGDIR/phishing.bad.sites.conf.master.gz $BADURL &> /dev/null\n\
+  curl -S -A \"msv5 Update Script v0.3.1\" -z $CONFIGDIR/phishing.safe.sites.conf.master.gz -o $CONFIGDIR/phishing.safe.sites.conf.master.gz $SAFEURL &> /dev/null\n\
+  wget -q --user-agent=\"msv5 Update Script v0.3.1\" -N -O x $BADURL\n";
+
+    #[test]
+    fn phishing_updater_patch_forces_http11_on_both_curl_lines() {
+        let patched = patch_phishing_updater(UPDATER).expect("upstream form is patched");
+        assert_eq!(patched.matches("curl -fS --http1.1 -A \"msv5").count(), 2);
+        assert!(!patched.contains("curl -S -A"));
+        // wget line and everything else untouched
+        assert!(
+            patched.contains("wget -q --user-agent=\"msv5 Update Script v0.3.1\" -N -O x $BADURL")
+        );
+        assert!(patched.starts_with("#!/usr/bin/env bash\n"));
+    }
+
+    #[test]
+    fn phishing_updater_patch_is_idempotent_and_leaves_unknown_scripts_alone() {
+        let once = patch_phishing_updater(UPDATER).unwrap();
+        assert_eq!(patch_phishing_updater(&once), None);
+        assert_eq!(patch_phishing_updater("#!/bin/sh\nwget $BADURL\n"), None);
+        assert_eq!(patch_phishing_updater(""), None);
+    }
+
     #[test]
     fn configures_conf_and_creates_spool() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -953,6 +1045,10 @@ mod tests {
         let shim = base.join("msfe-ng-exim");
         std::fs::write(&shim, "#!/bin/sh\n").unwrap();
         std::env::set_var("MSFE_NG_EXIM_SHIM", &shim);
+        let updater = base.join("ms-update-phishing");
+        std::fs::write(&updater, UPDATER).unwrap();
+        std::fs::set_permissions(&updater, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("MSFE_NG_PHISHING_UPDATER", &updater);
 
         let cfg = Config {
             panel: "cpanel".into(),
@@ -960,7 +1056,29 @@ mod tests {
             quarantine_dir: base.join("quarantine").display().to_string(),
             ..Default::default()
         };
+        // a failed download left the Cloudflare page saved as .gz: its mtime
+        // poisons `curl -z` (304 → gunzip fails again) even once the script
+        // fetches over HTTP/1.1. A real gzip leftover is the updater's own.
+        let junk = base.join("phishing.bad.sites.conf.master.gz");
+        std::fs::write(&junk, "<!DOCTYPE html>Just a moment...").unwrap();
+        let real_gz = base.join("phishing.safe.sites.conf.master.gz");
+        std::fs::write(&real_gz, [0x1f, 0x8b, 0x08, 0x00]).unwrap();
+
         let r = configure(&cfg).unwrap();
+        // the phishing-list updater fetches over HTTP/1.1 (Cloudflare fix),
+        // stays executable, keeps a backup, and is not a reason to restart
+        let script = std::fs::read_to_string(&updater).unwrap();
+        assert_eq!(script.matches("curl -fS --http1.1").count(), 2);
+        assert_eq!(
+            std::fs::metadata(&updater).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert!(base.join("ms-update-phishing.msfe-ng.bak").exists());
+        assert!(!junk.exists(), "HTML saved as .gz must be removed");
+        assert!(real_gz.exists(), "a genuine gzip download is left alone");
+        assert_eq!(r.repaired.len(), 2, "{:?}", r.repaired);
+        assert!(r.repaired[0].starts_with(&updater.display().to_string()));
+        assert!(r.repaired[1].starts_with(&junk.display().to_string()));
         let text = std::fs::read_to_string(&conf).unwrap();
         assert_eq!(mailscanner::get_directive(&text, "MTA"), Some("exim"));
         // the version probe goes through our shim (Exim 4.100 banner fix)
@@ -987,11 +1105,13 @@ mod tests {
         let r2 = configure(&cfg).unwrap();
         assert!(r2.set.is_empty());
         assert!(r2.created.is_empty());
+        assert!(r2.repaired.is_empty());
 
         std::env::remove_var("MSFE_NG_INCOMING_QUEUE");
         std::env::remove_var("MSFE_NG_OUTGOING_QUEUE");
         std::env::remove_var("MSFE_NG_MS_WORK_DIR");
         std::env::remove_var("MSFE_NG_EXIM_SHIM");
+        std::env::remove_var("MSFE_NG_PHISHING_UPDATER");
         std::fs::remove_dir_all(&base).unwrap();
     }
 }

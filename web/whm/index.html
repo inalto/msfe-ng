@@ -1045,8 +1045,8 @@ async function renderService(){
     const r=await api('/api/service/engine-configure',{method:'POST'});
     cfgBtn.disabled=false;
     if(r&&r.ok){
-      const n=(r.set||[]).length+(r.created||[]).length;
-      toast(n?`Configured (${(r.set||[]).length} settings, ${(r.created||[]).length} directories) — now run the health check`:'Already configured — nothing to change');
+      const n=(r.set||[]).length+(r.created||[]).length+(r.repaired||[]).length;
+      toast(n?`Configured (${(r.set||[]).length} settings, ${(r.created||[]).length} directories, ${(r.repaired||[]).length} repairs) — now run the health check`:'Already configured — nothing to change');
       if((r.chown_failed||[]).length)toast('Warning: ownership not set on '+r.chown_failed.join(', '));
     } else toast(r.error||'configure failed');
     refreshStatus();

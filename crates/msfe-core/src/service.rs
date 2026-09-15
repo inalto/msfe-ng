@@ -160,10 +160,21 @@ fn ms_defaults_path() -> PathBuf {
 /// start until an admin flips it (the wiring step does, once Exim is set up).
 /// Returns None when the defaults file is absent/unreadable.
 pub fn engine_run_enabled() -> Option<bool> {
+    ms_defaults_flag("run_mailscanner")
+}
+
+/// Whether ms-cron DAILY runs the phishing-list updater (`ms_cron_ps`,
+/// on by default in the shipped defaults). None when the file is absent.
+pub fn phishing_update_enabled() -> Option<bool> {
+    ms_defaults_flag("ms_cron_ps")
+}
+
+/// A `key=0|1` flag from MailScanner's defaults file.
+fn ms_defaults_flag(key: &str) -> Option<bool> {
     let text = std::fs::read_to_string(ms_defaults_path()).ok()?;
     for line in text.lines() {
         let l = line.trim();
-        if let Some(v) = l.strip_prefix("run_mailscanner=") {
+        if let Some(v) = l.strip_prefix(key).and_then(|r| r.strip_prefix('=')) {
             return Some(v.trim() == "1");
         }
     }

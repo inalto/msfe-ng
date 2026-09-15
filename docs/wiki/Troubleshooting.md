@@ -47,6 +47,24 @@ the Exim message-id format* when the probe would go wrong, and the monitor
 cron moves misfiled files every 5 minutes (**Queues → Fix misplaced spool
 files** / `msfe-ng service spool-repair` do it by hand).
 
+## Daily cron mail: `gzip: phishing.bad.sites.conf.master.gz: not in gzip format`
+
+MailScanner's `cron.daily` job (`ms-cron DAILY` → `ms-update-phishing`) fetches
+the phishing site lists from `phishing.mailscanner.info`, which sits behind
+Cloudflare. Cloudflare answers the HTTP/2 fingerprint of older `curl` builds
+with a 403 challenge page; the upstream script saves that HTML as the `.gz`,
+`gunzip` rejects it, and the lists silently stay at whatever the RPM shipped.
+The same request over HTTP/1.1 is served, so *Configure for Exim* (`msfe-ng
+engine configure`, also run on every upgrade) patches `ms-update-phishing` to
+use `curl -f --http1.1` (backup in `ms-update-phishing.msfe-ng.bak`) and
+deletes the HTML saved as `.gz`, whose timestamp would otherwise keep the
+next download answering *304 Not Modified*. The
+doctor check *phishing site lists updating* warns when
+`phishing.bad.sites.conf` is more than three days old and names the fix; a
+MailScanner package upgrade reverts the patch, which the next `engine
+configure` reapplies. Set `ms_cron_ps=0` in `/etc/MailScanner/defaults` to turn
+the daily update off instead — the doctor then reports the check as OK.
+
 ## Quarantine writes fail / gaps in the date directories
 
 The quarantine must be owned by the user MailScanner runs as. *Configure for

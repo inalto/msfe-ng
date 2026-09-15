@@ -623,6 +623,7 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                         ("created".into(), arr(&r.created)),
                         ("chown_failed".into(), arr(&r.chown_failed)),
                         ("restarted".into(), Json::Bool(r.restarted)),
+                        ("repaired".into(), arr(&r.repaired)),
                     ])
                     .to_string(),
                 )

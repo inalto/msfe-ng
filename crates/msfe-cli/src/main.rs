@@ -671,10 +671,13 @@ fn cmd_engine(sub: Option<&str>) -> ExitCode {
                     for f in &r.chown_failed {
                         println!("WARNING: could not set ownership on {f}");
                     }
+                    for p in &r.repaired {
+                        println!("repaired: {p}");
+                    }
                     if r.restarted {
                         println!("restarted MailScanner to apply the changes");
                     }
-                    if r.set.is_empty() && r.created.is_empty() {
+                    if r.set.is_empty() && r.created.is_empty() && r.repaired.is_empty() {
                         println!("already configured — nothing to change");
                     } else {
                         println!("engine configured for Exim; verify with: msfe-ng engine lint");

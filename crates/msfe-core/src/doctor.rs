@@ -296,6 +296,14 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
         ));
     }
 
+    // ---- phishing site lists ----------------------------------------------
+    // ms-cron DAILY refreshes phishing.{bad,safe}.sites.conf from
+    // phishing.mailscanner.info. Behind Cloudflare that host answers older
+    // curls' HTTP/2 with a 403 challenge page, which the upstream script saves
+    // as the .gz — gunzip fails, the lists stay at whatever the RPM shipped,
+    // and only a cron mail full of gzip errors says so.
+    out.push(phishing_lists_check(cfg));
+
     // ---- message bodies (archive) ----------------------------------------
     let (settings, _, _) = crate::sync::load_policy(&crate::sync::policy_dir(config_file));
     let archive_on = settings
@@ -526,6 +534,100 @@ fn dir_writable_by(meta_uid: u32, meta_gid: u32, mode: u32, uid: u32, gids: &[u3
     class & 0o3 == 0o3 // write + search
 }
 
+/// What the phishing-list check looks at, gathered from disk.
+#[derive(Debug, Clone, Copy)]
+pub struct PhishingListState {
+    /// `ms_cron_ps` in /etc/MailScanner/defaults (absent file counts as on).
+    pub enabled: bool,
+    /// Age of phishing.bad.sites.conf — rewritten by every successful update.
+    pub list_age_days: Option<u64>,
+    /// A `.master.gz` left behind that is not gzip data (the challenge page).
+    pub junk_gz: bool,
+    /// ms-update-phishing already fetches over HTTP/1.1.
+    pub updater_patched: bool,
+}
+
+/// Successful updates rewrite the list daily; allow a few missed days for an
+/// upstream hiccup before complaining.
+const PHISHING_LIST_MAX_AGE_DAYS: u64 = 3;
+
+fn phishing_lists_check(cfg: &Config) -> Check {
+    let etc = Path::new(&cfg.mailscanner_conf)
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| "/etc/MailScanner".into());
+    let age_days = |p: &Path| {
+        std::fs::metadata(p)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .map(|d| d.as_secs() / 86_400)
+    };
+    let junk_gz = !engine::phishing_junk_downloads(&etc).is_empty();
+    let updater_patched = std::fs::read_to_string(engine::phishing_updater_path())
+        .is_ok_and(|s| engine::patch_phishing_updater(&s).is_none());
+    let state = PhishingListState {
+        enabled: service::phishing_update_enabled().unwrap_or(true),
+        list_age_days: age_days(&etc.join("phishing.bad.sites.conf")),
+        junk_gz,
+        updater_patched,
+    };
+    let (ok, detail, fix) = phishing_lists_verdict(&state);
+    check(
+        "phishing site lists updating",
+        ok,
+        Level::Warn,
+        detail,
+        &fix,
+    )
+}
+
+/// `(ok, detail, fix)` for the phishing-list state.
+pub fn phishing_lists_verdict(s: &PhishingListState) -> (bool, String, String) {
+    if !s.enabled {
+        return (
+            true,
+            "daily update disabled in /etc/MailScanner/defaults (ms_cron_ps=0)".into(),
+            String::new(),
+        );
+    }
+    let days = |d: u64| format!("{d} day{}", if d == 1 { "" } else { "s" });
+    let fix = if s.updater_patched {
+        "run /usr/sbin/ms-update-phishing and check its output (the daily cron mail has the errors)"
+            .to_string()
+    } else {
+        "msfe-ng engine configure (patches ms-update-phishing to fetch over HTTP/1.1 and clears the bad download), then run /usr/sbin/ms-update-phishing".to_string()
+    };
+    match s.list_age_days {
+        Some(d) if d <= PHISHING_LIST_MAX_AGE_DAYS => (
+            true,
+            format!("phishing.bad.sites.conf updated {} ago", days(d)),
+            String::new(),
+        ),
+        Some(d) if s.junk_gz => (
+            false,
+            format!(
+                "lists last updated {} ago — the daily download returned an HTML page (Cloudflare challenge), not a gzip",
+                days(d)
+            ),
+            fix,
+        ),
+        Some(d) => (
+            false,
+            format!(
+                "lists last updated {} ago — the daily update is not succeeding",
+                days(d)
+            ),
+            fix,
+        ),
+        None => (
+            false,
+            "phishing.bad.sites.conf is missing — MailScanner's phishing checks run without the site lists".into(),
+            fix,
+        ),
+    }
+}
+
 /// `<cmd> -bV` output, empty when the command cannot run or hangs.
 fn exim_bv(cmd: &str) -> String {
     if cmd.is_empty() {
@@ -639,5 +741,78 @@ mod tests {
 
         // real exim unreadable → cannot vouch → fail
         assert!(!exim_probe_verdict("", shimmed).0);
+    }
+
+    // phishing.mailscanner.info behind Cloudflare: the daily updater saved a
+    // 403 challenge page as the .gz for weeks and the lists stayed at the
+    // RPM's 2024 copies. The check reads the list's age, spots the HTML
+    // leftover, and names the shim (engine configure) when it isn't applied.
+    #[test]
+    fn phishing_lists_verdict_reads_age_and_the_cloudflare_leftover() {
+        let s = PhishingListState {
+            enabled: true,
+            list_age_days: Some(1),
+            junk_gz: false,
+            updater_patched: true,
+        };
+        let (ok, detail, _) = phishing_lists_verdict(&s);
+        assert!(ok, "{detail}");
+        assert!(detail.contains("1 day"), "{detail}");
+
+        // fresh enough even a couple of days late (upstream hiccup)
+        assert!(
+            phishing_lists_verdict(&PhishingListState {
+                list_age_days: Some(3),
+                ..s
+            })
+            .0
+        );
+
+        // stale + HTML saved as .gz → the Cloudflare failure, fix = the shim
+        let bad = PhishingListState {
+            list_age_days: Some(320),
+            junk_gz: true,
+            updater_patched: false,
+            ..s
+        };
+        let (ok, detail, fix) = phishing_lists_verdict(&bad);
+        assert!(!ok);
+        assert!(
+            detail.contains("320 days") && detail.contains("HTML"),
+            "{detail}"
+        );
+        assert!(fix.contains("engine configure"), "{fix}");
+
+        // stale but already patched → the shim is not the answer
+        let (ok, detail, fix) = phishing_lists_verdict(&PhishingListState {
+            junk_gz: false,
+            updater_patched: true,
+            ..bad
+        });
+        assert!(!ok);
+        assert!(
+            detail.contains("320 days") && !detail.contains("HTML"),
+            "{detail}"
+        );
+        assert!(
+            !fix.contains("engine configure") && fix.contains("ms-update-phishing"),
+            "{fix}"
+        );
+
+        // list file missing entirely
+        let (ok, detail, _) = phishing_lists_verdict(&PhishingListState {
+            list_age_days: None,
+            ..bad
+        });
+        assert!(!ok);
+        assert!(detail.contains("missing"), "{detail}");
+
+        // operator turned the update off in /etc/MailScanner/defaults → not our business
+        let (ok, detail, _) = phishing_lists_verdict(&PhishingListState {
+            enabled: false,
+            ..bad
+        });
+        assert!(ok);
+        assert!(detail.contains("ms_cron_ps=0"), "{detail}");
     }
 }
