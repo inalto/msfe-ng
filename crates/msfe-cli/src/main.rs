@@ -274,10 +274,10 @@ fn cmd_selftest() -> ExitCode {
             "spam(GTUBE)",
             format!("MSFE-NG selftest spam.\n\n{GTUBE}\n"),
         ),
-        (
-            "virus(EICAR)",
-            format!("MSFE-NG selftest virus.\n\n{EICAR}\n"),
-        ),
+        // ClamAV's Eicar-Test-Signature only matches a file that *starts*
+        // with the string: any text before it (even a greeting line) and the
+        // body part MailScanner hands to clamd never triggers.
+        ("virus(EICAR)", format!("{EICAR}\n")),
     ];
 
     let mut sent = 0;
