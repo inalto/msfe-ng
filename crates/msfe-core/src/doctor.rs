@@ -268,18 +268,15 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
     // Mail over `Max Spam Check Size` bypasses every spam check; the DB
     // records those as "too large" reports.
     if let Some(limit) = mailscanner::get_directive(&conf, "Max Spam Check Size") {
-        let (skipped, total) = db::query(
-            cfg,
-            "SELECT COALESCE(SUM(spamreport LIKE '%too large%'),0), COUNT(*) \
-             FROM maillog WHERE msg_ts >= (NOW() - INTERVAL 30 DAY)",
-        )
-        .ok()
-        .and_then(|rows| rows.into_iter().next())
-        .map(|r| {
-            let n = |i: usize| r.get(i).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-            (n(0), n(1))
-        })
-        .unwrap_or((0, 0));
+        let bytes = engine::parse_ms_size(limit).unwrap_or(u64::MAX);
+        let (skipped, total) = db::query(cfg, &skipped_over_limit_sql(bytes))
+            .ok()
+            .and_then(|rows| rows.into_iter().next())
+            .map(|r| {
+                let n = |i: usize| r.get(i).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+                (n(0), n(1))
+            })
+            .unwrap_or((0, 0));
         let (ok, detail) = spam_check_size_verdict(limit, skipped, total);
         out.push(check(
             "large messages get spam-checked",
@@ -924,16 +921,25 @@ fn dnsbl_check(ms_conf: &str, conf_path: &Path) -> Check {
     check("DNS blocklists answering", ok, Level::Warn, detail, &fix)
 }
 
-/// `(ok, detail)` for `Max Spam Check Size`: warns when mail was actually
-/// skipped in the last 30 days and the limit is a plain size (rulesets are
-/// the admin's business).
+/// 30-day count of mail skipped as too large that the current limit
+/// (`bytes`) would still skip, plus the total.
+pub fn skipped_over_limit_sql(bytes: u64) -> String {
+    format!(
+        "SELECT COALESCE(SUM(spamreport LIKE '%too large%' AND size > {bytes}),0), COUNT(*) \
+         FROM maillog WHERE msg_ts >= (NOW() - INTERVAL 30 DAY)"
+    )
+}
+
+/// `(ok, detail)` for `Max Spam Check Size`: `skipped` is the 30-day count
+/// of mail the current limit would still skip; rulesets are the admin's
+/// business.
 pub fn spam_check_size_verdict(limit: &str, skipped: u64, total: u64) -> (bool, String) {
     let bytes = engine::parse_ms_size(limit);
     if skipped == 0 || bytes.is_none() {
         return (
             true,
             format!(
-                "Max Spam Check Size = {}; no message skipped as too large in 30 days",
+                "Max Spam Check Size = {}; no message in 30 days would be skipped as too large",
                 limit.trim()
             ),
         );
@@ -1181,8 +1187,10 @@ mod tests {
         assert!(detail.contains("2 lists"), "{detail}");
     }
 
+    // Counts only mail the *current* limit would still skip: after raising
+    // 200k → 2M the month's history must not keep the warning on.
     #[test]
-    fn spam_check_size_verdict_counts_skipped_mail() {
+    fn spam_check_size_verdict_counts_mail_still_over_the_limit() {
         let (ok, d) = spam_check_size_verdict("200k", 52, 603);
         assert!(!ok);
         assert!(
@@ -1191,11 +1199,15 @@ mod tests {
         );
         let (ok, d) = spam_check_size_verdict("2M", 0, 500);
         assert!(ok, "{d}");
-        // a small limit with nothing actually skipped is still worth a note
-        // only when mail was skipped: no skips, no warning
+        assert!(d.contains("2M"), "{d}");
         assert!(spam_check_size_verdict("200k", 0, 10).0);
         // a ruleset value cannot be judged here
         assert!(spam_check_size_verdict("/etc/MailScanner/rules/size.rules", 3, 10).0);
+        assert_eq!(
+            skipped_over_limit_sql(2_000_000),
+            "SELECT COALESCE(SUM(spamreport LIKE '%too large%' AND size > 2000000),0), COUNT(*) \
+             FROM maillog WHERE msg_ts >= (NOW() - INTERVAL 30 DAY)"
+        );
     }
 
     // The scanning children ran with no Bayes DB for months while the UI
