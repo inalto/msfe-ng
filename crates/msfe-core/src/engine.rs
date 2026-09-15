@@ -128,6 +128,18 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
 
     let conf_path = Path::new(&cfg.mailscanner_conf);
     let original = std::fs::read_to_string(conf_path)?;
+    // Dead RBLs in `Spam List` (MailScanner 5.5.3 still ships SORBS, gone
+    // since 2024 and no longer even defined) cost every message a timeout.
+    let mut pruned = Vec::new();
+    if let Some(list) = mailscanner::get_directive(&original, "Spam List") {
+        let defs_path = spam_list_definitions(&original, conf_path);
+        let defs = std::fs::read_to_string(defs_path).unwrap_or_default();
+        let (kept, removed) = prune_spam_list(list, &defs);
+        if !removed.is_empty() {
+            directives.push(("Spam List".into(), kept));
+            pruned = removed;
+        }
+    }
     let mut text = original.clone();
     let mut set = Vec::new();
     for (k, v) in &directives {
@@ -141,6 +153,13 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
     }
     if text != original {
         service::save_conf(conf_path, &text)?;
+    }
+    let mut repaired = Vec::new();
+    if !pruned.is_empty() {
+        repaired.push(format!(
+            "Spam List: dropped defunct/undefined RBL(s) {}",
+            pruned.join(", ")
+        ));
     }
 
     // Incoming split-spool skeleton (ours to create and own; pointless when the
@@ -205,7 +224,6 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
         false
     };
 
-    let mut repaired = Vec::new();
     let updater = phishing_updater_path();
     if let Ok(script) = std::fs::read_to_string(&updater) {
         if let Some(fixed) = patch_phishing_updater(&script) {
@@ -238,6 +256,64 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
         repaired,
         warnings,
     })
+}
+
+/// RBL domains that no longer answer for anyone: querying them only adds a
+/// `Spam List Timeout` to every message.
+pub const DEFUNCT_RBL_DOMAINS: &[&str] = &[
+    "sorbs.net",
+    "njabl.org",
+    "ahbl.org",
+    "dsbl.org",
+    "rfc-ignorant.org",
+    "spamcannibal.org",
+    "dnsbl.inps.de",
+];
+
+/// Parse MailScanner's spam.lists.conf: `NAME<ws>domain` per line.
+pub fn parse_rbl_definitions(defs: &str) -> Vec<(String, String)> {
+    defs.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            Some((it.next()?.to_string(), it.next()?.to_string()))
+        })
+        .collect()
+}
+
+/// Is this RBL domain (or a subdomain of) one of the defunct ones?
+pub fn rbl_defunct(domain: &str) -> bool {
+    DEFUNCT_RBL_DOMAINS
+        .iter()
+        .any(|d| domain == *d || domain.ends_with(&format!(".{d}")))
+}
+
+/// `Spam List` without entries that are undefined in spam.lists.conf or point
+/// at a defunct RBL: `(kept, removed)`.
+pub fn prune_spam_list(spam_list: &str, defs: &str) -> (String, Vec<String>) {
+    let defs = parse_rbl_definitions(defs);
+    let mut kept = Vec::new();
+    let mut removed = Vec::new();
+    for name in spam_list.split_whitespace() {
+        match defs.iter().find(|(n, _)| n == name) {
+            Some((_, domain)) if !rbl_defunct(domain) => kept.push(name),
+            _ => removed.push(name.to_string()),
+        }
+    }
+    (kept.join(" "), removed)
+}
+
+/// Path of `Spam List Definitions` (default spam.lists.conf next to
+/// MailScanner.conf; `%etc-dir%` expands to that dir).
+pub fn spam_list_definitions(ms_conf: &str, conf_path: &Path) -> std::path::PathBuf {
+    let etc = conf_path.parent().unwrap_or(Path::new("/etc/MailScanner"));
+    match mailscanner::get_directive(ms_conf, "Spam List Definitions") {
+        Some(v) if !v.trim().is_empty() => {
+            std::path::PathBuf::from(v.trim().replace("%etc-dir%", &etc.display().to_string()))
+        }
+        _ => etc.join("spam.lists.conf"),
+    }
 }
 
 /// The shared SpamAssassin per-user state dir (Bayes DB, auto-whitelist) the
@@ -1458,5 +1534,22 @@ if [ $CURLORWGET = 'curl' ]; then\n  curl -S -A \"msv5 Update Script v0.3.1\" -z
         std::env::remove_var("MSFE_NG_MS_WORK_DIR");
         std::env::remove_var("MSFE_NG_SKIP_EXIM_CMDS");
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    // MailScanner 5.5.3 ships `Spam List = BARRACUDA SORBS SPAMCOP` while its
+    // spam.lists.conf no longer defines SORBS (shut down in 2024): every
+    // message waited on a dead list until the timeout.
+    #[test]
+    fn spam_list_drops_undefined_and_defunct_lists() {
+        let defs = "# comment\nBARRACUDA\t\tb.barracudacentral.org\nSPAMCOP\tbl.spamcop.net\nSORBS-OLD\tdnsbl.sorbs.net\nNJABL dnsbl.njabl.org\n";
+        let (kept, removed) = prune_spam_list("BARRACUDA SORBS SPAMCOP SORBS-OLD NJABL", defs);
+        assert_eq!(kept, "BARRACUDA SPAMCOP");
+        assert_eq!(removed, ["SORBS", "SORBS-OLD", "NJABL"]);
+        // nothing to do → unchanged
+        let (kept, removed) = prune_spam_list("BARRACUDA SPAMCOP", defs);
+        assert_eq!(kept, "BARRACUDA SPAMCOP");
+        assert!(removed.is_empty());
+        // an emptied list stays a valid (empty) directive
+        assert_eq!(prune_spam_list("SORBS", defs).0, "");
     }
 }

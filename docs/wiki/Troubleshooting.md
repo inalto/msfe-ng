@@ -91,6 +91,44 @@ The doctor checks *Bayes DB shared with MailScanner*, *Razor reporting
 identity* and *Pyzor shared home* warn when any piece is missing. DCC is
 not set up: it is not open source and not packaged for EL.
 
+## DNS blocklists: `RCVD_IN_ZEN_BLOCKED_OPENDNS`, `URIBL_BLOCKED`, `RCVD_IN_DNSWL_BLOCKED`
+
+Those 0.0 "ADMINISTRATOR NOTICE" rules mean the blocklist answered the query
+with a *refusal* code rather than data: Spamhaus (ZEN, DBL) and DNSWL reject
+queries relayed through shared or public resolvers (a hosting provider's
+resolver, 8.8.8.8, OpenDNS…), and URIBL rate-limits them. SpamAssassin then
+scores without its most valuable lists, silently. The doctor check *DNS
+blocklists answering* asks each list (Spamhaus ZEN and DBL, DNSWL, URIBL, and
+every entry of MailScanner's `Spam List`) for its documented test record
+through the system resolver and reports which ones refuse or never answer,
+plus the resolver in use when it is not on loopback.
+
+The fix is a private recursive resolver on the server itself. On cPanel the
+port is held by PowerDNS (authoritative), so bind it to the public addresses
+and run unbound on loopback:
+
+```sh
+dnf -y install unbound
+# /etc/pdns/pdns.conf — cPanel keeps custom lines across updates
+echo "local-address=<public IPv4>, <public IPv6>" >> /etc/pdns/pdns.conf
+/scripts/restartsrv_pdns
+# /etc/unbound/local.d/local.conf
+#   interface: 127.0.0.1
+#   interface: ::1
+#   access-control: 127.0.0.0/8 allow
+#   access-control: ::1 allow
+systemctl enable --now unbound
+# /etc/resolv.conf: nameserver 127.0.0.1 first, the provider's as fallback;
+# with network-scripts set PEERDNS=no and DNS1=127.0.0.1 in ifcfg-eth0 so
+# dhclient does not write it back.
+dig +short 2.0.0.127.zen.spamhaus.org   # expect 127.0.0.2/4/10, not 127.255.255.254
+```
+
+Lists that never answer are dead: SORBS shut down in 2024, yet MailScanner
+5.5.3 ships `Spam List = BARRACUDA SORBS SPAMCOP` (and no longer defines
+SORBS), so every message waited on it until `Spam List Timeout`. *Configure
+for Exim* drops undefined and known-defunct entries from `Spam List`.
+
 ## Quarantine writes fail / gaps in the date directories
 
 The quarantine must be owned by the user MailScanner runs as. *Configure for

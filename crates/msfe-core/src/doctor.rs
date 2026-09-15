@@ -264,6 +264,7 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
             "msfe-ng engine configure (creates the shared pyzor home)",
         ));
     }
+    out.push(dnsbl_check(&conf, Path::new(&cfg.mailscanner_conf)));
     // Misplaced spool files are invisible to delivery: Exim lists them but
     // computes their path from the message id, so they wait forever.
     let (_, outq) = service::queue_dirs(cfg);
@@ -639,6 +640,266 @@ fn phishing_lists_check(cfg: &Config) -> Check {
     )
 }
 
+// ---- DNS blocklists ---------------------------------------------------------
+//
+// SpamAssassin's highest-value rules (Spamhaus ZEN/DBL, DNSWL, URIBL) and
+// MailScanner's own `Spam List` are DNS lookups, and the lists answer with a
+// code instead of data when they refuse the query — Spamhaus and DNSWL
+// reject anything relayed through a shared/public resolver. Scoring then
+// silently runs without them; only a `*_BLOCKED` 0.0 rule in the report
+// tells. This check asks each list for its documented test record.
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum ListState {
+    Ok,
+    /// The list answered, but with a "not serving you" code.
+    Blocked(&'static str),
+    /// Nothing came back: dead list, or DNS unreachable.
+    NoAnswer,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ListKind {
+    Spamhaus,
+    Dnswl,
+    Uribl,
+    /// Any 127/8 answer to the 127.0.0.2 test entry means alive.
+    Generic,
+}
+
+pub struct DnsblProbe {
+    pub name: String,
+    pub query: String,
+    kind: ListKind,
+}
+
+impl DnsblProbe {
+    pub fn spamhaus(zone: &str) -> Self {
+        let query = if zone.starts_with("dbl.") {
+            format!("dbltest.com.{zone}")
+        } else {
+            format!("2.0.0.127.{zone}")
+        };
+        Self {
+            name: zone.to_string(),
+            query,
+            kind: ListKind::Spamhaus,
+        }
+    }
+    pub fn dnswl() -> Self {
+        Self {
+            name: "list.dnswl.org".into(),
+            query: "2.0.0.127.list.dnswl.org".into(),
+            kind: ListKind::Dnswl,
+        }
+    }
+    pub fn uribl() -> Self {
+        Self {
+            name: "multi.uribl.com".into(),
+            query: "test.uribl.com.multi.uribl.com".into(),
+            kind: ListKind::Uribl,
+        }
+    }
+    /// A MailScanner `Spam List` entry from spam.lists.conf.
+    pub fn mailscanner(name: &str, domain: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            query: format!("2.0.0.127.{domain}"),
+            kind: ListKind::Generic,
+        }
+    }
+
+    pub fn classify(&self, answers: &[std::net::Ipv4Addr]) -> ListState {
+        if answers.is_empty() {
+            return ListState::NoAnswer;
+        }
+        let o = |a: &std::net::Ipv4Addr| a.octets();
+        match self.kind {
+            ListKind::Spamhaus => {
+                if answers.iter().any(|a| o(a) == [127, 255, 255, 254]) {
+                    ListState::Blocked("refuses shared/public resolvers")
+                } else if answers.iter().any(|a| o(a) == [127, 255, 255, 255]) {
+                    ListState::Blocked("query limit exceeded")
+                } else {
+                    ListState::Ok
+                }
+            }
+            ListKind::Dnswl => {
+                if answers.iter().any(|a| o(a) == [127, 0, 0, 255]) {
+                    ListState::Blocked("query limit exceeded for this resolver")
+                } else {
+                    ListState::Ok
+                }
+            }
+            ListKind::Uribl => {
+                if answers.iter().any(|a| o(a) == [127, 0, 0, 1]) {
+                    ListState::Blocked("refuses this resolver (public or over its query limit)")
+                } else {
+                    ListState::Ok
+                }
+            }
+            ListKind::Generic => {
+                if answers.iter().any(|a| o(a)[0] == 127) {
+                    ListState::Ok
+                } else {
+                    ListState::NoAnswer
+                }
+            }
+        }
+    }
+}
+
+/// The lists worth probing: SpamAssassin's network rules plus whatever
+/// MailScanner's `Spam List` names (resolved through spam.lists.conf).
+fn dnsbl_probes(ms_conf: &str, conf_path: &Path) -> Vec<DnsblProbe> {
+    let mut probes = vec![
+        DnsblProbe::spamhaus("zen.spamhaus.org"),
+        DnsblProbe::spamhaus("dbl.spamhaus.org"),
+        DnsblProbe::dnswl(),
+        DnsblProbe::uribl(),
+    ];
+    if let Some(list) = mailscanner::get_directive(ms_conf, "Spam List") {
+        let defs = std::fs::read_to_string(engine::spam_list_definitions(ms_conf, conf_path))
+            .unwrap_or_default();
+        let defs = engine::parse_rbl_definitions(&defs);
+        for name in list.split_whitespace() {
+            match defs.iter().find(|(n, _)| n == name) {
+                Some((_, domain)) => probes.push(DnsblProbe::mailscanner(name, domain)),
+                None => probes.push(DnsblProbe {
+                    name: format!("{name} (not in spam.lists.conf)"),
+                    query: String::new(),
+                    kind: ListKind::Generic,
+                }),
+            }
+        }
+    }
+    probes
+}
+
+/// Resolve every probe through the system resolver, in parallel, within one
+/// deadline: the daemon is single-threaded and polls the doctor every minute,
+/// so a dead list must cost a bounded wait, not a hang.
+fn dnsbl_results(probes: &[DnsblProbe]) -> Vec<(String, ListState)> {
+    use std::net::ToSocketAddrs;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+    let (tx, rx) = mpsc::channel();
+    for (i, p) in probes.iter().enumerate() {
+        if p.query.is_empty() {
+            let _ = tx.send((i, Vec::new()));
+            continue;
+        }
+        let tx = tx.clone();
+        let q = p.query.clone();
+        std::thread::spawn(move || {
+            let ips: Vec<std::net::Ipv4Addr> = (q.as_str(), 0)
+                .to_socket_addrs()
+                .map(|it| {
+                    it.filter_map(|a| match a.ip() {
+                        std::net::IpAddr::V4(v4) => Some(v4),
+                        _ => None,
+                    })
+                    .collect()
+                })
+                .unwrap_or_default();
+            let _ = tx.send((i, ips));
+        });
+    }
+    drop(tx);
+    let mut answers: Vec<Option<Vec<std::net::Ipv4Addr>>> = vec![None; probes.len()];
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let mut pending = probes.len();
+    while pending > 0 {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok((i, ips)) => {
+                answers[i] = Some(ips);
+                pending -= 1;
+            }
+            Err(_) => break,
+        }
+    }
+    probes
+        .iter()
+        .zip(answers)
+        .map(|(p, a)| (p.name.clone(), p.classify(&a.unwrap_or_default())))
+        .collect()
+}
+
+/// First `nameserver` in resolv.conf when it is not a loopback address —
+/// the usual reason Spamhaus and DNSWL refuse the queries.
+pub fn shared_resolver() -> Option<String> {
+    let text = std::fs::read_to_string("/etc/resolv.conf").ok()?;
+    let first = text
+        .lines()
+        .map(str::trim)
+        .find_map(|l| l.strip_prefix("nameserver"))?
+        .trim()
+        .to_string();
+    let loopback = first
+        .parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false);
+    (!loopback).then_some(first)
+}
+
+/// `(ok, detail, fix)` for the probed lists.
+pub fn dnsbl_verdict(
+    results: &[(&str, ListState)],
+    shared_resolver: Option<&str>,
+) -> (bool, String, String) {
+    let blocked: Vec<String> = results
+        .iter()
+        .filter_map(|(n, s)| match s {
+            ListState::Blocked(why) => Some(format!("{n}: {why}")),
+            _ => None,
+        })
+        .collect();
+    let dead: Vec<String> = results
+        .iter()
+        .filter(|(_, s)| *s == ListState::NoAnswer)
+        .map(|(n, _)| format!("{n}: no answer"))
+        .collect();
+    if blocked.is_empty() && dead.is_empty() {
+        return (
+            true,
+            format!("{} lists answer their test records", results.len()),
+            String::new(),
+        );
+    }
+    let mut detail: Vec<String> = blocked.iter().chain(dead.iter()).cloned().collect();
+    if let Some(r) = shared_resolver {
+        detail.push(format!(
+            "resolver in use: {r} (shared — the lists refuse it)"
+        ));
+    }
+    let mut fix = Vec::new();
+    if !blocked.is_empty() || shared_resolver.is_some() {
+        fix.push(
+            "run a private recursive resolver (unbound on 127.0.0.1) and point /etc/resolv.conf at it — see the wiki, Troubleshooting → DNS blocklists"
+                .to_string(),
+        );
+    }
+    if !dead.is_empty() {
+        fix.push(
+            "a list that never answers is dead or unreachable: drop it from MailScanner's Spam List (msfe-ng engine configure removes known-defunct ones)"
+                .to_string(),
+        );
+    }
+    (false, detail.join("; "), fix.join(". "))
+}
+
+fn dnsbl_check(ms_conf: &str, conf_path: &Path) -> Check {
+    let probes = dnsbl_probes(ms_conf, conf_path);
+    let results = dnsbl_results(&probes);
+    let results: Vec<(&str, ListState)> = results
+        .iter()
+        .map(|(n, s)| (n.as_str(), s.clone()))
+        .collect();
+    let (ok, detail, fix) = dnsbl_verdict(&results, shared_resolver().as_deref());
+    check("DNS blocklists answering", ok, Level::Warn, detail, &fix)
+}
+
 /// `(ok, detail)` for the shared Bayes state dir: `state` is the configured
 /// `SpamAssassin User State Dir` as `(path, exists, writable by run_user)`.
 pub fn bayes_verdict(state: Option<(&str, bool, bool)>, run_user: &str) -> (bool, String) {
@@ -795,6 +1056,83 @@ pub fn exim_probe_verdict(real_bv: &str, probe_bv: &str) -> (bool, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Spamhaus and DNSWL refuse queries relayed through shared/public
+    // resolvers and say so in the answer; URIBL uses 127.0.0.1; a list that
+    // answers nothing for its own test record is dead or unreachable.
+    #[test]
+    fn dnsbl_answers_are_classified_by_return_code() {
+        use std::net::Ipv4Addr;
+        let ip = |s: &str| s.parse::<Ipv4Addr>().unwrap();
+        let zen = DnsblProbe::spamhaus("zen.spamhaus.org");
+        assert_eq!(
+            zen.classify(&[ip("127.0.0.2"), ip("127.0.0.4")]),
+            ListState::Ok
+        );
+        assert_eq!(
+            zen.classify(&[ip("127.255.255.254")]),
+            ListState::Blocked("refuses shared/public resolvers")
+        );
+        assert_eq!(
+            zen.classify(&[ip("127.255.255.255")]),
+            ListState::Blocked("query limit exceeded")
+        );
+        assert_eq!(zen.classify(&[]), ListState::NoAnswer);
+        let dnswl = DnsblProbe::dnswl();
+        assert_eq!(dnswl.classify(&[ip("127.0.10.0")]), ListState::Ok);
+        assert!(matches!(
+            dnswl.classify(&[ip("127.0.0.255")]),
+            ListState::Blocked(_)
+        ));
+        let uribl = DnsblProbe::uribl();
+        assert_eq!(uribl.classify(&[ip("127.0.0.14")]), ListState::Ok);
+        assert!(matches!(
+            uribl.classify(&[ip("127.0.0.1")]),
+            ListState::Blocked(_)
+        ));
+        // a MailScanner Spam List entry: any 127/8 answer to 2.0.0.127 is alive
+        let ms = DnsblProbe::mailscanner("BARRACUDA", "b.barracudacentral.org");
+        assert_eq!(ms.query, "2.0.0.127.b.barracudacentral.org");
+        assert_eq!(ms.classify(&[ip("127.0.0.2")]), ListState::Ok);
+        assert_eq!(ms.classify(&[]), ListState::NoAnswer);
+    }
+
+    #[test]
+    fn dnsbl_verdict_names_the_resolver_when_lists_block_it() {
+        let results = vec![
+            (
+                "zen.spamhaus.org",
+                ListState::Blocked("refuses shared/public resolvers"),
+            ),
+            ("list.dnswl.org", ListState::Ok),
+            ("BARRACUDA", ListState::Ok),
+        ];
+        let (ok, detail, fix) = dnsbl_verdict(&results, Some("2a01:4ff:ff00::add:1"));
+        assert!(!ok);
+        assert!(
+            detail.contains("zen.spamhaus.org") && detail.contains("refuses"),
+            "{detail}"
+        );
+        assert!(detail.contains("2a01:4ff:ff00::add:1"), "{detail}");
+        assert!(fix.contains("unbound"), "{fix}");
+
+        let results = vec![("SORBS", ListState::NoAnswer), ("BARRACUDA", ListState::Ok)];
+        let (ok, detail, fix) = dnsbl_verdict(&results, None);
+        assert!(!ok);
+        assert!(
+            detail.contains("SORBS") && detail.contains("no answer"),
+            "{detail}"
+        );
+        assert!(fix.contains("Spam List"), "{fix}");
+
+        let results = vec![
+            ("zen.spamhaus.org", ListState::Ok),
+            ("BARRACUDA", ListState::Ok),
+        ];
+        let (ok, detail, _) = dnsbl_verdict(&results, None);
+        assert!(ok, "{detail}");
+        assert!(detail.contains("2 lists"), "{detail}");
+    }
 
     // The scanning children ran with no Bayes DB for months while the UI
     // trained root's: the check must fail on a missing directive, a missing
