@@ -140,6 +140,15 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
             pruned = removed;
         }
     }
+    // The stock `Max Spam Check Size = 200k` skips every spam check (RBLs
+    // and SpamAssassin) for mail over 200 KB — routine for HTML newsletters
+    // with inline images, which then arrive "not spam (too large)" while
+    // cPanel's own spamd tags them. Only the stock-sized default is raised.
+    if let Some(v) = mailscanner::get_directive(&original, "Max Spam Check Size") {
+        if let Some(raised) = raise_spam_check_size(v) {
+            directives.push(("Max Spam Check Size".into(), raised.into()));
+        }
+    }
     let mut text = original.clone();
     let mut set = Vec::new();
     for (k, v) in &directives {
@@ -256,6 +265,25 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
         repaired,
         warnings,
     })
+}
+
+/// A MailScanner size value (`200k`, `2M`, `1500000`) in bytes; `None` for
+/// anything else (a ruleset path, garbage).
+pub fn parse_ms_size(v: &str) -> Option<u64> {
+    let v = v.trim();
+    let (num, mult) = match v.chars().last()? {
+        'k' | 'K' => (&v[..v.len() - 1], 1_000),
+        'm' | 'M' => (&v[..v.len() - 1], 1_000_000),
+        'g' | 'G' => (&v[..v.len() - 1], 1_000_000_000),
+        _ => (v, 1),
+    };
+    num.trim().parse::<u64>().ok().map(|n| n * mult)
+}
+
+/// The value to raise a stock-sized `Max Spam Check Size` to, or `None` when
+/// the admin set something larger (or a ruleset) that must be kept.
+pub fn raise_spam_check_size(current: &str) -> Option<&'static str> {
+    (parse_ms_size(current)? <= 200_000).then_some("2M")
 }
 
 /// RBL domains that no longer answer for anyone: querying them only adds a
@@ -1551,5 +1579,27 @@ if [ $CURLORWGET = 'curl' ]; then\n  curl -S -A \"msv5 Update Script v0.3.1\" -z
         assert!(removed.is_empty());
         // an emptied list stays a valid (empty) directive
         assert_eq!(prune_spam_list("SORBS", defs).0, "");
+    }
+
+    // `Max Spam Check Size = 200k` (the stock default) skips every spam check
+    // — RBLs and SpamAssassin — for any message over 200 KB: 8.6% of one
+    // month's mail on the test server went through unscored ("too large")
+    // while cPanel's own spamd tagged it. Only the stock-sized default is
+    // raised; an admin's own value stays.
+    #[test]
+    fn stock_max_spam_check_size_is_raised_but_custom_values_stay() {
+        assert_eq!(parse_ms_size("200k"), Some(200_000));
+        assert_eq!(parse_ms_size("2M"), Some(2_000_000));
+        assert_eq!(parse_ms_size(" 150000 "), Some(150_000));
+        assert_eq!(parse_ms_size("lots"), None);
+        assert_eq!(raise_spam_check_size("200k"), Some("2M"));
+        assert_eq!(raise_spam_check_size("100k"), Some("2M"));
+        assert_eq!(raise_spam_check_size("2M"), None);
+        assert_eq!(raise_spam_check_size("5M"), None);
+        assert_eq!(raise_spam_check_size("300k"), None);
+        assert_eq!(
+            raise_spam_check_size("/etc/MailScanner/rules/x.rules"),
+            None
+        );
     }
 }

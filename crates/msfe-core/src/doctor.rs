@@ -265,6 +265,30 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
         ));
     }
     out.push(dnsbl_check(&conf, Path::new(&cfg.mailscanner_conf)));
+    // Mail over `Max Spam Check Size` bypasses every spam check; the DB
+    // records those as "too large" reports.
+    if let Some(limit) = mailscanner::get_directive(&conf, "Max Spam Check Size") {
+        let (skipped, total) = db::query(
+            cfg,
+            "SELECT COALESCE(SUM(spamreport LIKE '%too large%'),0), COUNT(*) \
+             FROM maillog WHERE msg_ts >= (NOW() - INTERVAL 30 DAY)",
+        )
+        .ok()
+        .and_then(|rows| rows.into_iter().next())
+        .map(|r| {
+            let n = |i: usize| r.get(i).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+            (n(0), n(1))
+        })
+        .unwrap_or((0, 0));
+        let (ok, detail) = spam_check_size_verdict(limit, skipped, total);
+        out.push(check(
+            "large messages get spam-checked",
+            ok,
+            Level::Warn,
+            detail,
+            "msfe-ng engine configure (raises the stock 200k limit to 2M), or set Max Spam Check Size in MailScanner.conf",
+        ));
+    }
     // Misplaced spool files are invisible to delivery: Exim lists them but
     // computes their path from the message id, so they wait forever.
     let (_, outq) = service::queue_dirs(cfg);
@@ -900,6 +924,29 @@ fn dnsbl_check(ms_conf: &str, conf_path: &Path) -> Check {
     check("DNS blocklists answering", ok, Level::Warn, detail, &fix)
 }
 
+/// `(ok, detail)` for `Max Spam Check Size`: warns when mail was actually
+/// skipped in the last 30 days and the limit is a plain size (rulesets are
+/// the admin's business).
+pub fn spam_check_size_verdict(limit: &str, skipped: u64, total: u64) -> (bool, String) {
+    let bytes = engine::parse_ms_size(limit);
+    if skipped == 0 || bytes.is_none() {
+        return (
+            true,
+            format!(
+                "Max Spam Check Size = {}; no message skipped as too large in 30 days",
+                limit.trim()
+            ),
+        );
+    }
+    (
+        false,
+        format!(
+            "{skipped} of {total} messages in 30 days skipped every spam check as too large (Max Spam Check Size = {}) — HTML mail with images routinely exceeds it",
+            limit.trim()
+        ),
+    )
+}
+
 /// `(ok, detail)` for the shared Bayes state dir: `state` is the configured
 /// `SpamAssassin User State Dir` as `(path, exists, writable by run_user)`.
 pub fn bayes_verdict(state: Option<(&str, bool, bool)>, run_user: &str) -> (bool, String) {
@@ -1132,6 +1179,23 @@ mod tests {
         let (ok, detail, _) = dnsbl_verdict(&results, None);
         assert!(ok, "{detail}");
         assert!(detail.contains("2 lists"), "{detail}");
+    }
+
+    #[test]
+    fn spam_check_size_verdict_counts_skipped_mail() {
+        let (ok, d) = spam_check_size_verdict("200k", 52, 603);
+        assert!(!ok);
+        assert!(
+            d.contains("52") && d.contains("603") && d.contains("200k"),
+            "{d}"
+        );
+        let (ok, d) = spam_check_size_verdict("2M", 0, 500);
+        assert!(ok, "{d}");
+        // a small limit with nothing actually skipped is still worth a note
+        // only when mail was skipped: no skips, no warning
+        assert!(spam_check_size_verdict("200k", 0, 10).0);
+        // a ruleset value cannot be judged here
+        assert!(spam_check_size_verdict("/etc/MailScanner/rules/size.rules", 3, 10).0);
     }
 
     // The scanning children ran with no Bayes DB for months while the UI

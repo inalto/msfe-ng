@@ -129,6 +129,20 @@ Lists that never answer are dead: SORBS shut down in 2024, yet MailScanner
 SORBS), so every message waited on it until `Spam List Timeout`. *Configure
 for Exim* drops undefined and known-defunct entries from `Spam List`.
 
+## A spam shows as `not spam (too large)`
+
+MailScanner skips *every* spam check — RBLs and SpamAssassin — for messages
+bigger than `Max Spam Check Size`, and 5.5.3 ships that at `200k`, a size any
+HTML newsletter with inline images exceeds. Such mail is logged with the
+report `not spam (too large)` and delivered unscored (on cPanel the
+account's own Apache SpamAssassin may still tag it — that is the
+`X-Spam-Status` header, not MailScanner's). *Configure for Exim* raises a
+stock-sized limit to `2M`; a larger or ruleset value set by hand is kept.
+SpamAssassin itself still only reads the first `Max SpamAssassin Size`
+(200k) of each message, so the cost is small. The doctor check *large
+messages get spam-checked* reports how many messages were skipped in the
+last 30 days.
+
 ## Quarantine writes fail / gaps in the date directories
 
 The quarantine must be owned by the user MailScanner runs as. *Configure for
