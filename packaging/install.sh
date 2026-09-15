@@ -64,6 +64,11 @@ install -m 0755 "$HERE/engine-install.sh" "$BINDIR/msfe-ng-engine-install"
 # (cPanel 138) and misfiles every outgoing spool file; `engine configure`
 # points MailScanner.conf here (see exim-shim.sh).
 install -m 0755 "$HERE/exim-shim.sh" "$BINDIR/msfe-ng-exim"
+# uninstaller kept on disk: the tarball this runs from is a temp dir that
+# get.sh deletes on exit (lib.sh is what it sources)
+mkdir -p "$PREFIX/packaging"
+install -m 0755 "$HERE/uninstall.sh" "$PREFIX/packaging/uninstall.sh"
+install -m 0644 "$HERE/lib.sh"       "$PREFIX/packaging/lib.sh"
 cp -a "$REPO/web/." "$WEBROOT/"
 # M1: SQL migrations and the MailScanner logging plugin
 install -m 0644 "$REPO"/db/migrations/*.sql "$PREFIX/db/migrations/"
@@ -261,11 +266,15 @@ case "$panel" in
     directadmin) info "Open DirectAdmin > Admin/User level > MSFE-NG." ;;
 esac
 echo
-info "Next steps:"
-info "  1. Create the MySQL DB + user, set creds in $CONFDIR/config.toml"
-info "  2. Apply the schema:        msfe-ng db-migrate"
-info "  3. Import existing policy:  msfe-ng import /usr/msfe --save   (optional, from a legacy MSFE)"
-info "  4. Generate rules:          msfe-ng sync        (also runs every 10 min via cron)"
-info "  5. Enable message logging:  msfe-ng mailscanner enable-logging   (then restart MailScanner)"
-info "  6. Enable SpamBox:          msfe-ng spambox enable   (then include it in Exim)"
-info "Remove everything with: $HERE/uninstall.sh"
+if [ -n "$PREV_VER" ]; then
+    info "Upgraded from $PREV_VER — settings, policy and wiring were kept."
+else
+    info "Next steps:"
+    info "  1. Create the MySQL DB + user, set creds in $CONFDIR/config.toml"
+    info "  2. Apply the schema:        msfe-ng db-migrate"
+    info "  3. Import existing policy:  msfe-ng import /usr/msfe --save   (optional, from a legacy MSFE)"
+    info "  4. Generate rules:          msfe-ng sync        (also runs every 10 min via cron)"
+    info "  5. Enable message logging:  msfe-ng mailscanner enable-logging   (then restart MailScanner)"
+    info "  6. Enable SpamBox:          msfe-ng spambox enable   (then include it in Exim)"
+fi
+info "Remove everything with: $PREFIX/packaging/uninstall.sh   (add --purge to drop config too)"
