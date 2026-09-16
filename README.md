@@ -116,6 +116,13 @@ Browser ─► panel shim (WHM CGI · cPanel UAPI/live-CGI · DA CGI)
                 └─ digests · housekeeping · monitor (auto-clean + Telegram) · doctor
 ```
 
+The socket is world-connectable; the daemon authenticates every connection by
+its kernel peer credentials (`SO_PEERCRED`): root callers (the WHM/DA admin
+shims, the CLI) get the admin surface and may vouch for a panel user via
+`X-MSFE-User`; any other uid — the cPanel LiveAPI CGI and DirectAdmin user
+plugins run as the account — gets only the end-user page and `/api/user/*`,
+scoped to the account that uid belongs to, whatever headers it sends.
+
 - `crates/msfe-ngd` — daemon: serves the UI + JSON API.
 - `crates/msfe-cli` — `msfe-ng` CLI (install/cron/hooks and admin use).
 - `crates/msfe-core` — rule engine, engine wiring, queue view, monitor, doctor,

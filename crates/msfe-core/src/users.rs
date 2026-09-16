@@ -45,6 +45,24 @@ pub fn owns_domain(user: &str, domain: &str) -> bool {
     user_domains(user).iter().any(|d| d == domain)
 }
 
+/// The account name behind a uid (`/etc/passwd`), for callers authenticated
+/// by socket peer credentials. None when unknown or unsafe as a username.
+pub fn username_of_uid(uid: u32) -> Option<String> {
+    username_from_passwd(&read(Path::new("/etc/passwd")), uid)
+}
+
+fn username_from_passwd(passwd: &str, uid: u32) -> Option<String> {
+    passwd.lines().find_map(|l| {
+        let mut f = l.split(':');
+        let name = f.next()?;
+        f.next(); // password field
+        if f.next()?.parse::<u32>().ok()? != uid {
+            return None;
+        }
+        valid_username(name).then(|| name.to_string())
+    })
+}
+
 fn read(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_default()
 }
@@ -74,6 +92,16 @@ fn read_lines(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolves_username_from_passwd_uid() {
+        let passwd = "root:x:0:0:root:/root:/bin/bash\nbob:x:1001:1002::/home/bob:/bin/bash\nbad name:x:1003:1003::/x:/bin/sh\n";
+        assert_eq!(username_from_passwd(passwd, 1001).as_deref(), Some("bob"));
+        assert_eq!(username_from_passwd(passwd, 0).as_deref(), Some("root"));
+        assert_eq!(username_from_passwd(passwd, 4242), None);
+        // a name unsafe for path use is treated as unknown
+        assert_eq!(username_from_passwd(passwd, 1003), None);
+    }
 
     #[test]
     fn username_validation() {

@@ -63,3 +63,5 @@ jobs:
           done
       - name: logging plugin test
         run: sudo apt-get install -y libdbd-sqlite3-perl && perl panel/mailscanner/t/msfeng.t
+      - name: cPanel live.cgi contract test
+        run: perl panel/cpanel/jupiter/t/live-cgi.t

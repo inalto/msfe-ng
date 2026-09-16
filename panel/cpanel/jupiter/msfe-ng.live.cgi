@@ -11,10 +11,20 @@ use warnings;
 use IO::Socket::UNIX ();
 use Socket qw(SOCK_STREAM);
 
+BEGIN { unshift @INC, '/usr/local/cpanel' }
+
 my $SOCKET = $ENV{MSFE_NG_SOCKET} || '/var/run/msfe-ng/msfe-ng.sock';
 
-# The authenticated cPanel account (cPanel sets REMOTE_USER for user CGIs).
-my $user = $ENV{REMOTE_USER} || $ENV{USER} || '';
+# cPanel runs *.live.cgi under its LiveAPI engine and kills the child unless it
+# connects back before producing output ("Child failed to make LIVEAPI
+# connection to cPanel"), so open the session first — it also gives us the
+# account name authoritatively. Absent outside cPanel (tests), hence eval.
+my $cpanel = eval { require Cpanel::LiveAPI; Cpanel::LiveAPI->new() };
+
+# The authenticated cPanel account.
+my $user = $ENV{REMOTE_USER} || '';
+$user = ( $cpanel->cpanelprint('$user') // '' ) if !$user && $cpanel;
+$user ||= ( getpwuid($>) )[0] // '';    # the LiveAPI child runs as the account
 $user =~ s/[^A-Za-z0-9_.\-]//g;    # defensive: safe charset only
 
 my $path   = $ENV{HTTP_X_MSFE_PATH} || $ENV{PATH_INFO} || '/user';
@@ -29,6 +39,7 @@ my $sock = IO::Socket::UNIX->new(
 unless ($sock) {
     print "Status: 502 Bad Gateway\r\nContent-type: text/html\r\n\r\n";
     print "<p>MSFE-NG is temporarily unavailable.</p>";
+    $cpanel->end() if $cpanel;
     exit;
 }
 my $clen = length $body;
@@ -46,3 +57,4 @@ my ($ctype)  = $head =~ m{^Content-Type:\s*([^\r\n]+)}im;
 print "Status: " . ( $status || '200 OK' ) . "\r\n";
 print "Content-type: " . ( $ctype || 'text/html; charset=utf-8' ) . "\r\n\r\n";
 print $rbody;
+$cpanel->end() if $cpanel;

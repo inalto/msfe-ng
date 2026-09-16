@@ -115,8 +115,45 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Apply the trust the kernel gives us about the caller. The socket is shared
+/// by the root-run admin shims and the panel's per-account user CGIs, so who
+/// is on the other end is decided by SO_PEERCRED, never by headers:
+///
+/// * uid 0 — the admin surface; `X-MSFE-User` is honoured (the WHM/DA shims
+///   run as root and vouch for the panel session).
+/// * any other uid — only the end-user page and `/api/user/*`, and the user
+///   IS the account that uid belongs to, whatever the header said.
+/// * unknown uid / undetermined — health only.
+///
+/// Returns the response to send instead when the request is refused.
+pub fn peer_scope(
+    req: &mut Request,
+    peer_uid: Option<u32>,
+    name_of: impl Fn(u32) -> Option<String>,
+) -> Option<Response> {
+    if peer_uid == Some(0) {
+        return None;
+    }
+    if req.path == "/health" || req.path == "/api/health" {
+        return None;
+    }
+    let user = peer_uid.and_then(&name_of);
+    let user_route =
+        req.path == "/user" || req.path == "/user/" || req.path.starts_with("/api/user/");
+    match user {
+        Some(u) if user_route => {
+            req.user = u;
+            None
+        }
+        _ => Some(Response::json(
+            403,
+            r#"{"error":"forbidden: not an admin connection"}"#,
+        )),
+    }
+}
+
 pub struct Response {
-    status: u16,
+    pub status: u16,
     content_type: &'static str,
     body: String,
 }
@@ -149,6 +186,7 @@ impl Response {
     pub fn write<W: Write>(&self, mut stream: W) -> io::Result<()> {
         let reason = match self.status {
             200 => "OK",
+            403 => "Forbidden",
             404 => "Not Found",
             500 => "Internal Server Error",
             _ => "OK",
@@ -182,6 +220,64 @@ mod tests {
             body: String::new(),
             user: String::new(),
         }
+    }
+
+    fn path_req(method: &str, path: &str, user: &str) -> Request {
+        Request {
+            method: method.into(),
+            path: path.into(),
+            query: String::new(),
+            body: String::new(),
+            user: user.into(),
+        }
+    }
+
+    fn name_of(uid: u32) -> Option<String> {
+        (uid == 1001).then(|| "bob".to_string())
+    }
+
+    #[test]
+    fn root_peer_keeps_admin_surface_and_header_user() {
+        let mut r = path_req("GET", "/api/messages", "alice");
+        assert!(peer_scope(&mut r, Some(0), name_of).is_none());
+        assert_eq!(r.user, "alice");
+    }
+
+    #[test]
+    fn unprivileged_peer_is_the_account_it_runs_as() {
+        // the header is whatever the client chose to send — never trusted
+        let mut r = path_req("GET", "/api/user/domains", "alice");
+        assert!(peer_scope(&mut r, Some(1001), name_of).is_none());
+        assert_eq!(r.user, "bob");
+        let mut r = path_req("GET", "/user", "");
+        assert!(peer_scope(&mut r, Some(1001), name_of).is_none());
+        assert_eq!(r.user, "bob");
+    }
+
+    #[test]
+    fn unprivileged_peer_cannot_reach_admin_routes() {
+        for (m, p) in [
+            ("GET", "/api/messages"),
+            ("GET", "/"),
+            ("GET", "/whm"),
+            ("POST", "/api/config"),
+            ("GET", "/api/userx"),
+        ] {
+            let mut r = path_req(m, p, "");
+            let denied = peer_scope(&mut r, Some(1001), name_of).expect(p);
+            assert_eq!(denied.status, 403, "{p}");
+        }
+    }
+
+    #[test]
+    fn unknown_or_undetermined_peer_gets_nothing_but_health() {
+        let mut r = path_req("GET", "/health", "");
+        assert!(peer_scope(&mut r, None, name_of).is_none());
+        let mut r = path_req("GET", "/api/user/domains", "alice");
+        assert_eq!(peer_scope(&mut r, None, name_of).unwrap().status, 403);
+        // uid with no passwd entry
+        let mut r = path_req("GET", "/api/user/domains", "alice");
+        assert_eq!(peer_scope(&mut r, Some(4242), name_of).unwrap().status, 403);
     }
 
     #[test]

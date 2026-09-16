@@ -13,8 +13,10 @@ mod http;
 mod views;
 
 use msfe_api::{DEFAULT_SOCKET_PATH, VERSION};
-use msfe_core::detect_panel;
+use msfe_core::{detect_panel, users};
 use std::io;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 
@@ -48,6 +50,10 @@ fn main() -> io::Result<()> {
     }
 
     let listener = UnixListener::bind(&path)?;
+    // World-connectable on purpose: the panel's end-user CGIs run as the
+    // account (cPanel LiveAPI, DirectAdmin user plugins). Every connection is
+    // authorised by its peer uid in `handle` — see http::peer_scope.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))?;
     eprintln!("msfe-ngd: listening on {path}");
 
     for stream in listener.incoming() {
@@ -65,7 +71,10 @@ fn main() -> io::Result<()> {
 }
 
 fn handle(stream: UnixStream) -> io::Result<()> {
-    let req = http::Request::read(&stream)?;
+    let mut req = http::Request::read(&stream)?;
+    if let Some(denied) = http::peer_scope(&mut req, peer_uid(&stream), users::username_of_uid) {
+        return denied.write(stream);
+    }
     let panel = detect_panel();
 
     let resp = if req.path == "/health" || req.path == "/api/health" {
@@ -93,4 +102,45 @@ fn handle(stream: UnixStream) -> io::Result<()> {
     };
 
     resp.write(stream)
+}
+
+/// The uid of the process on the other end of a Unix socket (Linux
+/// SO_PEERCRED). None if the kernel would not tell us — treated as untrusted.
+/// std's `UnixStream::peer_cred` is still unstable, hence the small FFI.
+fn peer_uid(stream: &UnixStream) -> Option<u32> {
+    #[repr(C)]
+    struct Ucred {
+        pid: i32,
+        uid: u32,
+        gid: u32,
+    }
+    extern "C" {
+        fn getsockopt(
+            fd: i32,
+            level: i32,
+            name: i32,
+            value: *mut std::ffi::c_void,
+            len: *mut u32,
+        ) -> i32;
+    }
+    const SOL_SOCKET: i32 = 1;
+    const SO_PEERCRED: i32 = 17;
+    let mut cred = Ucred {
+        pid: 0,
+        uid: u32::MAX,
+        gid: u32::MAX,
+    };
+    let mut len = std::mem::size_of::<Ucred>() as u32;
+    // SAFETY: fd is a live socket owned by `stream`; `cred`/`len` are valid,
+    // correctly sized out-pointers for the duration of the call.
+    let rc = unsafe {
+        getsockopt(
+            stream.as_raw_fd(),
+            SOL_SOCKET,
+            SO_PEERCRED,
+            (&mut cred as *mut Ucred).cast(),
+            &mut len,
+        )
+    };
+    (rc == 0 && len as usize == std::mem::size_of::<Ucred>()).then_some(cred.uid)
 }
