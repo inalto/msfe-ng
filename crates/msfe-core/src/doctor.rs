@@ -498,7 +498,8 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
         }
     }
 
-    let plugin = Path::new(&cfg.mailscanner_custom_dir).join(msfe_api::MS_PLUGIN_FILENAME);
+    let plugin = mailscanner::custom_functions_dir(&conf, &cfg.mailscanner_custom_dir)
+        .join(msfe_api::MS_PLUGIN_FILENAME);
     let logging = plugin.exists()
         && mailscanner::get_directive(&conf, mailscanner::LOGGING_DIRECTIVE)
             == Some(mailscanner::LOGGING_VALUE);

@@ -77,9 +77,72 @@ pub fn get_directive<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     None
 }
 
+/// Where MailScanner actually loads custom functions from: its own
+/// `Custom Functions Dir` directive, with `%etc-dir%`-style variables expanded
+/// from the definitions at the top of the same file. Only when the directive
+/// is absent does the configured `fallback` (`mailscanner_custom_dir`) apply —
+/// installing the plugin anywhere else leaves `&MSFENGLogging` undefined
+/// (ConfigServer's layout has no `/etc/MailScanner/custom` symlink).
+pub fn custom_functions_dir(text: &str, fallback: &str) -> std::path::PathBuf {
+    match get_directive(text, "Custom Functions Dir") {
+        Some(v) if !v.is_empty() => std::path::PathBuf::from(expand_variables(text, v)),
+        _ => std::path::PathBuf::from(fallback),
+    }
+}
+
+/// Substitute every `%name%` in `value` with its `%name% = …` definition from
+/// the conf; unknown variables are left as-is.
+fn expand_variables(text: &str, value: &str) -> String {
+    let mut out = value.to_string();
+    for line in text.lines() {
+        let t = line.trim_start();
+        if !t.starts_with('%') {
+            continue;
+        }
+        if let Some((name, val)) = t.split_once('=') {
+            let name = name.trim();
+            if name.ends_with('%') && out.contains(name) {
+                out = out.replace(name, val.trim());
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_dir_comes_from_the_conf_directive() {
+        // ConfigServer layout: nothing under /etc/MailScanner at all.
+        let conf = "Custom Functions Dir = /usr/mailscanner/usr/share/MailScanner/perl/custom\n";
+        assert_eq!(
+            custom_functions_dir(conf, "/etc/MailScanner/custom"),
+            std::path::PathBuf::from("/usr/mailscanner/usr/share/MailScanner/perl/custom")
+        );
+    }
+
+    #[test]
+    fn custom_dir_expands_conf_variables() {
+        let conf = "%etc-dir% = /usr/mailscanner/etc\nCustom Functions Dir = %etc-dir%/custom\n";
+        assert_eq!(
+            custom_functions_dir(conf, "/etc/MailScanner/custom"),
+            std::path::PathBuf::from("/usr/mailscanner/etc/custom")
+        );
+    }
+
+    #[test]
+    fn custom_dir_falls_back_to_config_when_directive_is_missing() {
+        assert_eq!(
+            custom_functions_dir("Foo = bar\n", "/etc/MailScanner/custom"),
+            std::path::PathBuf::from("/etc/MailScanner/custom")
+        );
+        assert_eq!(
+            custom_functions_dir("Custom Functions Dir =\n", "/etc/MailScanner/custom"),
+            std::path::PathBuf::from("/etc/MailScanner/custom")
+        );
+    }
 
     #[test]
     fn replaces_existing_directive() {

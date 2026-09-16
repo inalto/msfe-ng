@@ -61,3 +61,5 @@ jobs:
                    panel/directadmin/admin/index.raw panel/directadmin/user/index.raw; do
             echo "== $f"; perl -c "$f" || exit 1
           done
+      - name: logging plugin test
+        run: sudo apt-get install -y libdbd-sqlite3-perl && perl panel/mailscanner/t/msfeng.t

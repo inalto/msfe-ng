@@ -18,7 +18,8 @@ pub struct Config {
     pub db_pass: String,
     /// Path to the live MailScanner.conf (for opt-in logging enable/disable).
     pub mailscanner_conf: String,
-    /// MailScanner custom-functions directory (where the logging plugin installs).
+    /// Fallback custom-functions directory, used only when MailScanner.conf has
+    /// no `Custom Functions Dir` (the plugin installs where MailScanner loads from).
     pub mailscanner_custom_dir: String,
     /// MailScanner ruleset directory that `sync` writes the managed rules into.
     pub mailscanner_rules_dir: String,

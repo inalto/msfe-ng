@@ -31,9 +31,10 @@ two buttons — both safe to re-run:
    MSFE-NG config and applies the schema. Nothing outside MSFE-NG's own
    database is touched. (CLI: set `db_*` in `config.toml`, then `msfe-ng db-migrate`.)
 2. **Enable message logging** — installs the MSFE-NG logging plugin into
-   MailScanner (a one-time backup of `MailScanner.conf` is kept) and restarts
-   MailScanner, so every scanned message is recorded. (CLI:
-   `msfe-ng mailscanner enable-logging`.)
+   MailScanner's `Custom Functions Dir` (read from `MailScanner.conf`, so
+   ConfigServer-style layouts under `/usr/mailscanner` work too; a one-time
+   backup of `MailScanner.conf` is kept) and restarts MailScanner, so every
+   scanned message is recorded. (CLI: `msfe-ng mailscanner enable-logging`.)
 
 Then, on the [Service](Service) tab:
 

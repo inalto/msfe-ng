@@ -4,70 +4,58 @@ package MailScanner::CustomConfig;
 #
 # Purpose: log one row per scanned message into the `maillog` MySQL table that
 # backs MSFE-NG's reporting and quarantine views. Written from scratch; the
-# behavior (forked persistent-connection logger, the maillog column set) follows
-# the MailScanner logging contract and is compatible with MailWatch's schema.
-# No original ConfigServer or MailWatch code is copied.
+# maillog column set follows the MailScanner logging contract and is compatible
+# with MailWatch's schema. No original ConfigServer or MailWatch code is copied.
 #
 # Activation (do NOT run automatically — see `msfe-ng mailscanner enable-logging`):
 #   1. install this file into MailScanner's custom-functions directory, and
 #   2. set in MailScanner.conf:  Always Looked Up Last = &MSFENGLogging
 # MailScanner then calls InitMSFENGLogging at startup, MSFENGLogging per message,
 # and EndMSFENGLogging at shutdown.
+#
+# Process model: MailScanner runs these in EVERY scanning child (Init when the
+# child starts, End when it dies — every `Restart Every` seconds), so there is
+# deliberately no shared logger daemon: each child owns one lazily opened,
+# persistent DB connection. A shared singleton either gets started N times
+# ("Address already in use") or is killed by the first child to exit while its
+# siblings silently lose rows.
 
 use strict;
 use warnings;
 
-use IO::Socket::INET ();
-use Storable qw(freeze thaw);
-use POSIX ();
 use Sys::Hostname qw(hostname);
 
-# DBI/DBD::mysql are only needed inside the forked logger, and only in the live
+# DBI/DBD::mysql are only needed once a message is logged, and only in the live
 # MailScanner environment. require (not use) so `perl -c` passes on CI hosts
 # without the driver installed.
 
 my $CONF_FILE = $ENV{MSFE_NG_CONFIG} || '/etc/msfe-ng/config.toml';
 our @COLS;   # insert column list, intersected with the live table at connect
-my $LISTEN_IP = '127.0.0.1';
-my $LISTEN_PORT = 47_712;         # MSFE-NG's own port (localhost only)
-my $IDLE_TIMEOUT = 3600;          # self-terminate a wedged logger after 1h
+my $RETRY_AFTER = 60;             # seconds between connect attempts while the DB is down
 
 my %DB;                           # db_host/db_port/db_name/db_user/db_pass
 my $DBH;
 my $INSERT;
+my $LAST_FAIL = 0;
 
 # ---- MailScanner entry points ------------------------------------------------
 
 sub InitMSFENGLogging {
     read_db_config();
-    fork_logger();
     return;
 }
 
 sub EndMSFENGLogging {
-    my $sock = client_socket();
-    if ($sock) {
-        print {$sock} "quit\n";
-        close $sock;
-    }
+    db_disconnect();
     return;
 }
 
-# Called for every message. Serializes the fields we log and hands them to the
-# persistent logger over the localhost socket, so scanning is never blocked on
-# the database.
+# Called for every message: insert the row over this child's own connection.
 sub MSFENGLogging {
     my ($message) = @_;
     return unless defined $message && defined $message->{id};
-
     my %row = extract_row($message);
-    my $frozen = eval { freeze(\%row) };
-    return unless defined $frozen;
-
-    my $sock = client_socket() or return;
-    print {$sock} unpack('H*', $frozen), "\n";
-    print {$sock} "end\n";
-    close $sock;
+    insert_row(\%row);
     return;
 }
 
@@ -99,46 +87,22 @@ sub read_db_config {
     return;
 }
 
-# ---- forked persistent logger ------------------------------------------------
+# ---- per-child persistent connection ----------------------------------------
 
-sub client_socket {
-    return IO::Socket::INET->new(
-        PeerAddr => $LISTEN_IP,
-        PeerPort => $LISTEN_PORT,
-        Proto    => 'tcp',
-        Timeout  => 5,
-    );
+sub db_dsn {
+    return "DBI:mysql:database=$DB{db_name};host=$DB{db_host};port=$DB{db_port}";
 }
 
-# Double-fork a detached logger that owns the single DB connection.
-sub fork_logger {
-    my $pid = fork();
-    if (!defined $pid) {
-        _log("MSFE-NG: cannot fork logger: $!");
-        return;
-    }
-    if ($pid) {
-        waitpid $pid, 0;
-        _log('MSFE-NG: started logging daemon');
-        return;
-    }
-
-    POSIX::setsid();
-    exit 0 if fork();               # detach; grandchild is the daemon
-
-    $SIG{HUP} = $SIG{INT} = $SIG{PIPE} = $SIG{TERM} = $SIG{ALRM} = \&_shutdown;
-    $0 = 'MSFE-NG: maillog';
-    logger_connect();
-    logger_serve();
-    exit 0;
-}
-
-sub logger_connect {
+sub db_connect {
+    db_disconnect();
     require DBI;
-    my $dsn = "DBI:mysql:database=$DB{db_name};host=$DB{db_host};port=$DB{db_port}";
-    $DBH = DBI->connect($dsn, $DB{db_user}, $DB{db_pass},
-        { PrintError => 0, RaiseError => 0, mysql_enable_utf8mb4 => 1 });
+    # AutoInactiveDestroy: MailScanner children fork helpers (virus scanners
+    # etc.); their exit must not tear down the connection they inherited.
+    $DBH = DBI->connect(db_dsn(), $DB{db_user}, $DB{db_pass},
+        { PrintError => 0, RaiseError => 0, AutoInactiveDestroy => 1,
+          mysql_enable_utf8mb4 => 1 });
     unless ($DBH) {
+        $LAST_FAIL = time;
         _log("MSFE-NG: DB connect failed: $DBI::errstr");
         return;
     }
@@ -152,56 +116,33 @@ sub logger_connect {
     my $ph = join ',', ('?') x scalar(@COLS);
     my $sql = 'INSERT INTO maillog (' . join(',', @COLS) . ") VALUES ($ph)";
     $INSERT = $DBH->prepare($sql);
+    $LAST_FAIL = 0;
     _log("MSFE-NG: connected to maillog database $DB{db_name}");
     return;
 }
 
-sub logger_serve {
-    my $server = IO::Socket::INET->new(
-        LocalAddr => $LISTEN_IP,
-        LocalPort => $LISTEN_PORT,
-        Proto     => 'tcp',
-        Listen    => POSIX::INT_MAX > 0 ? 128 : 5,
-        ReuseAddr => 1,
-    ) or do { _log("MSFE-NG: cannot listen: $!"); return; };
-
-    while (my $client = $server->accept()) {
-        alarm($IDLE_TIMEOUT);
-        my $peer = $client->peerhost() // '';
-        if ($peer ne $LISTEN_IP) { close $client; next; }   # localhost only
-
-        my $hex = '';
-        while (my $l = <$client>) {
-            $l =~ s/\r?\n$//;
-            last if $l eq 'end';
-            _shutdown() if $l eq 'quit';
-            $hex .= $l;
-        }
-        close $client;
-        next if $hex eq '';
-
-        my $row = eval { thaw(pack('H*', $hex)) };
-        next unless ref $row eq 'HASH';
-        insert_row($row);
+sub db_disconnect {
+    $INSERT = undef;
+    if ($DBH) {
+        eval { $DBH->disconnect };
+        $DBH = undef;
     }
     return;
 }
 
 sub insert_row {
     my ($row) = @_;
-    return unless $INSERT;
-    unless ($DBH && $DBH->ping) { logger_connect(); return unless $INSERT; }
+    unless ($DBH && $DBH->ping) {
+        # While the DB is down, one attempt per minute keeps the log readable.
+        return if $LAST_FAIL && time - $LAST_FAIL < $RETRY_AFTER;
+        db_connect();
+        return unless $INSERT;
+    }
     my @vals = map { $row->{$_} } @COLS;
     unless ($INSERT->execute(@vals)) {
         _log("MSFE-NG: insert failed: $DBI::errstr");
     }
     return;
-}
-
-sub _shutdown {
-    $SIG{INT} = $SIG{TERM} = 'IGNORE';
-    $DBH->disconnect if $DBH;
-    exit 0;
 }
 
 # ---- message → row -----------------------------------------------------------

@@ -421,15 +421,16 @@ fn cmd_db_migrate(flag: Option<&str>) -> ExitCode {
 
 /// Opt-in activation of the MailScanner logging plugin. Edits the live
 /// MailScanner.conf (with a `.msfe-ng.bak` backup) and copies the plugin into
-/// the custom-functions dir. Never run by the installer.
+/// MailScanner's own `Custom Functions Dir`. Never run by the installer.
 fn cmd_mailscanner(sub: Option<&str>) -> ExitCode {
     use msfe_core::mailscanner as ms;
     let cfg = Config::load(&config_path());
+    let conf = std::fs::read_to_string(&cfg.mailscanner_conf).unwrap_or_default();
+    let dir = ms::custom_functions_dir(&conf, &cfg.mailscanner_custom_dir);
+    let plugin = dir.join(msfe_api::MS_PLUGIN_FILENAME);
     match sub {
         Some("status") => {
-            let conf = std::fs::read_to_string(&cfg.mailscanner_conf).unwrap_or_default();
             let cur = ms::get_directive(&conf, ms::LOGGING_DIRECTIVE).unwrap_or("(unset)");
-            let plugin = Path::new(&cfg.mailscanner_custom_dir).join(msfe_api::MS_PLUGIN_FILENAME);
             println!("MailScanner.conf: {}", cfg.mailscanner_conf);
             println!("  {} = {}", ms::LOGGING_DIRECTIVE, cur);
             println!(
@@ -445,15 +446,14 @@ fn cmd_mailscanner(sub: Option<&str>) -> ExitCode {
         }
         Some("enable-logging") => {
             // 1. copy the plugin into the custom-functions directory
-            let dst = Path::new(&cfg.mailscanner_custom_dir).join(msfe_api::MS_PLUGIN_FILENAME);
             let src = std::env::var("MSFE_NG_MS_PLUGIN_SRC")
                 .unwrap_or_else(|_| msfe_api::DEFAULT_MS_PLUGIN_SRC.to_string());
-            if let Err(e) = std::fs::create_dir_all(&cfg.mailscanner_custom_dir)
-                .and_then(|_| std::fs::copy(&src, &dst).map(|_| ()))
+            if let Err(e) =
+                std::fs::create_dir_all(&dir).and_then(|_| std::fs::copy(&src, &plugin).map(|_| ()))
             {
                 eprintln!(
                     "msfe-ng mailscanner: cannot install plugin to {}: {e}",
-                    dst.display()
+                    plugin.display()
                 );
                 return ExitCode::from(1);
             }
@@ -472,8 +472,7 @@ fn cmd_mailscanner(sub: Option<&str>) -> ExitCode {
             }
         }
         Some("disable-logging") => {
-            let dst = Path::new(&cfg.mailscanner_custom_dir).join(msfe_api::MS_PLUGIN_FILENAME);
-            let _ = std::fs::remove_file(&dst);
+            let _ = std::fs::remove_file(&plugin);
             match edit_conf(&cfg.mailscanner_conf, |t| {
                 ms::set_directive(t, ms::LOGGING_DIRECTIVE, "no")
             }) {

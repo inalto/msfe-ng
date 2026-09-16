@@ -26,7 +26,7 @@ pub fn status(cfg: &Config) -> SetupStatus {
     let conf = std::fs::read_to_string(&cfg.mailscanner_conf).unwrap_or_default();
     let logging_enabled = mailscanner::get_directive(&conf, mailscanner::LOGGING_DIRECTIVE)
         == Some(mailscanner::LOGGING_VALUE)
-        && Path::new(&cfg.mailscanner_custom_dir)
+        && mailscanner::custom_functions_dir(&conf, &cfg.mailscanner_custom_dir)
             .join(msfe_api::MS_PLUGIN_FILENAME)
             .exists();
     SetupStatus {
@@ -167,7 +167,7 @@ pub(crate) fn perl_module_ok(module: &str) -> bool {
 /// Install the logging plugin, hook the directive, restart MailScanner.
 pub fn enable_logging(cfg: &Config) -> io::Result<Vec<String>> {
     let mut log = Vec::new();
-    // The plugin's forked logger needs DBI + DBD::mysql at runtime; missing
+    // The plugin needs DBI + DBD::mysql at runtime; missing
     // modules fail silently from the operator's viewpoint (errors only in the
     // mail log), so surface — and try to fix — them here.
     for (module, pkg) in [("DBI", "perl-DBI"), ("DBD::mysql", "perl-DBD-MySQL")] {
@@ -182,15 +182,16 @@ pub fn enable_logging(cfg: &Config) -> io::Result<Vec<String>> {
             }
         }
     }
-    let dst = Path::new(&cfg.mailscanner_custom_dir).join(msfe_api::MS_PLUGIN_FILENAME);
+    let conf_path = Path::new(&cfg.mailscanner_conf);
+    let text = std::fs::read_to_string(conf_path)?;
+    let dir = mailscanner::custom_functions_dir(&text, &cfg.mailscanner_custom_dir);
+    let dst = dir.join(msfe_api::MS_PLUGIN_FILENAME);
     let src = std::env::var("MSFE_NG_MS_PLUGIN_SRC")
         .unwrap_or_else(|_| msfe_api::DEFAULT_MS_PLUGIN_SRC.to_string());
-    std::fs::create_dir_all(&cfg.mailscanner_custom_dir)?;
+    std::fs::create_dir_all(&dir)?;
     std::fs::copy(&src, &dst)?;
     log.push(format!("installed logging plugin to {}", dst.display()));
 
-    let conf_path = Path::new(&cfg.mailscanner_conf);
-    let text = std::fs::read_to_string(conf_path)?;
     let new_text = mailscanner::set_directive(
         &text,
         mailscanner::LOGGING_DIRECTIVE,

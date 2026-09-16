@@ -89,7 +89,10 @@ db_name = "msfe_ng"
 db_user = "msfe_ng"
 db_pass = ""
 
-# MailScanner integration (for: msfe-ng mailscanner enable-logging)
+# MailScanner integration (for: msfe-ng mailscanner enable-logging).
+# The logging plugin is installed into MailScanner's own `Custom Functions Dir`
+# (read from mailscanner_conf); mailscanner_custom_dir is only the fallback
+# when that directive is missing.
 mailscanner_conf = "/etc/MailScanner/MailScanner.conf"
 mailscanner_custom_dir = "/etc/MailScanner/custom"
 
@@ -201,12 +204,21 @@ esac
 # the logging plugin copy, re-assert the engine configuration (wiring-aware),
 # and keep the credentials file locked down.
 if [ -n "$PREV_VER" ]; then
+    # The plugin lives where MailScanner loads custom functions from — its own
+    # `Custom Functions Dir` (ConfigServer layouts keep it under
+    # /usr/mailscanner, with no /etc/MailScanner/custom symlink).
+    MS_CONF="$(grep -oP '(?<=^mailscanner_conf = ")[^"]*' "$CONFDIR/config.toml" 2>/dev/null)"
+    MS_CONF="${MS_CONF:-/etc/MailScanner/MailScanner.conf}"
+    if grep -q '^Always Looked Up Last = &MSFENGLogging' "$MS_CONF" 2>/dev/null; then
+        MS_CUSTOM_DIR="$(grep -oP '^Custom Functions Dir\s*=\s*\K\S+' "$MS_CONF" 2>/dev/null | tail -1)"
+        case "$MS_CUSTOM_DIR" in
+            *%etc-dir%*) MS_CUSTOM_DIR="$(printf '%s' "$MS_CUSTOM_DIR" | sed "s|%etc-dir%|$(dirname "$MS_CONF")|g")" ;;
+        esac
+        [ -n "$MS_CUSTOM_DIR" ] || MS_CUSTOM_DIR="$(grep -oP '(?<=^mailscanner_custom_dir = ")[^"]*' "$CONFDIR/config.toml" 2>/dev/null)"
+        install -m 0644 "$REPO/panel/mailscanner/MSFENG.pm" "${MS_CUSTOM_DIR:-/etc/MailScanner/custom}/MSFENG.pm" \
+            && info "refreshed the message-logging plugin"
+    fi
     if [ -f /etc/MailScanner/MailScanner.conf ]; then
-        if grep -q '^Always Looked Up Last = &MSFENGLogging' /etc/MailScanner/MailScanner.conf 2>/dev/null; then
-            MS_CUSTOM_DIR="$(grep -oP '(?<=^mailscanner_custom_dir = ")[^"]*' "$CONFDIR/config.toml" 2>/dev/null)"
-            install -m 0644 "$REPO/panel/mailscanner/MSFENG.pm" "${MS_CUSTOM_DIR:-/etc/MailScanner/custom}/MSFENG.pm" \
-                && info "refreshed the message-logging plugin"
-        fi
         if grep -q '^MTA = exim' /etc/MailScanner/MailScanner.conf 2>/dev/null; then
             "$BINDIR/msfe-ng" engine configure >/dev/null 2>&1 \
                 && info "re-asserted MailScanner engine configuration" \
