@@ -19,6 +19,7 @@ pub mod engine;
 pub mod geoip;
 pub mod housekeeping;
 pub mod json;
+pub mod layout;
 pub mod legacy;
 pub mod mailflow;
 pub mod mailscanner;

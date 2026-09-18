@@ -564,14 +564,14 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
         ("POST", "/api/service/engine-latch") => {
             let v = Json::parse(&req.body).unwrap_or(Json::Null);
             let enabled = matches!(v.get("enabled"), Some(Json::Bool(true)));
-            match service::set_engine_run(enabled) {
+            match service::set_engine_run(cfg, enabled) {
                 Ok(()) => Response::json(
                     200,
                     &Json::Object(vec![
                         ("ok".into(), Json::Bool(true)),
                         (
                             "run_enabled".into(),
-                            service::engine_run_enabled()
+                            service::engine_run_enabled(cfg)
                                 .map(Json::Bool)
                                 .unwrap_or(Json::Null),
                         ),
@@ -707,7 +707,7 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             ),
         },
         ("POST", "/api/service/lint") => {
-            let r = service::lint();
+            let r = service::lint(cfg);
             Response::json(
                 200,
                 &Json::Object(vec![
@@ -1463,14 +1463,14 @@ fn service_status(cfg: &Config) -> Response {
     Response::json(
         200,
         &Json::Object(vec![
-            ("engine".into(), Json::Bool(service::engine_installed())),
+            ("engine".into(), Json::Bool(service::engine_installed(cfg))),
             (
                 "engine_configured".into(),
-                Json::Bool(service::engine_configured()),
+                Json::Bool(service::engine_configured(cfg)),
             ),
             (
                 "engine_run_enabled".into(),
-                service::engine_run_enabled()
+                service::engine_run_enabled(cfg)
                     .map(Json::Bool)
                     .unwrap_or(Json::Null),
             ),

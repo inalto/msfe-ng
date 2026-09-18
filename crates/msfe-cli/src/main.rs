@@ -26,9 +26,61 @@ fn migrations_dir() -> PathBuf {
         .into()
 }
 
+/// Flags a `<cmd> <sub>` pair accepts. Commands whose grammar is fully known
+/// are listed; an option outside the list is refused up front, so a flag a
+/// subcommand does not understand can never fall through to the action
+/// (`exim enable-scanning --dry-run` once enabled scanning for real).
+fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str]> {
+    const NONE: &[&str] = &[];
+    const DRY: &[&str] = &["--dry-run"];
+    match (cmd, sub) {
+        ("exim", _) => Some(NONE),
+        ("engine", Some("wire" | "unwire")) => Some(DRY),
+        ("engine", _) => Some(NONE),
+        ("service", Some("spool-repair")) => Some(DRY),
+        ("service", _) => Some(NONE),
+        ("mailscanner", _) => Some(NONE),
+        _ => None,
+    }
+}
+
+/// The first `-flag` in `rest` that `<cmd> <sub>` does not take, if any.
+fn rejected_flag<'a>(cmd: &str, sub: Option<&str>, rest: &'a [String]) -> Option<&'a str> {
+    let accepted = accepted_flags(cmd, sub)?;
+    rest.iter()
+        .map(String::as_str)
+        .find(|a| a.starts_with('-') && !accepted.contains(a))
+}
+
+fn usage_of(cmd: &str) -> &'static str {
+    match cmd {
+        "exim" => "msfe-ng exim <status|enable-scanning|disable-scanning>",
+        "engine" => {
+            "msfe-ng engine <status|install|configure|enable|disable|lint|wire|unwire> [--dry-run]"
+        }
+        "service" => {
+            "msfe-ng service <status|start|stop|reload|restart|queue-fix|spool-repair [--dry-run]>"
+        }
+        "mailscanner" => "msfe-ng mailscanner <status|enable-logging|disable-logging>",
+        _ => "msfe-ng help",
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or("help");
+
+    if let Some(flag) = rejected_flag(
+        cmd,
+        args.get(1).map(String::as_str),
+        args.get(2..).unwrap_or(&[]),
+    ) {
+        eprintln!(
+            "msfe-ng {cmd}: unknown option '{flag}'\nusage: {}",
+            usage_of(cmd)
+        );
+        return ExitCode::from(2);
+    }
 
     match cmd {
         "version" | "--version" | "-V" => {
@@ -619,18 +671,17 @@ fn cmd_doctor() -> ExitCode {
 /// (official MailScanner v5 rpm + dependencies; never touches Exim).
 fn cmd_engine(sub: Option<&str>) -> ExitCode {
     use msfe_core::service;
-    let installed = Path::new("/usr/sbin/MailScanner").exists()
-        || std::process::Command::new("sh")
-            .args(["-c", "command -v MailScanner >/dev/null 2>&1"])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+    let cfg = Config::load(&config_path());
+    let lay = msfe_core::layout::resolve(&cfg);
+    let installed = service::engine_installed_at(&lay);
     match sub {
         Some("status") => {
             if installed {
                 let st = service::status();
                 println!(
-                    "engine: installed, {} ({} processes)",
+                    "engine: MailScanner {} at {}, {} ({} processes)",
+                    lay.version_string(),
+                    lay.bin.display(),
                     if st.active { "active" } else { "stopped" },
                     st.procs
                 );
@@ -722,7 +773,7 @@ fn cmd_engine(sub: Option<&str>) -> ExitCode {
         }
         Some(a @ ("enable" | "disable")) => {
             let on = a == "enable";
-            match service::set_engine_run(on) {
+            match service::set_engine_run(&cfg, on) {
                 Ok(()) => {
                     println!(
                         "safety switch (run_mailscanner) is now {}",
@@ -737,7 +788,7 @@ fn cmd_engine(sub: Option<&str>) -> ExitCode {
             }
         }
         Some("lint") => {
-            let r = service::lint();
+            let r = service::lint(&cfg);
             println!("{}", r.output);
             if r.ok {
                 println!("RESULT: everything is OK");
@@ -854,17 +905,18 @@ fn cmd_service(sub: Option<&str>) -> ExitCode {
         Some("status") => {
             let st = service::status();
             let (inc, out) = service::queue_dirs(&cfg);
-            if !service::engine_installed() {
+            if !service::engine_installed(&cfg) {
                 println!(
                     "WARNING: MailScanner engine is NOT installed — mail is not being scanned. Run: msfe-ng engine install"
                 );
-            } else if !service::engine_configured() {
+            } else if !service::engine_configured(&cfg) {
                 println!(
-                    "WARNING: MailScanner engine installed but MailScanner.conf is missing — run: msfe-ng engine install"
+                    "WARNING: MailScanner engine installed but {} is missing — run: msfe-ng engine install",
+                    cfg.mailscanner_conf
                 );
-            } else if service::engine_run_enabled() == Some(false) {
+            } else if service::engine_run_enabled(&cfg) == Some(false) {
                 println!(
-                    "NOTE: MailScanner is held by its startup latch (run_mailscanner=0 in /etc/MailScanner/defaults) — not yet wired into Exim; start will fail until the wiring step enables it"
+                    "NOTE: MailScanner is held by its startup latch (run_mailscanner=0 in its defaults file) — not yet wired into Exim; start will fail until the wiring step enables it"
                 );
             }
             println!(

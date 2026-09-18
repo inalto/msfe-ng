@@ -218,8 +218,8 @@ if [ -n "$PREV_VER" ]; then
         install -m 0644 "$REPO/panel/mailscanner/MSFENG.pm" "${MS_CUSTOM_DIR:-/etc/MailScanner/custom}/MSFENG.pm" \
             && info "refreshed the message-logging plugin"
     fi
-    if [ -f /etc/MailScanner/MailScanner.conf ]; then
-        if grep -q '^MTA = exim' /etc/MailScanner/MailScanner.conf 2>/dev/null; then
+    if [ -f "$MS_CONF" ]; then
+        if grep -q '^MTA = exim' "$MS_CONF" 2>/dev/null; then
             "$BINDIR/msfe-ng" engine configure >/dev/null 2>&1 \
                 && info "re-asserted MailScanner engine configuration" \
                 || warn "engine configure failed — run: msfe-ng engine configure"

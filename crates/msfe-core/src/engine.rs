@@ -11,7 +11,7 @@
 //! configuration on Exim panel servers (run-as user `mailnull:mail` on cPanel,
 //! `mail:mail` otherwise, split incoming/outgoing spools).
 
-use crate::{mailscanner, service, Config};
+use crate::{layout, mailscanner, service, Config};
 use std::io;
 use std::path::Path;
 use std::process::Command;
@@ -68,19 +68,14 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
     let run_user = run_user_for(cfg);
     let (inc, out) = service::queue_dir_targets();
     let exim_cmd = exim_command();
+    let lay = layout::resolve(cfg);
+    let method = exim_method(cfg);
 
     let mut directives: Vec<(String, String)> = [
         ("MTA", "exim"),
         ("Run As User", run_user),
         ("Run As Group", "mail"),
         ("Sendmail", "/usr/sbin/exim"),
-        ("Sendmail2", "/usr/sbin/exim"),
-        // Without an explicit path, MailScanner 5.5.3's `which exim` fallback
-        // leaves a trailing newline, its exim version probe silently fails,
-        // and it assumes short message IDs — placing outgoing spool files in
-        // the wrong split subdirectory, where Exim never finds them. The same
-        // probe misreads "4.100" as 4.1, so it goes through our shim.
-        ("Exim Command", exim_cmd.as_str()),
         ("Incoming Work Group", "mail"),
         ("Incoming Work Permissions", "0640"),
         ("Quarantine Group", "mail"),
@@ -89,6 +84,23 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
     .into_iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect();
+    // Delivery goes through the outgoing Exim: the plain binary, or, with the
+    // two-config method, the one reading exim_outgoing.conf (the plain binary
+    // would look for the spool file in the incoming spool and fail with
+    // "Spool file not found").
+    directives.push(("Sendmail2".into(), sendmail2_for(method)));
+    // Without an explicit path, MailScanner 5.5.3's `which exim` fallback
+    // leaves a trailing newline, its exim version probe silently fails,
+    // and it assumes short message IDs — placing outgoing spool files in
+    // the wrong split subdirectory, where Exim never finds them. The same
+    // probe misreads "4.100" as 4.1, so it goes through our shim. Engines
+    // before 5.5 have no such directive: it is a syntax error there.
+    let mut remove: Vec<&str> = Vec::new();
+    if lay.supports_exim_command {
+        directives.push(("Exim Command".into(), exim_cmd.clone()));
+    } else {
+        remove.push("Exim Command");
+    }
     // The scanning children run as the run-as user but inherit root's HOME,
     // which they cannot read: with no state dir of their own SpamAssassin has
     // no Bayes DB at all, and what the UI trains (as root) never reaches them.
@@ -97,27 +109,27 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
         "SpamAssassin User State Dir".into(),
         sa_state.display().to_string(),
     ));
-    // When the Exim wiring is active, the queue dirs belong to it: re-assert
-    // the named-queue values instead of resetting them to the unwired defaults
-    // (which would leave MailScanner watching an empty directory while the
-    // ACL queues mail where nothing scans it).
-    let wired = is_wired(cfg);
-    if wired {
-        let split = exim_split_spool();
-        let input = named_queue_base().join("input");
-        let incoming = if split {
-            format!("{}/*", input.display())
-        } else {
-            input.display().to_string()
-        };
-        directives.push(("Incoming Queue Dir".into(), incoming));
-        directives.push((
-            "Split Exim Spool".into(),
-            if split { "yes" } else { "no" }.into(),
-        ));
-    } else {
-        directives.push(("Incoming Queue Dir".into(), inc.display().to_string()));
-    }
+    // When Exim wiring is active, the queue dirs belong to it: re-assert
+    // what the method needs instead of resetting to the unwired defaults
+    // (which would leave MailScanner watching an empty directory while Exim
+    // queues mail where nothing scans it). MailScanner does not descend into
+    // a split spool's single-character subdirs: the `/*` glob does.
+    let split = exim_split_spool();
+    let input = match method {
+        Some(EximMethod::NamedQueue) => named_queue_base().join("input"),
+        Some(EximMethod::TwoConfig) => two_config_spool(&read_exim_conf())
+            .unwrap_or_else(|| inc.clone())
+            .join("input"),
+        None => inc.clone(),
+    };
+    directives.push((
+        "Incoming Queue Dir".into(),
+        incoming_dir_directive(&input, split),
+    ));
+    directives.push((
+        "Split Exim Spool".into(),
+        if split { "yes" } else { "no" }.into(),
+    ));
     directives.push(("Outgoing Queue Dir".into(), out.display().to_string()));
     // Point MailScanner at clamd when its socket is present (the engine
     // installer sets clamd up; without a scanner "auto" finds nothing).
@@ -127,7 +139,18 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
     }
 
     let conf_path = Path::new(&cfg.mailscanner_conf);
-    let original = std::fs::read_to_string(conf_path)?;
+    let raw = std::fs::read_to_string(conf_path)?;
+    let mut set = Vec::new();
+    let original = remove.iter().fold(raw.clone(), |t, k| {
+        let n = mailscanner::remove_directive(&t, k);
+        if n != t {
+            set.push(format!(
+                "{k} removed (not a directive of MailScanner {})",
+                lay.version_string()
+            ));
+        }
+        n
+    });
     // Dead RBLs in `Spam List` (MailScanner 5.5.3 still ships SORBS, gone
     // since 2024 and no longer even defined) cost every message a timeout.
     let mut pruned = Vec::new();
@@ -150,7 +173,6 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
         }
     }
     let mut text = original.clone();
-    let mut set = Vec::new();
     for (k, v) in &directives {
         // Always normalize (set_directive is idempotent): comparing values via
         // get_directive would miss live duplicates that override the edit.
@@ -160,7 +182,7 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
             set.push(format!("{k} = {v}"));
         }
     }
-    if text != original {
+    if text != raw {
         service::save_conf(conf_path, &text)?;
     }
     let mut repaired = Vec::new();
@@ -176,10 +198,20 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
     // MTA's real spool — never created or chowned here.
     let mut created = Vec::new();
     let mut chown_failed = Vec::new();
-    if wired {
-        // named-queue dirs are managed by wire()
+    if method.is_some() {
+        // named-queue dirs are managed by wire(); the two-config spool by Exim
     } else if let Some(base) = inc.parent() {
-        for d in [base, &inc, &base.join("msglog"), &base.join("db")] {
+        let mut dirs = vec![
+            base.to_path_buf(),
+            inc.clone(),
+            base.join("msglog"),
+            base.join("db"),
+        ];
+        if split {
+            // the `/*` glob needs the single-character subdirs to match
+            dirs.extend(split_subdirs(&inc));
+        }
+        for d in &dirs {
             if !d.exists() {
                 std::fs::create_dir_all(d)?;
                 created.push(d.display().to_string());
@@ -233,7 +265,7 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
         false
     };
 
-    let updater = phishing_updater_path();
+    let updater = lay.phishing_updater.clone();
     if let Ok(script) = std::fs::read_to_string(&updater) {
         if let Some(fixed) = patch_phishing_updater(&script) {
             service::save_conf(&updater, &fixed)?;
@@ -529,13 +561,6 @@ pub fn phishing_junk_downloads(etc: &Path) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
-/// MailScanner's daily phishing-list updater (run from cron.daily via ms-cron).
-pub fn phishing_updater_path() -> std::path::PathBuf {
-    std::env::var("MSFE_NG_PHISHING_UPDATER")
-        .unwrap_or_else(|_| "/usr/sbin/ms-update-phishing".into())
-        .into()
-}
-
 /// Make ms-update-phishing fetch over HTTP/1.1. phishing.mailscanner.info sits
 /// behind Cloudflare, which answers the HTTP/2 fingerprint of older curls
 /// (7.61 on EL8-era panel builds) with a 403 challenge page; plain `curl -S`
@@ -784,6 +809,96 @@ fn exim_conf_path() -> std::path::PathBuf {
         .unwrap_or_else(|_| "/etc/exim.conf".to_string())
         .into()
 }
+fn exim_outgoing_conf_path() -> std::path::PathBuf {
+    std::env::var("MSFE_NG_EXIM_OUTGOING_CONF")
+        .unwrap_or_else(|_| "/etc/exim_outgoing.conf".to_string())
+        .into()
+}
+fn read_exim_conf() -> String {
+    std::fs::read_to_string(exim_conf_path()).unwrap_or_default()
+}
+
+/// How incoming mail reaches MailScanner on this server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EximMethod {
+    /// Ours: the `mailscanner` named queue via the cPanel ACL include.
+    NamedQueue,
+    /// ConfigServer's original: `/etc/exim.conf` spools into a separate
+    /// directory with `queue_only`; `/etc/exim_outgoing.conf` delivers from
+    /// the normal spool. Recognised and kept, never created or removed here.
+    TwoConfig,
+}
+
+impl EximMethod {
+    pub fn describe(self) -> &'static str {
+        match self {
+            EximMethod::NamedQueue => "Exim named queue",
+            EximMethod::TwoConfig => "two-config method (exim_outgoing.conf)",
+        }
+    }
+}
+
+/// The separate incoming spool of the two-config method, when exim.conf
+/// declares one *and* holds mail there (`queue_only`).
+pub fn two_config_spool(exim_conf: &str) -> Option<std::path::PathBuf> {
+    let mut spool = None;
+    let mut queue_only = false;
+    for line in exim_conf.lines() {
+        let t = line.trim();
+        if let Some(v) = t.strip_prefix("spool_directory") {
+            let v = v.trim_start_matches([' ', '=']).trim();
+            if v.ends_with("_incoming") {
+                spool = Some(std::path::PathBuf::from(v));
+            }
+        } else if t.starts_with("queue_only") && !t.starts_with("queue_only_") {
+            let v = t["queue_only".len()..]
+                .trim_start_matches([' ', '='])
+                .trim();
+            queue_only =
+                v.is_empty() || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes");
+        }
+    }
+    spool.filter(|_| queue_only)
+}
+
+pub fn exim_method(cfg: &Config) -> Option<EximMethod> {
+    if named_queue_wired(cfg) {
+        Some(EximMethod::NamedQueue)
+    } else if two_config_spool(&read_exim_conf()).is_some() && exim_outgoing_conf_path().is_file() {
+        Some(EximMethod::TwoConfig)
+    } else {
+        None
+    }
+}
+
+/// `Sendmail2`: the Exim that delivers what MailScanner releases.
+fn sendmail2_for(method: Option<EximMethod>) -> String {
+    match method {
+        Some(EximMethod::TwoConfig) => {
+            format!("/usr/sbin/exim -C {}", exim_outgoing_conf_path().display())
+        }
+        _ => "/usr/sbin/exim".into(),
+    }
+}
+
+/// Exim's split-spool layout: one single-character subdir per id character.
+fn split_subdirs(input: &Path) -> Vec<std::path::PathBuf> {
+    ('a'..='z')
+        .chain('A'..='Z')
+        .chain('0'..='9')
+        .map(|c| input.join(c.to_string()))
+        .collect()
+}
+
+/// `Incoming Queue Dir` for an Exim input dir: the `/*` glob makes
+/// MailScanner take the split spool's single-character subdirs.
+fn incoming_dir_directive(input: &Path, split: bool) -> String {
+    if split {
+        format!("{}/*", input.display())
+    } else {
+        input.display().to_string()
+    }
+}
 
 fn acl_fragment() -> String {
     "# Managed by MSFE-NG (engine wire). Routes incoming mail into the\n\
@@ -878,15 +993,34 @@ pub fn exim_split_spool() -> bool {
     })
 }
 
-/// True when mail is currently routed through MailScanner: the ACL hook
-/// includes our fragment and the fragment file is live.
-pub fn is_wired(cfg: &Config) -> bool {
+/// Our named-queue wiring is live: the ACL hook includes our fragment and
+/// the fragment file exists.
+fn named_queue_wired(cfg: &Config) -> bool {
     Path::new(&cfg.mailscannerq_conf).exists()
         && std::fs::read_to_string(acl_hook_path())
             .map(|t| t.contains(&include_line(cfg)))
             .unwrap_or(false)
 }
 
+/// True when mail is currently routed through MailScanner, by either method.
+pub fn is_wired(cfg: &Config) -> bool {
+    exim_method(cfg).is_some()
+}
+
+fn refuse_two_config(cfg: &Config, verb: &str) -> io::Result<()> {
+    if exim_method(cfg) == Some(EximMethod::TwoConfig) {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "Exim already routes mail through MailScanner with the two-config method (/etc/exim.conf spooling to {}, delivery via exim_outgoing.conf) — msfe-ng does not {verb} that layout; it keeps it as is (engine configure re-asserts its queue dirs and Sendmail2)",
+                two_config_spool(&read_exim_conf()).unwrap_or_default().display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
 pub struct WireReport {
     pub actions: Vec<String>,
     pub dry_run: bool,
@@ -915,12 +1049,13 @@ pub fn wire(cfg: &Config, dry: bool) -> io::Result<WireReport> {
             "exim wiring is currently implemented for cPanel only",
         ));
     }
-    if !service::engine_configured() && std::env::var("MSFE_NG_EXIM_ACL_HOOK").is_err() {
+    if !service::engine_configured(cfg) && std::env::var("MSFE_NG_EXIM_ACL_HOOK").is_err() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             "MailScanner engine is not installed/configured — run engine install + configure first",
         ));
     }
+    refuse_two_config(cfg, "convert")?;
     let mut actions = Vec::new();
     let split = exim_split_spool();
     let base = named_queue_base();
@@ -930,9 +1065,7 @@ pub fn wire(cfg: &Config, dry: bool) -> io::Result<WireReport> {
     // 1. named-queue spool skeleton
     let mut dirs: Vec<std::path::PathBuf> = vec![base.clone(), input.clone(), base.join("msglog")];
     if split {
-        for c in ('a'..='z').chain('A'..='Z').chain('0'..='9') {
-            dirs.push(input.join(c.to_string()));
-        }
+        dirs.extend(split_subdirs(&input));
     }
     for d in &dirs {
         if !d.exists() {
@@ -951,22 +1084,21 @@ pub fn wire(cfg: &Config, dry: bool) -> io::Result<WireReport> {
 
     // 2. MailScanner.conf: scan the named queue, emit into the normal queue
     let (_, outgoing) = service::queue_dir_targets();
-    let incoming = if split {
-        format!("{}/*", input.display())
-    } else {
-        input.display().to_string()
-    };
+    let incoming = incoming_dir_directive(&input, split);
+    let outgoing = outgoing.display().to_string();
     let exim_cmd = exim_command();
-    let directives = [
+    let mut directives = vec![
         ("Incoming Queue Dir", incoming.as_str()),
-        ("Outgoing Queue Dir", &outgoing.display().to_string()),
+        ("Outgoing Queue Dir", outgoing.as_str()),
         ("Split Exim Spool", if split { "yes" } else { "no" }),
         ("Sendmail", "/usr/sbin/exim"),
         ("Sendmail2", "/usr/sbin/exim"),
-        // See configure(): required for MailScanner's long-message-ID
-        // detection on Exim >= 4.97 (wrong split subdir otherwise).
-        ("Exim Command", exim_cmd.as_str()),
     ];
+    // See configure(): required for MailScanner's long-message-ID detection
+    // on Exim >= 4.97 (wrong split subdir otherwise); unknown to engines < 5.5.
+    if layout::resolve(cfg).supports_exim_command {
+        directives.push(("Exim Command", exim_cmd.as_str()));
+    }
     let conf_path = Path::new(&cfg.mailscanner_conf);
     if let Ok(original) = std::fs::read_to_string(conf_path) {
         let mut text = original.clone();
@@ -1021,7 +1153,7 @@ pub fn wire(cfg: &Config, dry: bool) -> io::Result<WireReport> {
     exim_rebuild(&mut actions, dry);
 
     // 5. restart MailScanner so it re-reads its queue dirs (only if allowed)
-    if !dry && service::engine_run_enabled() == Some(true) {
+    if !dry && service::engine_run_enabled(cfg) == Some(true) {
         let o = service::control("restart");
         actions.push(format!(
             "restarted MailScanner: {}",
@@ -1038,6 +1170,7 @@ pub fn wire(cfg: &Config, dry: bool) -> io::Result<WireReport> {
 /// fragment, rebuild Exim. MailScanner may keep running — with nothing routed
 /// into its queue it simply idles.
 pub fn unwire(cfg: &Config, dry: bool) -> io::Result<WireReport> {
+    refuse_two_config(cfg, "undo")?;
     let mut actions = Vec::new();
     let hook = acl_hook_path();
     if let Ok(text) = std::fs::read_to_string(&hook) {
@@ -1149,6 +1282,171 @@ mod tests {
         // empty/garbage output: `$ver` undef → 0 >= 4.97 is false
         assert!(!mailscanner_probe_long_ids(""));
         assert!(!mailscanner_probe_long_ids("Something unexpected"));
+    }
+
+    #[test]
+    fn two_config_method_is_read_from_exim_conf() {
+        // ConfigServer's "old method": exim.conf spools into a separate
+        // directory with queue_only, exim_outgoing.conf delivers from the
+        // normal spool
+        let old = "spool_directory = /var/spool/exim_incoming\nsplit_spool_directory = yes\nqueue_only = true\n";
+        assert_eq!(
+            two_config_spool(old),
+            Some(std::path::PathBuf::from("/var/spool/exim_incoming"))
+        );
+        // a plain cPanel exim.conf
+        assert_eq!(
+            two_config_spool("spool_directory = /var/spool/exim\n"),
+            None
+        );
+        // the spool alone is not the method: no queue_only → mail is delivered
+        assert_eq!(
+            two_config_spool("spool_directory = /var/spool/exim_incoming\n"),
+            None
+        );
+        assert_eq!(two_config_spool(""), None);
+    }
+
+    /// A temp tree with a MailScanner.conf, a fake engine binary whose shebang
+    /// points at a lib dir with the given ConfigDefs.pl, and an exim.conf.
+    fn engine_fixture(
+        tag: &str,
+        ms_version: &str,
+        configdefs: &str,
+        exim_conf: &str,
+    ) -> (std::path::PathBuf, Config) {
+        let base = std::env::temp_dir().join(format!("msfe-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("usr/mailscanner");
+        std::fs::create_dir_all(root.join("etc")).unwrap();
+        std::fs::create_dir_all(root.join("usr/sbin")).unwrap();
+        let lib = root.join("usr/share/MailScanner/perl");
+        std::fs::create_dir_all(lib.join("MailScanner")).unwrap();
+        std::fs::write(lib.join("MailScanner/ConfigDefs.pl"), configdefs).unwrap();
+        std::fs::write(
+            root.join("usr/sbin/MailScanner"),
+            format!("#!/usr/bin/perl -U -I {}\n", lib.display()),
+        )
+        .unwrap();
+        let conf = root.join("etc/MailScanner.conf");
+        std::fs::write(
+            &conf,
+            format!("MailScanner Version Number = {ms_version}\nMTA = sendmail\nSendmail2 = /usr/sbin/exim\n"),
+        )
+        .unwrap();
+        std::fs::write(base.join("exim.conf"), exim_conf).unwrap();
+        std::env::set_var("MSFE_NG_EXIM_CONF", base.join("exim.conf"));
+        std::env::set_var(
+            "MSFE_NG_EXIM_OUTGOING_CONF",
+            base.join("exim_outgoing.conf"),
+        );
+        std::env::set_var("MSFE_NG_EXIM_ACL_HOOK", base.join("hook"));
+        std::env::set_var("MSFE_NG_MS_WORK_DIR", base.join("work"));
+        std::env::set_var("MSFE_NG_INCOMING_QUEUE", base.join("exim_incoming/input"));
+        std::env::set_var("MSFE_NG_OUTGOING_QUEUE", base.join("exim/input"));
+        std::env::set_var("MSFE_NG_PHISHING_UPDATER", base.join("none"));
+        std::env::remove_var("MSFE_NG_MS_BIN");
+        let cfg = Config {
+            panel: "cpanel".into(),
+            mailscanner_conf: conf.display().to_string(),
+            mailscannerq_conf: base.join("mailscannerq.conf").display().to_string(),
+            quarantine_dir: base.join("quarantine").display().to_string(),
+            ..Default::default()
+        };
+        (base, cfg)
+    }
+
+    #[test]
+    fn configure_skips_exim_command_on_an_engine_that_rejects_it() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (base, cfg) = engine_fixture("old-engine", "5.4.4", "sendmail2\n", "");
+        // a previous run wrote the directive: 5.4.4 lints it as a syntax error
+        let conf = std::path::Path::new(&cfg.mailscanner_conf);
+        std::fs::write(
+            conf,
+            std::fs::read_to_string(conf).unwrap()
+                + "Exim Command = /opt/msfe-ng/bin/msfe-ng-exim\n",
+        )
+        .unwrap();
+        configure(&cfg).unwrap();
+        let text = std::fs::read_to_string(conf).unwrap();
+        assert_eq!(mailscanner::get_directive(&text, "MTA"), Some("exim"));
+        assert_eq!(
+            mailscanner::get_directive(&text, "Exim Command"),
+            None,
+            "{text}"
+        );
+        assert!(text.contains("#Exim Command = /opt/msfe-ng/bin/msfe-ng-exim"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn configure_keeps_the_two_config_exim_method() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (base, cfg) = engine_fixture(
+            "two-config",
+            "5.5.3",
+            "eximcommand\n",
+            "spool_directory = /var/spool/exim_incoming\nsplit_spool_directory = yes\nqueue_only = true\n",
+        );
+        let outgoing = base.join("exim_outgoing.conf");
+        std::fs::write(&outgoing, "spool_directory = /var/spool/exim\n").unwrap();
+        assert_eq!(exim_method(&cfg), Some(EximMethod::TwoConfig));
+        assert!(is_wired(&cfg));
+
+        configure(&cfg).unwrap();
+        let text = std::fs::read_to_string(&cfg.mailscanner_conf).unwrap();
+        assert_eq!(
+            mailscanner::get_directive(&text, "Incoming Queue Dir"),
+            Some("/var/spool/exim_incoming/input/*")
+        );
+        assert_eq!(
+            mailscanner::get_directive(&text, "Split Exim Spool"),
+            Some("yes")
+        );
+        assert_eq!(
+            mailscanner::get_directive(&text, "Sendmail2"),
+            Some(format!("/usr/sbin/exim -C {}", outgoing.display()).as_str())
+        );
+        // the named-queue wiring must never be layered over it
+        let err = wire(&cfg, true).unwrap_err();
+        assert!(err.to_string().contains("exim_outgoing.conf"), "{err}");
+        let err = unwire(&cfg, true).unwrap_err();
+        assert!(err.to_string().contains("exim_outgoing.conf"), "{err}");
+
+        // remove the outgoing config: it is no longer that method
+        std::fs::remove_file(&outgoing).unwrap();
+        assert_eq!(exim_method(&cfg), None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn configure_unwired_follows_exims_split_spool() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (base, cfg) = engine_fixture(
+            "unwired-split",
+            "5.5.3",
+            "eximcommand\n",
+            "split_spool_directory = yes\n",
+        );
+        configure(&cfg).unwrap();
+        let text = std::fs::read_to_string(&cfg.mailscanner_conf).unwrap();
+        assert_eq!(
+            mailscanner::get_directive(&text, "Incoming Queue Dir"),
+            Some(format!("{}/*", base.join("exim_incoming/input").display()).as_str())
+        );
+        assert_eq!(
+            mailscanner::get_directive(&text, "Split Exim Spool"),
+            Some("yes")
+        );
+        assert_eq!(
+            mailscanner::get_directive(&text, "Sendmail2"),
+            Some("/usr/sbin/exim")
+        );
+        // the glob must have something to match: the split skeleton exists
+        assert!(base.join("exim_incoming/input/a").is_dir());
+        assert!(base.join("exim_incoming/input/0").is_dir());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

@@ -6,8 +6,8 @@
 //! `msfe-ng service` CLI command. External commands follow the same
 //! systemd-first / SysV-fallback pattern as `sync::reload_mailscanner`.
 
-use crate::mailscanner;
 use crate::Config;
+use crate::{layout, mailscanner};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -136,42 +136,49 @@ pub struct ServiceStatus {
     pub procs: usize,
 }
 
-/// True when the MailScanner engine itself is installed (binary/lib present).
-pub fn engine_installed() -> bool {
-    Path::new("/usr/sbin/MailScanner").exists()
+/// True when the MailScanner engine itself is installed: the binary of the
+/// resolved layout (RPM or ConfigServer tree), or the RPM's lib dir.
+pub fn engine_installed(cfg: &Config) -> bool {
+    engine_installed_at(&layout::resolve(cfg))
+}
+
+pub fn engine_installed_at(lay: &layout::EngineLayout) -> bool {
+    lay.bin.is_file()
         || Path::new("/usr/lib/MailScanner").is_dir()
         || Path::new("/usr/local/cpanel/3rdparty/mailscanner").is_dir()
 }
 
 /// True when the engine looks *usable*: installed and with its config present.
 /// (`/etc/MailScanner` alone proves nothing — MSFE-NG creates its rules dir.)
-pub fn engine_configured() -> bool {
-    engine_installed() && Path::new("/etc/MailScanner/MailScanner.conf").exists()
+pub fn engine_configured(cfg: &Config) -> bool {
+    engine_configured_at(&layout::resolve(cfg))
 }
 
-fn ms_defaults_path() -> PathBuf {
-    std::env::var("MSFE_NG_MS_DEFAULTS")
-        .unwrap_or_else(|_| "/etc/MailScanner/defaults".to_string())
-        .into()
+pub fn engine_configured_at(lay: &layout::EngineLayout) -> bool {
+    engine_installed_at(lay) && lay.conf.is_file()
+}
+
+fn ms_defaults_path(cfg: &Config) -> PathBuf {
+    layout::resolve(cfg).defaults
 }
 
 /// MailScanner's own startup latch: fresh installs ship
 /// `/etc/MailScanner/defaults` with `run_mailscanner=0` and ms-init refuses to
 /// start until an admin flips it (the wiring step does, once Exim is set up).
 /// Returns None when the defaults file is absent/unreadable.
-pub fn engine_run_enabled() -> Option<bool> {
-    ms_defaults_flag("run_mailscanner")
+pub fn engine_run_enabled(cfg: &Config) -> Option<bool> {
+    ms_defaults_flag(cfg, "run_mailscanner")
 }
 
 /// Whether ms-cron DAILY runs the phishing-list updater (`ms_cron_ps`,
 /// on by default in the shipped defaults). None when the file is absent.
-pub fn phishing_update_enabled() -> Option<bool> {
-    ms_defaults_flag("ms_cron_ps")
+pub fn phishing_update_enabled(cfg: &Config) -> Option<bool> {
+    ms_defaults_flag(cfg, "ms_cron_ps")
 }
 
 /// A `key=0|1` flag from MailScanner's defaults file.
-fn ms_defaults_flag(key: &str) -> Option<bool> {
-    let text = std::fs::read_to_string(ms_defaults_path()).ok()?;
+fn ms_defaults_flag(cfg: &Config, key: &str) -> Option<bool> {
+    let text = std::fs::read_to_string(ms_defaults_path(cfg)).ok()?;
     for line in text.lines() {
         let l = line.trim();
         if let Some(v) = l.strip_prefix(key).and_then(|r| r.strip_prefix('=')) {
@@ -183,8 +190,8 @@ fn ms_defaults_flag(key: &str) -> Option<bool> {
 
 /// Flip the startup latch (`run_mailscanner=` in MailScanner's defaults file),
 /// preserving the rest of the file; appends the line if absent.
-pub fn set_engine_run(enabled: bool) -> io::Result<()> {
-    let path = ms_defaults_path();
+pub fn set_engine_run(cfg: &Config, enabled: bool) -> io::Result<()> {
+    let path = ms_defaults_path(cfg);
     let text = std::fs::read_to_string(&path)?;
     let val = if enabled { "1" } else { "0" };
     let mut found = false;
@@ -212,31 +219,37 @@ pub struct LintReport {
 
 /// Run MailScanner's own self-check (`--lint`): validates the configuration,
 /// perl modules, virus scanner and spam engine. Slow (tens of seconds).
-pub fn lint() -> LintReport {
-    for bin in ["/usr/sbin/MailScanner", "MailScanner"] {
-        let mut cmd = Command::new(bin);
-        cmd.arg("--lint");
-        // lint scans a real test batch: with a scanner unreachable it enters
-        // MailScanner's retry loop and never exits — it once held the daemon
-        // hostage for 90 minutes (WSOD in WHM)
-        if let Ok(o) = run_with_timeout(&mut cmd, std::time::Duration::from_secs(180)) {
-            if o.timed_out {
-                return LintReport {
-                    ok: false,
-                    output: "MailScanner --lint did not finish within 180s — \
-                             a virus/spam scanner is probably unreachable (check clamd and its socket)"
-                        .into(),
-                };
-            }
-            return LintReport {
-                ok: o.ok,
-                output: format!("{}{}", o.stdout, o.stderr).trim().to_string(),
-            };
-        }
-    }
-    LintReport {
-        ok: false,
-        output: "MailScanner engine is not installed (run: msfe-ng engine install)".into(),
+///
+/// Runs the engine the layout resolves to — the one `MailScanner.service`
+/// runs — never a second copy that happens to be on the PATH.
+pub fn lint(cfg: &Config) -> LintReport {
+    lint_with(&layout::resolve(cfg).bin)
+}
+
+pub fn lint_with(bin: &Path) -> LintReport {
+    let mut cmd = Command::new(bin);
+    cmd.arg("--lint");
+    // lint scans a real test batch: with a scanner unreachable it enters
+    // MailScanner's retry loop and never exits — it once held the daemon
+    // hostage for 90 minutes (WSOD in WHM)
+    match run_with_timeout(&mut cmd, std::time::Duration::from_secs(180)) {
+        Ok(o) if o.timed_out => LintReport {
+            ok: false,
+            output: "MailScanner --lint did not finish within 180s — \
+                     a virus/spam scanner is probably unreachable (check clamd and its socket)"
+                .into(),
+        },
+        Ok(o) => LintReport {
+            ok: o.ok,
+            output: format!("{}{}", o.stdout, o.stderr).trim().to_string(),
+        },
+        Err(_) => LintReport {
+            ok: false,
+            output: format!(
+                "MailScanner engine is not installed at {} (run: msfe-ng engine install)",
+                bin.display()
+            ),
+        },
     }
 }
 
@@ -1074,6 +1087,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn lint_runs_the_engine_binary_of_the_layout() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tmpdir("lint");
+        // a ConfigServer-style engine: not /usr/sbin/MailScanner
+        let bin = d.join("usr/mailscanner/usr/sbin/MailScanner");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, "#!/bin/sh\necho \"lint from $0 $1\"\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let r = lint_with(&bin);
+        assert!(r.ok, "{}", r.output);
+        assert_eq!(r.output, format!("lint from {} --lint", bin.display()));
+        // no engine at that path: an install hint, not a crash
+        let r = lint_with(&d.join("missing"));
+        assert!(!r.ok && r.output.contains("not installed"));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn engine_presence_follows_the_layout() {
+        let d = tmpdir("engine");
+        let root = d.join("usr/mailscanner");
+        std::fs::create_dir_all(root.join("etc")).unwrap();
+        std::fs::create_dir_all(root.join("usr/sbin")).unwrap();
+        let conf = root.join("etc/MailScanner.conf");
+        let cfg = Config {
+            mailscanner_conf: conf.display().to_string(),
+            ..Default::default()
+        };
+        // ConfigServer tree with the binary but no conf yet
+        std::fs::write(root.join("usr/sbin/MailScanner"), "#!/usr/bin/perl\n").unwrap();
+        let lay = crate::layout::resolve(&cfg);
+        assert_eq!(lay.bin, root.join("usr/sbin/MailScanner"));
+        assert!(engine_installed_at(&lay));
+        assert!(!engine_configured_at(&lay));
+        std::fs::write(&conf, "MTA = exim\n").unwrap();
+        assert!(engine_configured_at(&crate::layout::resolve(&cfg)));
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]

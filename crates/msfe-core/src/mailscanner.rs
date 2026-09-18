@@ -50,6 +50,26 @@ pub fn set_directive(text: &str, key: &str, value: &str) -> String {
     s
 }
 
+/// Comment out every live `key = …` line (a directive this engine's parser
+/// would reject must not stay in effect). Absent key: text unchanged.
+pub fn remove_directive(text: &str, key: &str) -> String {
+    let mut s = text
+        .lines()
+        .map(|l| {
+            if !l.trim_start().starts_with('#') && line_key_matches(l, key) {
+                format!("#{l}")
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.ends_with('\n') {
+        s.push('\n');
+    }
+    s
+}
+
 /// True if `line` is an assignment of `key` (ignoring leading `#` and spaces).
 fn line_key_matches(line: &str, key: &str) -> bool {
     let l = line.trim_start();
@@ -112,6 +132,20 @@ fn expand_variables(text: &str, value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remove_directive_disables_every_live_line_and_keeps_the_rest() {
+        let conf = "MTA = exim\n# End Of File\nExim Command = /opt/x\nExim Command = /opt/y\n";
+        assert_eq!(
+            remove_directive(conf, "Exim Command"),
+            "MTA = exim\n# End Of File\n#Exim Command = /opt/x\n#Exim Command = /opt/y\n"
+        );
+        // absent: untouched
+        assert_eq!(
+            remove_directive("MTA = exim\n", "Exim Command"),
+            "MTA = exim\n"
+        );
+    }
 
     #[test]
     fn custom_dir_comes_from_the_conf_directive() {

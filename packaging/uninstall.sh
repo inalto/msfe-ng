@@ -78,8 +78,10 @@ if [ -x "$BINDIR/msfe-ng" ]; then
 fi
 # MailScanner's `Exim Command` must not point at the shim we are removing
 # (MailScanner would then silently assume short message ids).
-if grep -q "^Exim Command = $BINDIR/msfe-ng-exim" /etc/MailScanner/MailScanner.conf 2>/dev/null; then
-    sed -i "s|^Exim Command = $BINDIR/msfe-ng-exim.*|Exim Command = /usr/sbin/exim|" /etc/MailScanner/MailScanner.conf \
+MS_CONF="$(grep -oP '(?<=^mailscanner_conf = ")[^"]*' "$CONFDIR/config.toml" 2>/dev/null)"
+MS_CONF="${MS_CONF:-/etc/MailScanner/MailScanner.conf}"
+if grep -q "^Exim Command = $BINDIR/msfe-ng-exim" "$MS_CONF" 2>/dev/null; then
+    sed -i "s|^Exim Command = $BINDIR/msfe-ng-exim.*|Exim Command = /usr/sbin/exim|" "$MS_CONF" \
         && info "restored MailScanner 'Exim Command' to /usr/sbin/exim"
 fi
 

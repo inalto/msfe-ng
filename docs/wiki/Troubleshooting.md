@@ -47,6 +47,47 @@ the Exim message-id format* when the probe would go wrong, and the monitor
 cron moves misfiled files every 5 minutes (**Queues → Fix misplaced spool
 files** / `msfe-ng service spool-repair` do it by hand).
 
+## Two MailScanner engines (ConfigServer's `/usr/mailscanner` tree)
+
+Servers migrated from ConfigServer MSFE often still run its bundled engine —
+`/usr/mailscanner/usr/sbin/MailScanner` (5.4.x, under cPanel's perl) with
+`/usr/mailscanner/etc/MailScanner.conf` — while `msfe-ng engine install` put
+the MailScanner 5.5 RPM at `/usr/sbin/MailScanner`. MSFE-NG follows the engine
+the service actually runs: it takes the binary from `MailScanner.service`'s
+`ExecStart` (or the tree next to `mailscanner_conf`), and reads that engine's
+perl, `ms-update-phishing` and `defaults` file from the same place. So with
+`mailscanner_conf = "/usr/mailscanner/etc/MailScanner.conf"` in
+`/etc/msfe-ng/config.toml`, the Health Check lints the 5.4 engine, the doctor
+tests SpamAssassin under cPanel's perl, and the phishing fix names the right
+updater. `msfe-ng engine status` and the doctor's first line print which
+engine and version were found.
+
+A 5.4 engine has no `Exim Command` directive (it is a syntax error there), so
+*Configure for Exim* leaves it out — and comments out one left by an older
+MSFE-NG. It also has no support for Exim ≥ 4.97 long message ids at all; the
+doctor warns about that and the monitor keeps re-filing misplaced spool
+files, but the real fix is the 5.5 engine.
+
+## Exim already wired the ConfigServer way (`exim_outgoing.conf`)
+
+The original MSFE's "old method" routes mail with two Exim configurations:
+`/etc/exim.conf` spools into `/var/spool/exim_incoming` with `queue_only`, and
+`/etc/exim_outgoing.conf` delivers from `/var/spool/exim`. MSFE-NG recognises
+that layout — the doctor reports *Exim wired to MailScanner (two-config
+method)* — and *Configure for Exim* keeps what it needs:
+
+```
+Incoming Queue Dir = /var/spool/exim_incoming/input/*   (the /* takes the split subdirs)
+Split Exim Spool   = yes
+Sendmail2          = /usr/sbin/exim -C /etc/exim_outgoing.conf
+```
+
+Without the `-C`, MailScanner hands released messages to an Exim that looks
+for them in the *incoming* spool and logs `Spool file … -D not found`.
+**Wire** and **Unwire** refuse to touch that layout: MSFE-NG never layers its
+named queue over it. To switch to the named-queue method, undo the two-config
+setup with the tools that created it first.
+
 ## Daily cron mail: `gzip: phishing.bad.sites.conf.master.gz: not in gzip format`
 
 MailScanner's `cron.daily` job (`ms-cron DAILY` → `ms-update-phishing`) fetches

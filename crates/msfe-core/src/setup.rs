@@ -153,8 +153,16 @@ fn secure_config(config_file: &Path, log: &mut Vec<String>) {
     ));
 }
 
-pub(crate) fn perl_module_ok(module: &str) -> bool {
-    Command::new("perl")
+/// Can `module` be loaded by the engine's perl (interpreter + `-I` paths from
+/// `layout::EngineLayout::perl`)? A module the system perl has is worthless
+/// when MailScanner runs under cPanel's.
+pub(crate) fn perl_module_ok(perl: &[String], module: &str) -> bool {
+    let (interp, args) = match perl.split_first() {
+        Some((i, rest)) => (i.as_str(), rest),
+        None => ("perl", &[][..]),
+    };
+    Command::new(interp)
+        .args(args)
         .arg(format!("-M{module}"))
         .arg("-e1")
         .stdout(Stdio::null())
@@ -170,10 +178,11 @@ pub fn enable_logging(cfg: &Config) -> io::Result<Vec<String>> {
     // The plugin needs DBI + DBD::mysql at runtime; missing
     // modules fail silently from the operator's viewpoint (errors only in the
     // mail log), so surface — and try to fix — them here.
+    let perl = crate::layout::resolve(cfg).perl;
     for (module, pkg) in [("DBI", "perl-DBI"), ("DBD::mysql", "perl-DBD-MySQL")] {
-        if !perl_module_ok(module) {
+        if !perl_module_ok(&perl, module) {
             let _ = Command::new("dnf").args(["-y", "install", pkg]).output();
-            if perl_module_ok(module) {
+            if perl_module_ok(&perl, module) {
                 log.push(format!("installed missing perl module {module} ({pkg})"));
             } else {
                 log.push(format!(

@@ -5,7 +5,7 @@
 //! `GET /api/doctor`, and the warning banner in the WHM UI. Checks are
 //! read-only — the doctor diagnoses, the named fixes repair.
 
-use crate::{db, engine, mailflow, mailscanner, migrate, service, setup, Config};
+use crate::{db, engine, layout, mailflow, mailscanner, migrate, service, setup, Config};
 use std::path::Path;
 use std::process::Command;
 
@@ -48,13 +48,18 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
     let mut out = Vec::new();
 
     // ---- engine ----------------------------------------------------------
-    let engine = service::engine_installed();
+    let lay = layout::resolve(cfg);
+    let engine = service::engine_installed_at(&lay);
     out.push(check(
         "MailScanner engine installed",
         engine,
         Level::Fail,
         if engine {
-            "engine binaries present".into()
+            format!(
+                "MailScanner {} at {}",
+                lay.version_string(),
+                lay.bin.display()
+            )
         } else {
             "mail cannot be scanned without the engine".into()
         },
@@ -65,17 +70,12 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
     }
 
     let conf = std::fs::read_to_string(&cfg.mailscanner_conf).unwrap_or_default();
-    let configured = mailscanner::get_directive(&conf, "MTA") == Some("exim")
-        && mailscanner::get_directive(&conf, "Exim Command").is_some_and(|v| !v.is_empty());
+    let (configured, detail) = engine_configured_verdict(&conf, lay.supports_exim_command);
     out.push(check(
         "engine configured for Exim",
         configured,
         Level::Fail,
-        if configured {
-            "MTA=exim, Exim Command set".into()
-        } else {
-            "MailScanner.conf still carries sendmail defaults".into()
-        },
+        detail,
         "msfe-ng engine configure (or Service tab → Configure for Exim)",
     ));
     // MailScanner decides long vs short Exim message ids from `Exim Command
@@ -84,7 +84,7 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
     // subdirectory and every quarantined/archived body is copied from the
     // wrong offset. Run both the real binary and the configured probe and
     // compare what each says.
-    if configured {
+    if configured && lay.supports_exim_command {
         let probe_cmd = mailscanner::get_directive(&conf, "Exim Command").unwrap_or_default();
         let real_bv = exim_bv("/usr/sbin/exim");
         let probe_bv = exim_bv(probe_cmd);
@@ -96,17 +96,34 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
             detail,
             "msfe-ng engine configure (points Exim Command at the msfe-ng-exim shim), then restart MailScanner and run msfe-ng service spool-repair",
         ));
+    } else if configured {
+        // An engine older than 5.5 has no long-id support at all (ConfigServer's
+        // bundled 5.4.4): fine with Exim < 4.97, blind with anything newer.
+        let real_bv = exim_bv("/usr/sbin/exim");
+        let (ok, detail) = legacy_engine_probe_verdict(&real_bv, &lay.version_string());
+        out.push(check(
+            "MailScanner reads the Exim message-id format",
+            ok,
+            Level::Warn,
+            detail,
+            "upgrade the engine to MailScanner 5.5 (msfe-ng engine install); until then msfe-ng monitor re-files misplaced spool files",
+        ));
     }
 
-    let latch = service::engine_run_enabled();
+    // The RPM's ms-init refuses to start until run_mailscanner=1 in its
+    // defaults file; a unit that runs the engine directly has no such latch.
+    let latch = service::engine_run_enabled(cfg);
     out.push(check(
         "safety switch (run_mailscanner)",
-        latch == Some(true),
+        latch != Some(false),
         Level::Warn,
         match latch {
             Some(true) => "ON — MailScanner may run".into(),
             Some(false) => "OFF — MailScanner cannot start".into(),
-            None => "defaults file not found".into(),
+            None => format!(
+                "no {} — this engine has no startup latch",
+                lay.defaults.display()
+            ),
         },
         "msfe-ng engine enable (or the Safety switch on the Service tab)",
     ));
@@ -125,27 +142,30 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
     ));
 
     // ---- wiring ----------------------------------------------------------
-    let wired = engine::is_wired(cfg);
+    let method = engine::exim_method(cfg);
+    let wired = method.is_some();
     out.push(check(
         "Exim wired to MailScanner",
         wired,
         Level::Warn,
-        if wired {
-            "incoming mail is routed through the scanner".into()
-        } else {
-            "mail is delivered directly, without scanning".into()
+        match method {
+            Some(m) => format!(
+                "incoming mail is routed through the scanner ({})",
+                m.describe()
+            ),
+            None => "mail is delivered directly, without scanning".into(),
         },
         "msfe-ng engine wire (or Wire Exim → MailScanner on the Service tab)",
     ));
-    if wired {
+    if let Some(m) = method {
         let (inc, _) = service::queue_dirs(cfg);
-        let consistent = inc.to_string_lossy().contains("mailscanner");
+        let (consistent, fix) = queue_dirs_verdict(m, &inc);
         out.push(check(
             "queue dirs consistent with wiring",
             consistent,
             Level::Fail,
             format!("MailScanner scans {}", inc.display()),
-            "msfe-ng engine wire (re-run to repair the queue directives)",
+            fix,
         ));
         let age = service::oldest_queue_age(&inc);
         let stuck = age.map(|a| a > 600).unwrap_or(false);
@@ -315,15 +335,17 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
     ));
 
     // ---- scanners --------------------------------------------------------
-    let sa = setup::perl_module_ok("Mail::SpamAssassin");
+    // Probe with the perl the engine runs under (cPanel's perl for
+    // ConfigServer trees), not whatever `perl` is on the PATH.
+    let sa = setup::perl_module_ok(&lay.perl, "Mail::SpamAssassin");
     out.push(check(
         "SpamAssassin available to MailScanner",
         sa,
         Level::Warn,
         if sa {
-            "Mail::SpamAssassin loads".into()
+            format!("Mail::SpamAssassin loads under {}", lay.perl[0])
         } else {
-            "no spam scoring without it".into()
+            format!("Mail::SpamAssassin does not load under {} — no spam scoring without it", lay.perl[0])
         },
         "dnf -y install spamassassin (or re-run msfe-ng engine install with MSFE_NG_ENGINE_FORCE=1)",
     ));
@@ -516,7 +538,7 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
     ));
     if logging {
         for (module, pkg) in [("DBI", "perl-DBI"), ("DBD::mysql", "perl-DBD-MySQL")] {
-            let ok = setup::perl_module_ok(module);
+            let ok = setup::perl_module_ok(&lay.perl, module);
             out.push(check(
                 "logging perl modules",
                 ok,
@@ -615,7 +637,7 @@ fn dir_writable_by(meta_uid: u32, meta_gid: u32, mode: u32, uid: u32, gids: &[u3
 }
 
 /// What the phishing-list check looks at, gathered from disk.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct PhishingListState {
     /// `ms_cron_ps` in /etc/MailScanner/defaults (absent file counts as on).
     pub enabled: bool,
@@ -625,6 +647,8 @@ pub struct PhishingListState {
     pub junk_gz: bool,
     /// ms-update-phishing already fetches over HTTP/1.1.
     pub updater_patched: bool,
+    /// This engine's ms-update-phishing (RPM or ConfigServer tree).
+    pub updater: String,
 }
 
 /// Successful updates rewrite the list daily; allow a few missed days for an
@@ -632,10 +656,8 @@ pub struct PhishingListState {
 const PHISHING_LIST_MAX_AGE_DAYS: u64 = 3;
 
 fn phishing_lists_check(cfg: &Config) -> Check {
-    let etc = Path::new(&cfg.mailscanner_conf)
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| "/etc/MailScanner".into());
+    let lay = layout::resolve(cfg);
+    let etc = lay.etc.clone();
     let age_days = |p: &Path| {
         std::fs::metadata(p)
             .and_then(|m| m.modified())
@@ -644,13 +666,14 @@ fn phishing_lists_check(cfg: &Config) -> Check {
             .map(|d| d.as_secs() / 86_400)
     };
     let junk_gz = !engine::phishing_junk_downloads(&etc).is_empty();
-    let updater_patched = std::fs::read_to_string(engine::phishing_updater_path())
+    let updater_patched = std::fs::read_to_string(&lay.phishing_updater)
         .is_ok_and(|s| engine::patch_phishing_updater(&s).is_none());
     let state = PhishingListState {
-        enabled: service::phishing_update_enabled().unwrap_or(true),
+        enabled: service::phishing_update_enabled(cfg).unwrap_or(true),
         list_age_days: age_days(&etc.join("phishing.bad.sites.conf")),
         junk_gz,
         updater_patched,
+        updater: lay.phishing_updater.display().to_string(),
     };
     let (ok, detail, fix) = phishing_lists_verdict(&state);
     check(
@@ -898,7 +921,7 @@ pub fn dnsbl_verdict(
     let mut fix = Vec::new();
     if !blocked.is_empty() || shared_resolver.is_some() {
         fix.push(
-            "run a private recursive resolver (unbound on 127.0.0.1) and point /etc/resolv.conf at it — see the wiki, Troubleshooting → DNS blocklists"
+            "run a private recursive resolver (unbound on 127.0.0.1 — on cPanel, PowerDNS holds port 53 on every address until bound to the public ones) and point /etc/resolv.conf at it — see the wiki, Troubleshooting → DNS blocklists"
                 .to_string(),
         );
     }
@@ -1056,10 +1079,12 @@ pub fn phishing_lists_verdict(s: &PhishingListState) -> (bool, String, String) {
     }
     let days = |d: u64| format!("{d} day{}", if d == 1 { "" } else { "s" });
     let fix = if s.updater_patched {
-        "run /usr/sbin/ms-update-phishing and check its output (the daily cron mail has the errors)"
-            .to_string()
+        format!(
+            "run {} and check its output (the daily cron mail has the errors)",
+            s.updater
+        )
     } else {
-        "msfe-ng engine configure (patches ms-update-phishing to fetch over HTTP/1.1 and clears the bad download), then run /usr/sbin/ms-update-phishing".to_string()
+        format!("msfe-ng engine configure (patches ms-update-phishing to fetch over HTTP/1.1 and clears the bad download), then run {}", s.updater)
     };
     match s.list_age_days {
         Some(d) if d <= PHISHING_LIST_MAX_AGE_DAYS => (
@@ -1088,6 +1113,68 @@ pub fn phishing_lists_verdict(s: &PhishingListState) -> (bool, String, String) {
             "phishing.bad.sites.conf is missing — MailScanner's phishing checks run without the site lists".into(),
             fix,
         ),
+    }
+}
+
+/// Does `Incoming Queue Dir` point where the active Exim method queues mail?
+pub fn queue_dirs_verdict(method: engine::EximMethod, inc: &Path) -> (bool, &'static str) {
+    let s = inc.to_string_lossy();
+    match method {
+        engine::EximMethod::NamedQueue => (
+            s.contains("mailscanner"),
+            "msfe-ng engine wire (re-run to repair the queue directives)",
+        ),
+        engine::EximMethod::TwoConfig => (
+            s.contains("_incoming"),
+            "msfe-ng engine configure (re-asserts the incoming spool of the two-config method)",
+        ),
+    }
+}
+
+/// Is MailScanner.conf set up for Exim? `Exim Command` is required only on
+/// engines whose parser knows it (5.5+); on older ones it is a syntax error.
+pub fn engine_configured_verdict(conf: &str, supports_exim_command: bool) -> (bool, String) {
+    if mailscanner::get_directive(conf, "MTA") != Some("exim") {
+        return (
+            false,
+            "MailScanner.conf still carries sendmail defaults".into(),
+        );
+    }
+    if !supports_exim_command {
+        return (true, "MTA=exim (engine predates Exim Command)".into());
+    }
+    if mailscanner::get_directive(conf, "Exim Command").is_some_and(|v| !v.is_empty()) {
+        (true, "MTA=exim, Exim Command set".into())
+    } else {
+        (
+            false,
+            "MTA=exim but Exim Command is unset — MailScanner assumes short message ids".into(),
+        )
+    }
+}
+
+/// An engine without `Exim Command` (pre-5.5) assumes short message ids
+/// unconditionally: correct for Exim < 4.97 only.
+pub fn legacy_engine_probe_verdict(real_bv: &str, engine_version: &str) -> (bool, String) {
+    let Some(real) = engine::exim_version(real_bv) else {
+        return (
+            false,
+            "cannot read the Exim version from /usr/sbin/exim -bV".into(),
+        );
+    };
+    let (major, minor) = real;
+    if engine::exim_long_ids(real) {
+        (
+            false,
+            format!(
+                "Exim {major}.{minor} writes long message ids; MailScanner {engine_version} predates them and files outgoing spool files by the short-id rule"
+            ),
+        )
+    } else {
+        (
+            true,
+            format!("Exim {major}.{minor} writes short message ids, as MailScanner {engine_version} expects"),
+        )
     }
 }
 
@@ -1364,12 +1451,57 @@ mod tests {
     // RPM's 2024 copies. The check reads the list's age, spots the HTML
     // leftover, and names the shim (engine configure) when it isn't applied.
     #[test]
+    fn queue_dirs_verdict_knows_both_wiring_methods() {
+        use engine::EximMethod::*;
+        assert!(queue_dirs_verdict(NamedQueue, Path::new("/var/spool/exim/mailscanner/input")).0);
+        assert!(!queue_dirs_verdict(NamedQueue, Path::new("/var/spool/exim_incoming/input")).0);
+        let (ok, fix) = queue_dirs_verdict(TwoConfig, Path::new("/var/spool/exim_incoming/input"));
+        assert!(ok);
+        assert!(fix.contains("engine configure"));
+        assert!(!queue_dirs_verdict(TwoConfig, Path::new("/var/spool/exim/mailscanner/input")).0);
+    }
+
+    #[test]
+    fn engine_configured_verdict_requires_exim_command_only_where_it_exists() {
+        // MailScanner 5.5: the directive exists and matters
+        let (ok, detail) = engine_configured_verdict("MTA = exim\n", true);
+        assert!(!ok && detail.contains("Exim Command"), "{detail}");
+        let (ok, _) = engine_configured_verdict(
+            "MTA = exim\nExim Command = /opt/msfe-ng/bin/msfe-ng-exim\n",
+            true,
+        );
+        assert!(ok);
+        // MailScanner 5.4: the directive is a syntax error there, so its
+        // absence is correct
+        let (ok, detail) = engine_configured_verdict("MTA = exim\n", false);
+        assert!(ok, "{detail}");
+        assert!(!detail.contains("unset"), "{detail}");
+        let (ok, _) = engine_configured_verdict("MTA = sendmail\n", false);
+        assert!(!ok);
+    }
+
+    #[test]
+    fn old_engine_probe_verdict_depends_on_the_exim_version() {
+        // Exim < 4.97 writes short ids: a 5.4 engine is fine
+        let (ok, _) = legacy_engine_probe_verdict("Exim version 4.96 #2 built", "5.4.4");
+        assert!(ok);
+        // Exim 4.100 writes long ids the 5.4 engine cannot know about
+        let (ok, detail) = legacy_engine_probe_verdict("Exim version 4.100 #2 built", "5.4.4");
+        assert!(!ok);
+        assert!(
+            detail.contains("5.4.4") && detail.contains("4.100"),
+            "{detail}"
+        );
+    }
+
+    #[test]
     fn phishing_lists_verdict_reads_age_and_the_cloudflare_leftover() {
         let s = PhishingListState {
             enabled: true,
             list_age_days: Some(1),
             junk_gz: false,
             updater_patched: true,
+            updater: "/usr/mailscanner/usr/sbin/ms-update-phishing".into(),
         };
         let (ok, detail, _) = phishing_lists_verdict(&s);
         assert!(ok, "{detail}");
@@ -1379,7 +1511,7 @@ mod tests {
         assert!(
             phishing_lists_verdict(&PhishingListState {
                 list_age_days: Some(3),
-                ..s
+                ..s.clone()
             })
             .0
         );
@@ -1389,7 +1521,7 @@ mod tests {
             list_age_days: Some(320),
             junk_gz: true,
             updater_patched: false,
-            ..s
+            ..s.clone()
         };
         let (ok, detail, fix) = phishing_lists_verdict(&bad);
         assert!(!ok);
@@ -1403,7 +1535,7 @@ mod tests {
         let (ok, detail, fix) = phishing_lists_verdict(&PhishingListState {
             junk_gz: false,
             updater_patched: true,
-            ..bad
+            ..bad.clone()
         });
         assert!(!ok);
         assert!(
@@ -1411,14 +1543,15 @@ mod tests {
             "{detail}"
         );
         assert!(
-            !fix.contains("engine configure") && fix.contains("ms-update-phishing"),
-            "{fix}"
+            !fix.contains("engine configure")
+                && fix.contains("run /usr/mailscanner/usr/sbin/ms-update-phishing"),
+            "the fix must name this engine's updater: {fix}"
         );
 
         // list file missing entirely
         let (ok, detail, _) = phishing_lists_verdict(&PhishingListState {
             list_age_days: None,
-            ..bad
+            ..bad.clone()
         });
         assert!(!ok);
         assert!(detail.contains("missing"), "{detail}");
@@ -1426,7 +1559,7 @@ mod tests {
         // operator turned the update off in /etc/MailScanner/defaults → not our business
         let (ok, detail, _) = phishing_lists_verdict(&PhishingListState {
             enabled: false,
-            ..bad
+            ..bad.clone()
         });
         assert!(ok);
         assert!(detail.contains("ms_cron_ps=0"), "{detail}");

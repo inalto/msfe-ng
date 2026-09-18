@@ -32,13 +32,45 @@ elif command -v yum >/dev/null 2>&1; then PKG=yum
 else die "dnf/yum not found — this installer supports RHEL-family systems only"
 fi
 
-if command -v MailScanner >/dev/null 2>&1 || [ -x /usr/sbin/MailScanner ]; then
-    info "MailScanner engine already installed"
+# ---- which engine, if any, is already here ----------------------------------
+# Two layouts exist: the RPM (/usr/sbin/MailScanner, system perl) and
+# ConfigServer's tree (/usr/mailscanner/usr/sbin/MailScanner, cPanel's perl).
+# Installing the RPM next to a ConfigServer engine leaves two engines and a
+# service that runs the other one — so an engine found anywhere counts.
+find_engine() {
+    if [ -n "${MSFE_NG_MS_BIN:-}" ]; then
+        [ -x "$MSFE_NG_MS_BIN" ] && printf '%s\n' "$MSFE_NG_MS_BIN"
+        return 0
+    fi
+    for b in /usr/sbin/MailScanner /usr/mailscanner/usr/sbin/MailScanner; do
+        [ -x "$b" ] && { printf '%s\n' "$b"; return 0; }
+    done
+    command -v MailScanner 2>/dev/null || true
+}
+# The perl an engine runs under: interpreter + -I paths from its shebang.
+engine_perl() {
+    head -n 1 "$1" | sed -n 's/^#!//p' | tr ' ' '\n' | awk '
+        /perl$/ && !seen { print; seen = 1; next }
+        $0 == "-I" { want = 1; next }
+        /^-I./ { print "-I"; print substr($0, 3); next }
+        want { print "-I"; print; want = 0 }
+    ' | tr '\n' ' ' | sed 's/ $//'
+}
+MS_BIN="$(find_engine)"
+MS_PERL="perl"
+if [ -n "$MS_BIN" ]; then
+    MS_PERL="$(engine_perl "$MS_BIN")"
+    [ -n "$MS_PERL" ] || MS_PERL="perl"
+    info "MailScanner engine already installed at $MS_BIN"
+    info "engine perl: $MS_PERL"
     if [ "${MSFE_NG_ENGINE_FORCE:-0}" != 1 ]; then
         info "nothing to do (set MSFE_NG_ENGINE_FORCE=1 to reinstall)"
         exit 0
     fi
 fi
+# perl_has <module>: does the engine's perl load it?
+# shellcheck disable=SC2086  # MS_PERL is a command line, split on purpose
+perl_has() { $MS_PERL "-M$1" -e1 >/dev/null 2>&1; }
 
 # Work under $HOME (/root in real runs), not /tmp (cPanel securetmp noexec).
 work="${HOME:-/root}/.msfe-ng-engine.$$"
@@ -76,12 +108,15 @@ run /usr/sbin/ms-configure \
 # ms-configure tolerates individual CPAN build failures, and some required
 # modules (e.g. Sys::Hostname::Long) are not packaged in EL/EPEL at all — so
 # verify with MailScanner's own lint and cpanm whatever is still missing.
-if [ "$DRY" != 1 ] && [ -x /usr/sbin/MailScanner ]; then
-    info "verifying perl dependencies (MailScanner --lint)"
+[ -n "$MS_BIN" ] || MS_BIN="$(find_engine)"
+[ -n "$MS_BIN" ] && MS_PERL="$(engine_perl "$MS_BIN")"
+[ -n "$MS_PERL" ] || MS_PERL="perl"
+if [ "$DRY" != 1 ] && [ -n "$MS_BIN" ]; then
+    info "verifying perl dependencies ($MS_BIN --lint)"
     command -v cpanm >/dev/null 2>&1 || run "$PKG" -y install perl-App-cpanminus
     tries=0
     while [ "$tries" -lt 20 ]; do
-        missing="$( { /usr/sbin/MailScanner --lint 2>&1 || true; } \
+        missing="$( { "$MS_BIN" --lint 2>&1 || true; } \
             | sed -n "s/.*Can't locate \([A-Za-z0-9_\/]*\)\.pm .*/\1/p" \
             | head -1 | sed 's|/|::|g')"
         [ -n "$missing" ] || break
@@ -98,10 +133,10 @@ fi
 # is a separate thing) — without the module every message goes unscored.
 if [ "$DRY" = 1 ]; then
     info "would ensure Mail::SpamAssassin is installed (dnf spamassassin, cpanm fallback)"
-elif ! perl -MMail::SpamAssassin -e1 >/dev/null 2>&1; then
-    info "installing SpamAssassin (Mail::SpamAssassin)"
+elif ! perl_has Mail::SpamAssassin; then
+    info "installing SpamAssassin (Mail::SpamAssassin, for $MS_PERL)"
     run "$PKG" -y install spamassassin || true
-    if ! perl -MMail::SpamAssassin -e1 >/dev/null 2>&1; then
+    if ! perl_has Mail::SpamAssassin; then
         command -v cpanm >/dev/null 2>&1 || run "$PKG" -y install perl-App-cpanminus
         run cpanm --notest Mail::SpamAssassin \
             || info "WARNING: Mail::SpamAssassin still missing — install it manually"
@@ -113,8 +148,8 @@ fi
 if [ "$DRY" = 1 ]; then
     info "would ensure perl DBI + DBD::mysql are installed"
 else
-    perl -MDBI -e1 >/dev/null 2>&1 || run "$PKG" -y install perl-DBI || true
-    perl -MDBD::mysql -e1 >/dev/null 2>&1 || run "$PKG" -y install perl-DBD-MySQL || true
+    perl_has DBI || run "$PKG" -y install perl-DBI || true
+    perl_has DBD::mysql || run "$PKG" -y install perl-DBD-MySQL || true
 fi
 
 # ClamAV: install clamd + signatures unless opted out (MSFE_NG_NO_CLAMAV=1).
@@ -146,5 +181,5 @@ fi
 run systemctl disable --now mailscanner 2>/dev/null || true
 
 info "MailScanner engine installed (service left disabled)"
-info "verify the configuration with:  MailScanner --lint"
+info "verify the configuration with:  msfe-ng engine lint"
 info "mail flow is UNCHANGED — Exim wiring is a separate, explicit step"
