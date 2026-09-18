@@ -4,7 +4,9 @@
 use crate::http::{Request, Response};
 use msfe_core::json::Json;
 use msfe_core::rules::DomainPolicy;
-use msfe_core::{mailflow, quarantine, rulefile, rules, service, stats, sync, users, Config};
+use msfe_core::{
+    civil, logindex, mailflow, quarantine, rulefile, rules, service, stats, sync, users, Config,
+};
 use std::path::Path;
 
 /// Route `/api/*` requests. `config_file` is the daemon's config path (used to
@@ -719,6 +721,7 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
         }
         ("POST", "/api/service/sync") => service_sync(cfg, config_file),
         ("GET", "/api/service/maillog") => service_maillog(req, cfg),
+        ("GET", "/api/service/maillog/days") => service_maillog_days(req, cfg),
         ("GET", "/api/service/maillog/search") => service_maillog_search(req, cfg),
         ("GET", "/api/service/maillog/window") => service_maillog_window(req, cfg),
         ("GET", "/api/service/journal") => {
@@ -1574,7 +1577,7 @@ fn service_maillog(req: &Request, cfg: &Config) -> Response {
 
 /// Longest search pattern accepted by `/api/service/maillog/search`.
 const MAX_SEARCH_PATTERN: usize = 200;
-/// Most hit offsets returned per search (the newest survive).
+/// Most hits returned per search (the newest survive).
 const MAX_SEARCH_HITS: usize = 5000;
 
 fn cannot_read(path: &str, e: std::io::Error) -> Response {
@@ -1588,44 +1591,108 @@ fn cannot_read(path: &str, e: std::io::Error) -> Response {
     )
 }
 
-/// `GET /api/service/maillog/search?q=text[&which=exim]` — offsets of every
-/// line containing `q` (case-insensitive) across the whole current log file.
+fn bad_request(msg: &str) -> Response {
+    Response::json(
+        400,
+        &Json::Object(vec![("error".into(), Json::str(msg))]).to_string(),
+    )
+}
+
+/// The log set (live file + rotated siblings) `which=` selects, indexed by day.
+fn log_index(req: &Request, cfg: &Config) -> Result<logindex::LogIndex, Response> {
+    let path = log_path(req, cfg);
+    // A missing live log is an error, not an empty set of rotated files.
+    std::fs::metadata(path).map_err(|e| cannot_read(path, e))?;
+    logindex::index(Path::new(path)).map_err(|e| cannot_read(path, e))
+}
+
+/// `GET /api/service/maillog/days[?which=exim]` — the days present across the
+/// live log and its rotated siblings, each with the file and offset where it
+/// begins, plus the files themselves.
+fn service_maillog_days(req: &Request, cfg: &Config) -> Response {
+    let idx = match log_index(req, cfg) {
+        Ok(i) => i,
+        Err(r) => return r,
+    };
+    let days = idx
+        .days()
+        .into_iter()
+        .map(|(date, span)| {
+            Json::Object(vec![
+                ("date".into(), Json::str(date.to_string())),
+                ("file".into(), Json::str(&span.file)),
+                ("start".into(), Json::Int(span.start as i64)),
+            ])
+        })
+        .collect();
+    let files = idx
+        .files
+        .iter()
+        .map(|f| {
+            Json::Object(vec![
+                ("name".into(), Json::str(&f.name)),
+                ("gz".into(), Json::Bool(f.gz)),
+                ("size".into(), Json::Int(f.len as i64)),
+            ])
+        })
+        .collect();
+    Response::json(
+        200,
+        &Json::Object(vec![
+            ("days".into(), Json::Array(days)),
+            ("files".into(), Json::Array(files)),
+        ])
+        .to_string(),
+    )
+}
+
+/// `GET /api/service/maillog/search?q=text[&day=YYYY-MM-DD][&which=exim]` —
+/// every line containing `q` (case-insensitive) across the whole log set,
+/// oldest file first, or only within `day`. Hits are `[file, offset]`.
 fn service_maillog_search(req: &Request, cfg: &Config) -> Response {
     let q = req.query_param("q").unwrap_or_default();
     let q = q.trim();
     if q.is_empty() || q.len() > MAX_SEARCH_PATTERN {
-        return Response::json(
-            400,
-            &Json::Object(vec![(
-                "error".into(),
-                Json::str(format!(
-                    "pattern must be 1 to {MAX_SEARCH_PATTERN} characters"
-                )),
-            )])
-            .to_string(),
-        );
+        return bad_request(&format!(
+            "pattern must be 1 to {MAX_SEARCH_PATTERN} characters"
+        ));
     }
-    let path = log_path(req, cfg);
-    match service::search_file(Path::new(path), q, MAX_SEARCH_HITS) {
+    let day = match req.query_param("day").filter(|d| !d.is_empty()) {
+        None => None,
+        Some(d) => match civil::Date::parse(&d) {
+            Some(date) => Some(date),
+            None => return bad_request("day must be YYYY-MM-DD"),
+        },
+    };
+    let idx = match log_index(req, cfg) {
+        Ok(i) => i,
+        Err(r) => return r,
+    };
+    match service::search_logs(&idx, q, day, MAX_SEARCH_HITS) {
         Ok(r) => Response::json(
             200,
             &Json::Object(vec![
                 ("total".into(), Json::Int(r.total as i64)),
                 ("truncated".into(), Json::Bool(r.truncated)),
-                ("size".into(), Json::Int(r.size as i64)),
                 (
-                    "offsets".into(),
-                    Json::Array(r.offsets.iter().map(|&o| Json::Int(o as i64)).collect()),
+                    "hits".into(),
+                    Json::Array(
+                        r.hits
+                            .iter()
+                            .map(|h| Json::Array(vec![Json::str(&h.file), Json::Int(h.off as i64)]))
+                            .collect(),
+                    ),
                 ),
             ])
             .to_string(),
         ),
-        Err(e) => cannot_read(path, e),
+        Err(e) => cannot_read(log_path(req, cfg), e),
     }
 }
 
-/// `GET /api/service/maillog/window?at=offset[&before=N&after=N&which=exim]`
-/// — the lines around the line starting at byte `at`.
+/// `GET /api/service/maillog/window?at=offset[&file=name&before=N&after=N&which=exim]`
+/// — the lines around the line starting at byte `at` of `file` (default: the
+/// live log). `file` must be a name from the index, never a path.
 fn service_maillog_window(req: &Request, cfg: &Config) -> Response {
     let at: u64 = req
         .query_param("at")
@@ -1633,11 +1700,28 @@ fn service_maillog_window(req: &Request, cfg: &Config) -> Response {
         .unwrap_or(0);
     let before = stats::clamp_int(req.query_param("before").as_deref(), 200, 0, 1000);
     let after = stats::clamp_int(req.query_param("after").as_deref(), 200, 0, 1000);
-    let path = log_path(req, cfg);
-    match service::window_file(Path::new(path), at, before as usize, after as usize) {
+    let idx = match log_index(req, cfg) {
+        Ok(i) => i,
+        Err(r) => return r,
+    };
+    let live = Path::new(log_path(req, cfg))
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string();
+    let name = req.query_param("file").unwrap_or(live);
+    let Some(file) = idx.file(&name) else {
+        return bad_request("unknown log file");
+    };
+    let plain = match logindex::plain_path(file, &logindex::cache_dir()) {
+        Ok(p) => p,
+        Err(e) => return cannot_read(&file.name, e),
+    };
+    match service::window_file(&plain, at, before as usize, after as usize) {
         Ok(w) => Response::json(
             200,
             &Json::Object(vec![
+                ("file".into(), Json::str(&file.name)),
                 ("text".into(), Json::str(w.text)),
                 ("anchor".into(), Json::Int(w.anchor as i64)),
                 ("start".into(), Json::Int(w.start as i64)),
@@ -1645,7 +1729,7 @@ fn service_maillog_window(req: &Request, cfg: &Config) -> Response {
             ])
             .to_string(),
         ),
-        Err(e) => cannot_read(path, e),
+        Err(e) => cannot_read(&file.name, e),
     }
 }
 
@@ -2256,8 +2340,99 @@ mod tests {
         assert_eq!(st, 200);
         assert_eq!(
             body,
-            r#"{"total":2,"truncated":false,"size":30,"offsets":[6,21]}"#
+            r#"{"total":2,"truncated":false,"hits":[["maillog",6],["maillog",21]]}"#
         );
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    fn rotated_fixture(name: &str) -> (std::path::PathBuf, Config) {
+        let (d, cfg) = log_fixture(
+            name,
+            "Sep 13 04:00:00 h hit c\nSep 14 10:00:00 h miss\nSep 14 11:00:00 h hit d\n",
+        );
+        let old = d.join("maillog-20260913");
+        std::fs::write(&old, "Sep 12 10:00:00 h hit a\nSep 13 01:00:00 h hit b\n").unwrap();
+        let t = std::time::SystemTime::now() - std::time::Duration::from_secs(5 * 86_400);
+        std::fs::File::open(&old).unwrap().set_modified(t).unwrap();
+        (d, cfg)
+    }
+
+    #[test]
+    fn maillog_days_lists_each_date_with_where_it_starts() {
+        let (d, cfg) = rotated_fixture("days");
+        let (st, body) = send(handle(&get("/api/service/maillog/days", ""), &cfg, &d));
+        assert_eq!(st, 200);
+        assert_eq!(
+            body,
+            r#"{"days":[{"date":"2026-09-12","file":"maillog-20260913","start":0},{"date":"2026-09-13","file":"maillog-20260913","start":24},{"date":"2026-09-14","file":"maillog","start":24}],"files":[{"name":"maillog-20260913","gz":false,"size":48},{"name":"maillog","gz":false,"size":71}]}"#
+        );
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn maillog_search_spans_rotated_files_and_takes_a_day() {
+        let (d, cfg) = rotated_fixture("searchday");
+        let (_, body) = send(handle(
+            &get("/api/service/maillog/search", "q=hit"),
+            &cfg,
+            &d,
+        ));
+        assert_eq!(
+            body,
+            r#"{"total":4,"truncated":false,"hits":[["maillog-20260913",0],["maillog-20260913",24],["maillog",0],["maillog",47]]}"#
+        );
+        let (_, body) = send(handle(
+            &get("/api/service/maillog/search", "q=hit&day=2026-09-13"),
+            &cfg,
+            &d,
+        ));
+        assert_eq!(
+            body,
+            r#"{"total":2,"truncated":false,"hits":[["maillog-20260913",24],["maillog",0]]}"#
+        );
+        let (st, _) = send(handle(
+            &get("/api/service/maillog/search", "q=hit&day=13/09/2026"),
+            &cfg,
+            &d,
+        ));
+        assert_eq!(st, 400);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn maillog_window_takes_a_file_name_from_the_index_only() {
+        let (d, cfg) = rotated_fixture("windowfile");
+        let (st, body) = send(handle(
+            &get(
+                "/api/service/maillog/window",
+                "file=maillog-20260913&at=24&before=1&after=0",
+            ),
+            &cfg,
+            &d,
+        ));
+        assert_eq!(st, 200);
+        assert_eq!(
+            body,
+            r#"{"file":"maillog-20260913","text":"Sep 12 10:00:00 h hit a\nSep 13 01:00:00 h hit b","anchor":1,"start":0,"end":48}"#
+        );
+        // defaults to the live file
+        let (_, body) = send(handle(
+            &get("/api/service/maillog/window", "at=0&before=0&after=0"),
+            &cfg,
+            &d,
+        ));
+        assert!(
+            body.starts_with(r#"{"file":"maillog","text":"Sep 13 04:00:00 h hit c""#),
+            "{body}"
+        );
+        for bad in [
+            "file=../../etc/passwd&at=0",
+            "file=maillog-19990101&at=0",
+            "file=/etc/passwd&at=0",
+        ] {
+            let (st, _) = send(handle(&get("/api/service/maillog/window", bad), &cfg, &d));
+            assert_eq!(st, 400, "{bad}");
+        }
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -2296,7 +2471,7 @@ mod tests {
         assert_eq!(st, 200);
         assert_eq!(
             body,
-            r#"{"text":"l1\nl2\nl3","anchor":1,"start":3,"end":12}"#
+            r#"{"file":"maillog","text":"l1\nl2\nl3","anchor":1,"start":3,"end":12}"#
         );
         std::fs::remove_dir_all(&d).unwrap();
     }

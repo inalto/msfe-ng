@@ -203,11 +203,12 @@ the [Rules](Rules) tab.
 
 ## Following one message through the logs
 
-The [Logs](Logs) tab searches the **whole** current mail log or Exim mainlog
-for a message id, address or host — no need to `grep` on the server. Start
-from the newest hit and step **◀ older** to see the message arrive, get
-scanned and be delivered or deferred; every occurrence is highlighted in
-context.
+The [Logs](Logs) tab searches the **whole** mail log or Exim mainlog —
+rotated weeks included — for a message id, address or host, no need to `grep`
+on the server. Start from the newest hit and step **◀ older** to see the
+message arrive, get scanned and be delivered or deferred; every occurrence is
+highlighted in context. If you know roughly when it happened, pick the day
+from the **📅** calendar first.
 
 ## Getting the daemon's view directly
 

@@ -474,6 +474,88 @@
     color: #fff;
     box-shadow: none;
   }
+  /* log day picker: the calendar pops under its button inside the card */
+  .card.logs {
+    position: relative;
+  }
+  button.act.daybtn.on {
+    border-color: var(--accent);
+    color: var(--accent-strong);
+  }
+  .cal {
+    @apply bg-surface;
+    position: absolute;
+    z-index: 20;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 0.6rem 0.7rem 0.55rem;
+    box-shadow: 0 12px 34px rgba(2, 6, 12, 0.28);
+    width: max-content;
+  }
+  .cal-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 0.4rem;
+  }
+  .cal-head button.act {
+    padding: 0.1rem 0.55rem;
+    line-height: 1.4;
+  }
+  .cal-title {
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .cal-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 2.1rem);
+    gap: 3px;
+  }
+  .cal-dow {
+    text-align: center;
+    color: var(--muted);
+    font: 0.68rem/1.6 var(--font-mono);
+    text-transform: uppercase;
+  }
+  .cal-day {
+    height: 2.1rem;
+    border-radius: 6px;
+    border: 1px solid transparent;
+    color: var(--muted);
+    font: 0.8rem var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    background: transparent;
+  }
+  .cal-day:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+  .cal-day.has {
+    color: var(--ink);
+    font-weight: 600;
+    background: var(--accent-weak);
+    cursor: pointer;
+  }
+  .cal-day.has:hover {
+    border-color: var(--accent);
+  }
+  .cal-day.today {
+    border-color: var(--line);
+  }
+  .cal-day.sel {
+    background: var(--accent);
+    color: var(--accent-ink);
+    border-color: var(--accent-strong);
+  }
+  .cal-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.8rem;
+    margin-top: 0.5rem;
+    font-size: 0.76rem;
+  }
   .statline {
     display: flex;
     gap: 1.2rem;

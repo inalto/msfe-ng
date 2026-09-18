@@ -1172,17 +1172,18 @@ async function renderLogs(){
   const v=$('#view');v.innerHTML='';
 
   // Log viewer (mail log + exim mainlog) with follow
-  const lc=el('div',{class:'card'},el('h2',{},'Logs'));v.append(lc);
+  const lc=el('div',{class:'card logs'},el('h2',{},'Logs'));v.append(lc);
   const lctl=el('div',{class:'ctl'});lc.append(lctl);
   const lsrc=el('select');[['mail','Mail log (MailScanner/syslog)'],['exim','Exim mainlog (deliveries)']].forEach(([val,lbl])=>lsrc.append(el('option',{value:val},lbl)));
   const lsel=el('select');[100,300,1000].forEach(n=>lsel.append(el('option',{value:n},n+' lines')));
   const pre=el('pre',{class:'log',style:'max-height:30rem'},'Loading…');
   const which=()=>lsrc.value==='exim'?'&which=exim':'';
-  // Search state: hits are line-start byte offsets across the whole file; the
-  // viewer only ever holds a window of lines around the current hit.
-  const S={mode:'tail',needle:'',hits:[],cur:-1,truncated:false,win:null};
+  // Search state: hits are [file, line-start offset] across the live log and
+  // its rotated siblings; the viewer only ever holds a window around one hit.
+  // mode: 'tail' | 'search' | 'day' (a day opened without a pattern).
+  const S={mode:'tail',needle:'',hits:[],cur:-1,truncated:false,win:null,day:null};
   async function refreshLog(){
-    if(S.mode==='search')return;
+    if(S.mode!=='tail')return;
     const text=await api('/api/service/maillog?lines='+lsel.value+which(),{raw:true});
     const stick=pre.scrollTop+pre.clientHeight>=pre.scrollHeight-4;
     pre.textContent=text||'(empty)';
@@ -1195,23 +1196,94 @@ async function renderLogs(){
     Object.assign(el('button',{class:'act plain'},'Refresh'),{onclick:refreshLog}),
     auto,el('label',{for:'logauto',class:'muted'},'follow (5s)'));
 
-  // Whole-file search: server returns hit offsets, we page windows around them.
+  // Whole-log search: server returns hit offsets, we page windows around them.
   const sctl=el('div',{class:'ctl'});lc.append(sctl);
+  const daybtn=el('button',{class:'act plain daybtn',title:'restrict to one day'});
   const sinp=el('input',{placeholder:'search whole log… (Enter: older hit, Shift+Enter: newer, Esc: clear)',style:'width:24rem'});
   const sbtn=el('button',{class:'act plain'},'Search');
   const prev=el('button',{class:'act plain',title:'older hit'},'◀ older');
   const next=el('button',{class:'act plain',title:'newer hit'},'newer ▶');
   const count=el('span',{class:'muted'});
   const clr=el('button',{class:'act plain',title:'clear search'},'✕');
-  sctl.append(sinp,sbtn,prev,next,count,clr);
+  sctl.append(daybtn,sinp,sbtn,prev,next,count,clr);
+
+  // ---- day picker: a calendar of the days present in the log set ----
+  const MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const MONL=['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const fmtDay=d=>+d.slice(8,10)+' '+MON[+d.slice(5,7)-1];
+  let DAYS=null,DAYS_AT=0,DAYS_SRC='';
+  async function loadDays(force){
+    if(!force&&DAYS&&DAYS_SRC===lsrc.value&&Date.now()-DAYS_AT<60000)return DAYS;
+    const r=await api('/api/service/maillog/days?x=1'+which());
+    DAYS=(r&&!r.error)?r:{days:[],files:[],error:r?.error};DAYS_AT=Date.now();DAYS_SRC=lsrc.value;
+    return DAYS;
+  }
+  const liveName=()=>DAYS&&DAYS.files.length?DAYS.files[DAYS.files.length-1].name:null;
+  function setDayLabel(){
+    daybtn.textContent=(S.day?'📅 '+fmtDay(S.day):'📅 Any day')+' ▾';
+    daybtn.classList.toggle('on',!!S.day);
+  }
+  let cal=null,calDoc=null;
+  function closeCal(){if(cal){cal.remove();cal=null;}if(calDoc){document.removeEventListener('mousedown',calDoc);document.removeEventListener('keydown',calDoc);calDoc=null;}}
+  async function openCal(){
+    if(cal){closeCal();return;}
+    cal=el('div',{class:'cal'},el('div',{class:'muted',style:'padding:.5rem'},'Loading…'));
+    lc.append(cal);
+    cal.style.top=(daybtn.offsetTop+daybtn.offsetHeight+4)+'px';cal.style.left=daybtn.offsetLeft+'px';
+    calDoc=e=>{if(e.type==='keydown'?e.key==='Escape':!(cal.contains(e.target)||daybtn.contains(e.target)))closeCal();};
+    document.addEventListener('mousedown',calDoc);document.addEventListener('keydown',calDoc);
+    const d=await loadDays();
+    if(!cal)return;
+    if(!d.days.length){cal.innerHTML='';cal.append(el('div',{class:'muted',style:'padding:.5rem'},d.error||'no dated lines in this log'));return;}
+    const sel=S.day||d.days[d.days.length-1].date;
+    drawCal(d,+sel.slice(0,4),+sel.slice(5,7));
+  }
+  function drawCal(d,y,m){
+    const has=new Map(d.days.map(x=>[x.date,x]));
+    const first=d.days[0].date,last=d.days[d.days.length-1].date;
+    const ym=(yy,mm)=>yy*12+mm-1;
+    const lo=ym(+first.slice(0,4),+first.slice(5,7)),hi=ym(+last.slice(0,4),+last.slice(5,7)),cur=ym(y,m);
+    const today=new Date().toISOString().slice(0,10);
+    cal.innerHTML='';
+    const pv=Object.assign(el('button',{class:'act plain',title:'previous month'},'‹'),{disabled:cur<=lo,onclick:()=>drawCal(d,m===1?y-1:y,m===1?12:m-1)});
+    const nx=Object.assign(el('button',{class:'act plain',title:'next month'},'›'),{disabled:cur>=hi,onclick:()=>drawCal(d,m===12?y+1:y,m===12?1:m+1)});
+    cal.append(el('div',{class:'cal-head'},pv,el('span',{class:'cal-title'},MONL[m-1]+' '+y),nx));
+    const grid=el('div',{class:'cal-grid'});
+    ['Mo','Tu','We','Th','Fr','Sa','Su'].forEach(w=>grid.append(el('span',{class:'cal-dow'},w)));
+    const startDow=(new Date(Date.UTC(y,m-1,1)).getUTCDay()+6)%7;
+    const ndays=new Date(Date.UTC(y,m,0)).getUTCDate();
+    for(let i=0;i<startDow;i++)grid.append(el('span'));
+    for(let day=1;day<=ndays;day++){
+      const iso=y+'-'+String(m).padStart(2,'0')+'-'+String(day).padStart(2,'0');
+      const info=has.get(iso);
+      const b=el('button',{class:'cal-day'+(info?' has':'')+(iso===S.day?' sel':'')+(iso===today?' today':'')},String(day));
+      if(info){b.title='in '+info.file;b.onclick=()=>pickDay(iso);}else b.disabled=true;
+      grid.append(b);
+    }
+    cal.append(grid);
+    const any=Object.assign(el('button',{class:'act plain'},'Any day'),{disabled:!S.day,onclick:()=>pickDay(null)});
+    cal.append(el('div',{class:'cal-foot'},any,el('span',{class:'muted'},d.days.length+' days · '+d.files.length+' file'+(d.files.length===1?'':'s')+' · since '+fmtDay(first))));
+  }
+  function pickDay(iso){
+    S.day=iso;setDayLabel();closeCal();
+    if(sinp.value.trim())doSearch(true);
+    else if(iso)jumpToDay();
+    else clearSearch();
+  }
+  daybtn.onclick=openCal;
+  setDayLabel();
+
   function setNav(){
     prev.disabled=S.cur<=0;next.disabled=S.cur<0||S.cur>=S.hits.length-1;
-    if(S.mode!=='search'){count.textContent='';return;}
-    count.textContent=(S.cur+1)+' / '+S.hits.length+(S.truncated?' (newest only, older hits not listed)':'');
+    if(S.mode==='tail'){count.textContent='';return;}
+    const where=(S.win&&liveName()&&S.win.file!==liveName())?' · '+S.win.file:'';
+    if(S.mode==='day'){count.textContent=fmtDay(S.day)+' · start of day'+where;return;}
+    count.textContent=(S.cur+1)+' / '+S.hits.length+(S.day?' · '+fmtDay(S.day):'')+(S.truncated?' (newest only, older hits not listed)':'')+where;
   }
   // Highlight every occurrence of the needle in one line (HTML-escaped).
   function markLine(line){
-    const lo=line.toLowerCase(),nd=S.needle.toLowerCase();let out='',i=0;
+    const nd=S.needle.toLowerCase();if(!nd)return esc(line);
+    const lo=line.toLowerCase();let out='',i=0;
     for(;;){const j=lo.indexOf(nd,i);if(j<0)break;out+=esc(line.slice(i,j))+'<mark>'+esc(line.slice(j,j+nd.length))+'</mark>';i=j+nd.length;}
     return out+esc(line.slice(i));
   }
@@ -1225,28 +1297,42 @@ async function renderLogs(){
     for(let i=0;i<lines.length;i++){if(pos===off)return i;pos+=lines[i].length+1;}
     return -1;
   }
+  async function fetchWindow(file,at,before,after){
+    const w=await api('/api/service/maillog/window?file='+encodeURIComponent(file)+'&at='+at+'&before='+before+'&after='+after+which());
+    if(!w||w.error){pre.textContent=w?.error||'(error)';return null;}
+    renderWindow(w);return w;
+  }
   async function showHit(){
-    const off=S.hits[S.cur];
-    if(!S.win||off<S.win.start||off>=S.win.end){
-      const w=await api('/api/service/maillog/window?at='+off+'&before=200&after=200'+which());
-      if(!w||w.error){pre.textContent=w?.error||'(error)';return;}
-      renderWindow(w);
+    const [file,off]=S.hits[S.cur];
+    if(!S.win||S.win.file!==file||off<S.win.start||off>=S.win.end){
+      if(!await fetchWindow(file,off,200,200))return;
     }
     pre.querySelectorAll('.ln.cur').forEach(n=>n.classList.remove('cur'));
     const idx=lineIndexOf(off),ln=pre.querySelectorAll('.ln')[idx];
     if(ln){ln.classList.add('cur');pre.scrollTop=ln.offsetTop-pre.clientHeight/2+ln.offsetHeight/2;}
     setNav();
   }
-  async function doSearch(){
+  function pauseFollow(){auto.checked=false;clearInterval(logTimer);logTimer=null;}
+  // A day with no pattern: open the log where that day begins.
+  async function jumpToDay(){
+    const d=await loadDays();
+    const info=d.days.find(x=>x.date===S.day);
+    if(!info){count.textContent='no lines on '+fmtDay(S.day);return;}
+    pauseFollow();
+    Object.assign(S,{mode:'day',needle:'',hits:[],cur:-1,truncated:false,win:null});
+    if(await fetchWindow(info.file,info.start,0,400))pre.scrollTop=0;
+    setNav();
+  }
+  async function doSearch(fresh){
     const q=sinp.value.trim();
-    if(!q){clearSearch();return;}
-    if(S.mode==='search'&&q===S.needle){step(-1);return;}
+    if(!q){if(S.day)jumpToDay();else clearSearch();return;}
+    if(!fresh&&S.mode==='search'&&q===S.needle){step(-1);return;}
     count.textContent='searching…';
-    const r=await api('/api/service/maillog/search?q='+encodeURIComponent(q)+which());
+    const [r]=await Promise.all([api('/api/service/maillog/search?q='+encodeURIComponent(q)+(S.day?'&day='+S.day:'')+which()),loadDays()]);
     if(!r||r.error){count.textContent=r?.error||'error';return;}
-    if(!r.total){count.textContent='no matches';return;}
-    auto.checked=false;clearInterval(logTimer);logTimer=null;
-    Object.assign(S,{mode:'search',needle:q,hits:r.offsets,truncated:r.truncated,win:null,cur:r.offsets.length-1});
+    if(!r.total){count.textContent='no matches'+(S.day?' on '+fmtDay(S.day):'');return;}
+    pauseFollow();
+    Object.assign(S,{mode:'search',needle:q,hits:r.hits,truncated:r.truncated,win:null,cur:r.hits.length-1});
     await showHit();
   }
   function step(d){if(S.mode!=='search')return;const n=S.cur+d;if(n<0||n>=S.hits.length)return;S.cur=n;showHit();}
@@ -1254,12 +1340,13 @@ async function renderLogs(){
     Object.assign(S,{mode:'tail',needle:'',hits:[],cur:-1,truncated:false,win:null});
     sinp.value='';setNav();pre.textContent='Loading…';refreshLog();
   }
-  sbtn.onclick=doSearch;prev.onclick=()=>step(-1);next.onclick=()=>step(1);clr.onclick=clearSearch;
+  sbtn.onclick=()=>doSearch();prev.onclick=()=>step(-1);next.onclick=()=>step(1);
+  clr.onclick=()=>{S.day=null;setDayLabel();clearSearch();};
   sinp.onkeydown=e=>{
     if(e.key==='Enter'){e.preventDefault();e.shiftKey?step(1):doSearch();}
-    else if(e.key==='Escape'){e.preventDefault();clearSearch();}
+    else if(e.key==='Escape'){e.preventDefault();S.day=null;setDayLabel();clearSearch();}
   };
-  lsrc.onchange=()=>{if(S.mode==='search')clearSearch();else{pre.textContent='Loading…';refreshLog();}};
+  lsrc.onchange=()=>{closeCal();DAYS=null;S.day=null;setDayLabel();if(S.mode!=='tail')clearSearch();else{pre.textContent='Loading…';refreshLog();}};
   setNav();
   lc.append(pre);
   refreshLog();

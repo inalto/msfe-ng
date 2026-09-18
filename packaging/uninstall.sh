@@ -92,6 +92,8 @@ rm -f  /etc/cron.d/msfe-ng
 rm -rf "$PREFIX"
 rm -f  "$SYSTEMD_UNIT"
 rm -rf "$SOCKET_DIR"
+# unpacked rotated logs for the Logs tab's day search (regenerated on demand)
+rm -rf /var/cache/msfe-ng
 
 # ---- config (prompt-free: keep unless --purge) -------------------------------
 # The MySQL database holds the mail log (user data) and is NEVER dropped

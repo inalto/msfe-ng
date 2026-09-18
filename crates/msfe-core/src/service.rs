@@ -1021,14 +1021,29 @@ fn contains_ci(hay: &[u8], needle_lower: &[u8]) -> bool {
 /// streamed line by line so a multi-hundred-MB log is never held in memory.
 /// Keeps the last `max` matching line offsets; `total` still counts them all.
 pub fn search_file(path: &Path, needle: &str, max: usize) -> io::Result<LogSearch> {
+    let size = std::fs::metadata(path)?.len();
+    search_range(path, needle, max, 0, size)
+}
+
+/// `search_file` over the byte range `[from, to)` only — `from` must be a
+/// line start (a day boundary from the log index).
+pub fn search_range(
+    path: &Path,
+    needle: &str,
+    max: usize,
+    from: u64,
+    to: u64,
+) -> io::Result<LogSearch> {
     use std::collections::VecDeque;
-    use std::io::{BufRead, BufReader};
+    use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
     let needle_lower = needle.to_ascii_lowercase().into_bytes();
-    let f = std::fs::File::open(path)?;
+    let mut f = std::fs::File::open(path)?;
     let size = f.metadata()?.len();
-    let mut rd = BufReader::with_capacity(256 * 1024, f);
+    let to = to.min(size);
+    f.seek(SeekFrom::Start(from.min(to)))?;
+    let mut rd = BufReader::with_capacity(256 * 1024, f.take(to.saturating_sub(from)));
     let mut line = Vec::new();
-    let mut pos: u64 = 0;
+    let mut pos: u64 = from;
     let mut total = 0;
     let mut hits: VecDeque<u64> = VecDeque::new();
     loop {
@@ -1051,6 +1066,61 @@ pub fn search_file(path: &Path, needle: &str, max: usize) -> io::Result<LogSearc
         truncated: total > hits.len(),
         offsets: hits.into(),
         size,
+    })
+}
+
+/// A matching line in a log set: which file and where it starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hit {
+    pub file: String,
+    pub off: u64,
+}
+
+/// Result of `search_logs`.
+#[derive(Debug, Default)]
+pub struct LogsSearch {
+    pub total: usize,
+    /// Oldest first; only the newest `max` survive the cap.
+    pub hits: Vec<Hit>,
+    pub truncated: bool,
+}
+
+/// `search_range` across a whole log set, oldest file first — every byte of
+/// every file, or only the spans of `day`. The cap keeps the newest hits.
+pub fn search_logs(
+    idx: &crate::logindex::LogIndex,
+    needle: &str,
+    day: Option<crate::civil::Date>,
+    max: usize,
+) -> io::Result<LogsSearch> {
+    let cache = crate::logindex::cache_dir();
+    // (file, from, to) in file order
+    let ranges: Vec<(&crate::logindex::LogFile, u64, u64)> = match day {
+        Some(d) => idx
+            .spans_for(d)
+            .into_iter()
+            .filter_map(|s| idx.file(&s.file).map(|f| (f, s.start, s.end)))
+            .collect(),
+        None => idx.files.iter().map(|f| (f, 0, u64::MAX)).collect(),
+    };
+    let mut total = 0;
+    let mut hits: Vec<Hit> = Vec::new();
+    for (file, from, to) in ranges {
+        let plain = crate::logindex::plain_path(file, &cache)?;
+        let r = search_range(&plain, needle, max, from, to)?;
+        total += r.total;
+        hits.extend(r.offsets.into_iter().map(|off| Hit {
+            file: file.name.clone(),
+            off,
+        }));
+        if hits.len() > max {
+            hits.drain(..hits.len() - max);
+        }
+    }
+    Ok(LogsSearch {
+        total,
+        truncated: total > hits.len(),
+        hits,
     })
 }
 
@@ -1303,6 +1373,70 @@ mod tests {
         assert_eq!(r.total, 5);
         assert!(r.truncated);
         assert_eq!(r.offsets, vec![9, 12]);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn search_range_honours_the_byte_range() {
+        let d = tmpdir("searchrange");
+        let f = d.join("log");
+        std::fs::write(&f, "x0\nx1\nx2\nx3\nx4\n").unwrap();
+        let r = search_range(&f, "x", 10, 3, 12).unwrap();
+        assert_eq!((r.total, r.offsets), (3, vec![3, 6, 9]));
+        assert_eq!(
+            search_range(&f, "x", 10, 0, 15).unwrap().offsets,
+            search_file(&f, "x", 10).unwrap().offsets
+        );
+        assert!(search_range(&f, "x", 10, 9, 9).unwrap().offsets.is_empty());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn search_logs_walks_files_oldest_first_and_restricts_to_a_day() {
+        use crate::civil::Date;
+        let d = tmpdir("searchlogs");
+        let old = d.join("maillog-20260913");
+        let live = d.join("maillog");
+        std::fs::write(&old, "Sep 12 10:00:00 h hit a\nSep 13 01:00:00 h hit b\n").unwrap();
+        std::fs::write(
+            &live,
+            "Sep 13 04:00:00 h hit c\nSep 14 10:00:00 h miss\nSep 14 11:00:00 h hit d\n",
+        )
+        .unwrap();
+        let t = std::time::SystemTime::now() - std::time::Duration::from_secs(5 * 86_400);
+        std::fs::File::open(&old).unwrap().set_modified(t).unwrap();
+        let idx = crate::logindex::index(&live).unwrap();
+        let all = search_logs(&idx, "HIT", None, 100).unwrap();
+        let hits: Vec<(&str, u64)> = all.hits.iter().map(|h| (h.file.as_str(), h.off)).collect();
+        assert_eq!(all.total, 4);
+        assert_eq!(
+            hits,
+            [
+                ("maillog-20260913", 0),
+                ("maillog-20260913", 24),
+                ("maillog", 0),
+                ("maillog", 47)
+            ]
+        );
+        // a day straddling both files searches both spans, in order
+        let day = search_logs(&idx, "hit", Some(Date::new(2026, 9, 13)), 100).unwrap();
+        let hits: Vec<(&str, u64)> = day.hits.iter().map(|h| (h.file.as_str(), h.off)).collect();
+        assert_eq!(hits, [("maillog-20260913", 24), ("maillog", 0)]);
+        assert!(search_logs(&idx, "hit", Some(Date::new(2026, 9, 20)), 100)
+            .unwrap()
+            .hits
+            .is_empty());
+        // the cap keeps the newest hits across files
+        let capped = search_logs(&idx, "hit", None, 2).unwrap();
+        assert_eq!((capped.total, capped.truncated), (4, true));
+        assert_eq!(
+            capped
+                .hits
+                .iter()
+                .map(|h| h.file.as_str())
+                .collect::<Vec<_>>(),
+            ["maillog", "maillog"]
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 
