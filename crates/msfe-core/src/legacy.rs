@@ -44,6 +44,18 @@ pub struct LegacyImport {
 /// The original front-end's install directory.
 pub const LEGACY_DIR: &str = "/usr/msfe";
 
+/// Where the legacy front-end leaves cron entries: its own `/etc/cron.d/msfe.sh`,
+/// ConfigServer's `csget` updater and the `mailscanner_daily.cron` it ships in
+/// cron.daily, plus root's crontab.
+const CRON_DIRS: [&str; 6] = [
+    "/etc/cron.d",
+    "/etc/cron.hourly",
+    "/etc/cron.daily",
+    "/etc/cron.weekly",
+    "/etc/cron.monthly",
+    "/var/spool/cron",
+];
+
 /// What is left of the original ConfigServer front-end under `root` (`/` on a
 /// live host): its directory, cron entries that still run it, and its WHM app
 /// registration — absolute paths, deterministic order. Empty when it is gone.
@@ -55,7 +67,7 @@ pub fn remnants(root: &Path) -> Vec<String> {
     }
     let mentions_legacy =
         |p: &Path| std::fs::read_to_string(p).is_ok_and(|t| mentions_legacy_dir(&t));
-    for dir in ["/etc/cron.d", "/var/spool/cron", "/var/cpanel/apps"] {
+    for dir in CRON_DIRS.into_iter().chain(["/var/cpanel/apps"]) {
         let Ok(rd) = std::fs::read_dir(at(dir)) else {
             continue;
         };
@@ -289,6 +301,22 @@ mod tests {
 
         std::fs::create_dir_all(root.join("usr/msfe")).unwrap();
         std::fs::create_dir_all(root.join("var/spool/cron")).unwrap();
+        std::fs::create_dir_all(root.join("etc/cron.daily")).unwrap();
+        std::fs::write(
+            root.join("etc/cron.daily/csget"),
+            "#!/bin/sh\n/usr/msfe/csget.pl\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("etc/cron.daily/mailscanner_daily.cron"),
+            "/usr/msfe/ms_daily\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("etc/cron.daily/logrotate"),
+            "/usr/sbin/logrotate\n",
+        )
+        .unwrap();
         std::fs::create_dir_all(root.join("var/cpanel/apps")).unwrap();
         std::fs::write(
             root.join("etc/cron.d/msfe"),
@@ -322,6 +350,8 @@ mod tests {
             vec![
                 "/usr/msfe".to_string(),
                 "/etc/cron.d/msfe".to_string(),
+                "/etc/cron.daily/csget".to_string(),
+                "/etc/cron.daily/mailscanner_daily.cron".to_string(),
                 "/var/spool/cron/root".to_string(),
                 "/var/cpanel/apps/msfe.conf".to_string(),
             ]
