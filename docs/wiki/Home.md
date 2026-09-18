@@ -20,7 +20,7 @@ alerts. It is a clean-room replacement for the discontinued ConfigServer MSFE.
 - [Messages](Messages) — message log, search, message view, learn, release, sender & IP actions
 - [Rules](Rules) — custom MailScanner rules and the live ruleset files
 - [Service](Service) — MailScanner control, Exim wiring, health check, mail queues
-- [Logs](Logs)
+- [Logs](Logs) — tail the mail log / Exim mainlog, search the whole log file
 - [Queues](Queues) — Exim spool browser, bulk delete/deliver, spool repair
 - [Quarantine](Quarantine) — what is on disk, purge
 - [Config](Config) — config file editor, rulesets, DB & Bayes maintenance, queue auto-clean, Telegram alerts

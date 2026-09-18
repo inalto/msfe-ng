@@ -12,7 +12,8 @@ quarantine).
 - **Status filters** — All, Blocked (releasable), Clean, Low Spam, High Spam,
   Infected, Attachments, Whitelist, Blacklist, Quarantined.
 - **Search** by From, To, Subject, Message ID or Client IP, combined with a
-  time window (24 hours … 90 days).
+  time window (24 hours … 90 days). For what MailScanner and Exim actually
+  *did* with a message, search its id on the [Logs](Logs) tab.
 - **Refresh** / **auto-refresh** (interval from Settings).
 - Paging: prev / next / jump to page; page size from Settings.
 

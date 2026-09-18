@@ -201,6 +201,14 @@ only when a generated rule file actually changed. If you see restarts every
 10 minutes, something else is rewriting the rules — check the *stray* flags on
 the [Rules](Rules) tab.
 
+## Following one message through the logs
+
+The [Logs](Logs) tab searches the **whole** current mail log or Exim mainlog
+for a message id, address or host — no need to `grep` on the server. Start
+from the newest hit and step **◀ older** to see the message arrive, get
+scanned and be delivered or deferred; every occurrence is highlighted in
+context.
+
 ## Getting the daemon's view directly
 
 ```sh
