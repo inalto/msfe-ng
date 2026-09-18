@@ -1492,13 +1492,19 @@ mod tests {
             !clamd_reachable(&base.join("gone.sock").display().to_string(), 3310),
             "missing unix socket must be unreachable"
         );
-        // TCP mode: a live local listener is reachable, a dead port is not
+        // TCP mode: a live local listener is reachable, a dead port is not.
+        // The dead port must sit below the ephemeral range: on Linux a connect
+        // to a closed loopback port in that range can succeed by "self-connect"
+        // (the kernel picks the same port as the source and the two ends meet).
         let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = tcp.local_addr().unwrap().port();
         assert!(clamd_reachable("127.0.0.1", port));
         drop(tcp);
+        let dead = (1024..32768u16)
+            .find(|p| std::net::TcpListener::bind(("127.0.0.1", *p)).is_ok())
+            .expect("a free low port");
         assert!(
-            !clamd_reachable("127.0.0.1", port),
+            !clamd_reachable("127.0.0.1", dead),
             "closed TCP port must be unreachable"
         );
         std::fs::remove_dir_all(&base).unwrap();
