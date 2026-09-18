@@ -58,11 +58,13 @@ first failure:
 2. copy of `/usr/mailscanner/etc` to `/etc/msfe-ng/legacy-engine-etc` (org
    name, custom rules, `spamassassin.conf` — for reference afterwards)
 3. stop the legacy MailScanner
-4. ConfigServer's uninstaller (answers *yes* to its prompts), then whatever it
-   left: `/usr/mailscanner`, `/usr/msfe`, `/etc/cron.d/msfe.sh`,
-   `/etc/cron.daily/mailscanner_daily.cron`, `/etc/init.d/MailScanner`, root's
-   crontab lines, the legacy WHM plugin registration. `csget` (ConfigServer's
-   shared updater, used by csf too) is never touched.
+4. ConfigServer's uninstaller (any `/usr/msfe/uninstall*.sh`, answering *yes*
+   to its prompts), then whatever it left: `/usr/mailscanner`, `/usr/msfe`,
+   every cron entry referencing `/usr/msfe` (`/etc/cron.d/msfe.sh`,
+   `/etc/cron.hourly/msdigest.pl`, `/etc/cron.daily/mailscanner_daily.cron`,
+   …), `/etc/init.d/MailScanner`, root's crontab lines, the legacy WHM plugin
+   registration. `csget` (ConfigServer's shared updater, used by csf too) is
+   never touched.
 5. `msfe-ng engine install` at the latest MailScanner v5 release
 6. `config.toml` pointed at `/etc/MailScanner/MailScanner.conf`
 7. `%org-name%`, `%org-long-name%`, `%web-site%` carried over from the legacy conf

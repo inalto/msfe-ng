@@ -17,17 +17,33 @@ use std::process::{Command, Stdio};
 
 pub const JOB: &str = "engine-migrate";
 pub const LEGACY_TREE: &str = "/usr/mailscanner";
-pub const LEGACY_UNINSTALLER: &str = "/usr/msfe/uninstall.msfe.sh";
 /// Copy of the legacy engine's etc, kept for reference (org name, custom
 /// rules, spamassassin.conf) after `/usr/mailscanner` is gone.
 pub const SNAPSHOT_DIR: &str = "/etc/msfe-ng/legacy-engine-etc";
-/// Files ConfigServer's uninstaller is known to leave behind (csget is its
-/// shared updater, also csf's — never touched).
-const LEGACY_FILES: [&str; 3] = [
-    "/etc/cron.d/msfe.sh",
-    "/etc/cron.daily/mailscanner_daily.cron",
-    "/etc/init.d/MailScanner",
-];
+/// Files ConfigServer's uninstaller is known to leave behind, besides the
+/// cron entries `legacy::remnants` finds (csget is its shared updater, also
+/// csf's — never touched).
+const LEGACY_FILES: [&str; 1] = ["/etc/init.d/MailScanner"];
+
+/// ConfigServer's uninstaller, whatever it is called: `uninstall.msfe.sh` in
+/// the versions seen, so any `uninstall*.sh` under /usr/msfe counts.
+pub fn find_uninstaller(root: &Path) -> Option<PathBuf> {
+    let dir = root.join("usr/msfe");
+    let mut found: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.file_name().is_some_and(|n| {
+                    let n = n.to_string_lossy();
+                    n.starts_with("uninstall") && n.ends_with(".sh")
+                })
+        })
+        .collect();
+    found.sort();
+    found.into_iter().next()
+}
 
 fn root() -> PathBuf {
     std::env::var("MSFE_NG_MIGRATION_ROOT")
@@ -75,7 +91,7 @@ pub fn preflight(cfg: &Config, config_file: &Path) -> Preflight {
             lay.version_string(),
             lay.bin.display()
         ),
-        uninstaller: at(LEGACY_UNINSTALLER).is_file(),
+        uninstaller: find_uninstaller(&root()).is_some(),
         remnants: legacy::remnants(&root()),
         policy_imported: !settings.is_empty(),
         db_configured: cfg.db_configured(),
@@ -100,9 +116,8 @@ pub fn preflight(cfg: &Config, config_file: &Path) -> Preflight {
         p.warnings.push("database not configured — messages will not be logged until it is (Dashboard → Create database)".into());
     }
     if !p.uninstaller {
-        p.warnings.push(format!(
-            "{LEGACY_UNINSTALLER} not found — the legacy tree is removed directly"
-        ));
+        p.warnings
+            .push("no uninstall*.sh under /usr/msfe — the legacy tree is removed directly".into());
     }
     if p.queue_incoming > 0 {
         p.warnings.push(format!(
@@ -319,8 +334,7 @@ pub fn run(config_file: &Path) -> io::Result<()> {
 pub fn remove_legacy(root: &Path, live: bool) -> io::Result<Vec<String>> {
     let mut done = Vec::new();
     let at = |p: &str| root.join(p.trim_start_matches('/'));
-    let uninstaller = at(LEGACY_UNINSTALLER);
-    if uninstaller.is_file() {
+    if let Some(uninstaller) = find_uninstaller(root) {
         done.push(format!(
             "running {} (answers yes to its prompts)",
             uninstaller.display()
@@ -341,9 +355,19 @@ pub fn remove_legacy(root: &Path, live: bool) -> io::Result<Vec<String>> {
             done.push(format!("removed {tree}"));
         }
     }
-    for f in LEGACY_FILES {
-        let p = at(f);
-        if p.exists() {
+    // its cron entries, wherever they sit (root's crontab and the WHM app
+    // below are live-only); the remnants scan already leaves csget alone
+    let cron_entries: Vec<String> = legacy::remnants(root)
+        .into_iter()
+        .filter(|f| f.starts_with("/etc/cron"))
+        .collect();
+    for f in LEGACY_FILES
+        .iter()
+        .map(|s| s.to_string())
+        .chain(cron_entries)
+    {
+        let p = at(&f);
+        if p.is_file() {
             std::fs::remove_file(&p)?;
             done.push(format!("removed {f}"));
         }
@@ -445,6 +469,12 @@ mod tests {
             "%org-name% = acme\n%org-long-name% = Acme Mail\n%web-site% = www.acme.example\nMTA = exim\n",
         )
         .unwrap();
+        std::fs::create_dir_all(root.join("etc/cron.hourly")).unwrap();
+        std::fs::write(
+            root.join("etc/cron.hourly/msdigest.pl"),
+            "#!/usr/bin/perl\n# /usr/msfe/msdigest.pl\n",
+        )
+        .unwrap();
         std::fs::write(
             root.join("etc/cron.d/msfe.sh"),
             "0 * * * * root /usr/msfe/msbe.pl\n",
@@ -465,7 +495,7 @@ mod tests {
         let root = fixture("remove");
         // an uninstaller that prompts and removes only the front-end dir
         std::fs::write(
-            root.join("usr/msfe/uninstall.msfe.sh"),
+            root.join("usr/msfe/uninstall.sh"),
             format!(
                 "#!/bin/sh\nread -r a; echo \"answer=$a\" > {}/uninstall.ran\nrm -rf {}/usr/msfe\n",
                 root.display(),
@@ -487,6 +517,10 @@ mod tests {
             "engine tree removed too"
         );
         assert!(!root.join("etc/cron.d/msfe.sh").exists());
+        assert!(
+            !root.join("etc/cron.hourly/msdigest.pl").exists(),
+            "every legacy cron entry goes"
+        );
         assert!(!root.join("etc/cron.daily/mailscanner_daily.cron").exists());
         assert!(!root.join("etc/init.d/MailScanner").exists());
         assert!(
@@ -509,7 +543,7 @@ mod tests {
         let root = fixture("plain");
         let done = remove_legacy(&root, false).unwrap();
         assert!(!root.join("usr/mailscanner").exists() && !root.join("usr/msfe").exists());
-        assert!(!done.iter().any(|l| l.contains("uninstall.msfe.sh")));
+        assert!(!done.iter().any(|l| l.contains("uninstall")));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -551,10 +585,7 @@ mod tests {
             "{:?}",
             pf.warnings
         );
-        assert!(pf
-            .warnings
-            .iter()
-            .any(|w| w.contains("uninstall.msfe.sh not found")));
+        assert!(pf.warnings.iter().any(|w| w.contains("no uninstall*.sh")));
         std::env::remove_var("MSFE_NG_MIGRATION_ROOT");
         let _ = std::fs::remove_dir_all(&root);
     }
