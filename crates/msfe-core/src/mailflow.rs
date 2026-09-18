@@ -74,14 +74,15 @@ fn toggle_wiring_fragment(enabled: bool) -> io::Result<()> {
 //
 // cPanel's Exim runs Apache SpamAssassin (spamd) from its DATA ACL before the
 // message ever reaches MailScanner, when `/etc/global_spamassassin_enable`
-// exists (WHM "Forced Global ON"), never when `/etc/global_spamassassin_disable`
-// exists ("Forced Global OFF"), and otherwise per account when the account's
-// home holds `.spamassassinenable` (cPanel → Spam Filters). With MailScanner
-// scoring every message that is a second scan with its own threshold and
-// its own +spam folder. Both switches are plain flag files Exim tests per
-// message: no rebuild, instantly reversible.
+// exists (WHM "Apache SpamAssassin: Forced Global ON") or when the account's
+// home holds `.spamassassinenable` (cPanel → Spam Filters). That ACL has no
+// off switch: with MailScanner scoring every message it is a second scan
+// with its own threshold and its own +spam folder. Turning it off therefore
+// means turning Spam Filters off per account — through cPanel's own API, so
+// cPanel's bookkeeping stays right — and remembering who had it on.
 
-/// Where cPanel's flag files live (`/`; tests point it at a fixture tree).
+/// Where cPanel's files live (`/`; tests point it at a fixture tree, which
+/// also switches the per-account calls from `uapi` to plain file operations).
 fn cpanel_root() -> PathBuf {
     std::env::var("MSFE_NG_CPANEL_ROOT")
         .unwrap_or_else(|_| "/".to_string())
@@ -92,17 +93,33 @@ fn cpanel_root() -> PathBuf {
 pub struct CpanelSa {
     /// `/etc/global_spamassassin_enable` — every account, no opt-out.
     pub forced_on: bool,
-    /// `/etc/global_spamassassin_disable` — no account, no opt-in.
-    pub forced_off: bool,
     /// Accounts whose home has `.spamassassinenable`.
-    pub accounts_on: usize,
+    pub accounts_on: Vec<String>,
+    /// Accounts MSFE-NG turned off earlier, restorable.
+    pub restorable: Vec<String>,
 }
 
 impl CpanelSa {
     /// Would cPanel's Exim hand mail to spamd for at least one account?
     pub fn would_scan(&self) -> bool {
-        self.forced_on || (!self.forced_off && self.accounts_on > 0)
+        self.forced_on || !self.accounts_on.is_empty()
     }
+}
+
+fn sa_record_path(root: &Path) -> PathBuf {
+    root.join("etc/msfe-ng/cpanel-sa-accounts")
+}
+
+/// `(user, home)` for every passwd entry.
+fn passwd_homes(root: &Path) -> Vec<(String, PathBuf)> {
+    std::fs::read_to_string(root.join("etc/passwd"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split(':').collect();
+            (f.len() > 5).then(|| (f[0].to_string(), root.join(f[5].trim_start_matches('/'))))
+        })
+        .collect()
 }
 
 /// cPanel's Apache SpamAssassin switches as Exim sees them.
@@ -111,55 +128,135 @@ pub fn cpanel_sa_state() -> CpanelSa {
 }
 
 pub fn cpanel_sa_state_at(root: &Path) -> CpanelSa {
-    let etc = root.join("etc");
-    let accounts_on = std::fs::read_to_string(etc.join("passwd"))
+    let accounts_on = passwd_homes(root)
+        .into_iter()
+        .filter(|(_, home)| home.join(".spamassassinenable").is_file())
+        .map(|(user, _)| user)
+        .collect();
+    let restorable = std::fs::read_to_string(sa_record_path(root))
         .unwrap_or_default()
         .lines()
-        .filter_map(|l| l.split(':').nth(5))
-        .filter(|home| {
-            root.join(home.trim_start_matches('/'))
-                .join(".spamassassinenable")
-                .is_file()
-        })
-        .count();
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
     CpanelSa {
-        forced_on: etc.join("global_spamassassin_enable").is_file(),
-        forced_off: etc.join("global_spamassassin_disable").is_file(),
+        forced_on: root.join("etc/global_spamassassin_enable").is_file(),
         accounts_on,
+        restorable,
     }
 }
 
-/// Forced Global OFF (`enabled == false`: create the disable flag) or back to
-/// cPanel's per-account setting (`true`: remove it). Never forces it on.
-pub fn set_cpanel_sa(enabled: bool) -> io::Result<()> {
-    let flag = cpanel_root().join("etc/global_spamassassin_disable");
+/// Spam Filters on/off for one account: cPanel's UAPI on a live host, the
+/// flag file itself under a fixture root.
+fn set_account_sa(root: &Path, user: &str, home: &Path, on: bool) -> io::Result<()> {
+    if root == Path::new("/") {
+        let call = if on {
+            "enable_spam_assassin"
+        } else {
+            "disable_spam_assassin"
+        };
+        let out = std::process::Command::new("uapi")
+            .args([
+                "--output=json",
+                &format!("--user={user}"),
+                "SpamAssassin",
+                call,
+            ])
+            .output()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        if !out.status.success() || !text.contains("\"status\":1") {
+            return Err(io::Error::other(format!(
+                "uapi SpamAssassin {call} for {user} failed: {}",
+                text.trim()
+            )));
+        }
+        return Ok(());
+    }
+    let flag = home.join(".spamassassinenable");
+    if on {
+        std::fs::write(flag, b"")
+    } else {
+        match std::fs::remove_file(flag) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Turn cPanel's SpamAssassin off for every account (`enabled == false`),
+/// remembering them, or back on for the remembered ones (`true`). Never
+/// forces it globally on. Returns the accounts changed.
+pub fn set_cpanel_sa(enabled: bool) -> io::Result<Vec<String>> {
+    let root = cpanel_root();
+    let homes = passwd_homes(&root);
+    let record = sa_record_path(&root);
+    let mut changed = Vec::new();
     if enabled {
-        match std::fs::remove_file(&flag) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e),
+        let restore = cpanel_sa_state_at(&root).restorable;
+        for user in restore {
+            if let Some((_, home)) = homes.iter().find(|(u, _)| *u == user) {
+                set_account_sa(&root, &user, home, true)?;
+                changed.push(user);
+            }
+        }
+        match std::fs::remove_file(&record) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => {}
         }
     } else {
-        std::fs::write(
-            &flag,
-            b"cPanel Apache SpamAssassin disabled by MSFE-NG: MailScanner scans instead\n",
-        )
+        let global = root.join("etc/global_spamassassin_enable");
+        if global.is_file() {
+            std::fs::remove_file(&global)?;
+            let opts = root.join("etc/exim.conf.localopts");
+            if let Ok(text) = std::fs::read_to_string(&opts) {
+                let fixed: String = text
+                    .lines()
+                    .map(|l| {
+                        if l.starts_with("globalspamassassin=") {
+                            "globalspamassassin=0".to_string()
+                        } else {
+                            l.to_string()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    + "\n";
+                if fixed != text {
+                    std::fs::write(&opts, fixed)?;
+                }
+            }
+        }
+        for (user, home) in &homes {
+            if home.join(".spamassassinenable").is_file() {
+                set_account_sa(&root, user, home, false)?;
+                changed.push(user.clone());
+            }
+        }
+        if !changed.is_empty() {
+            if let Some(dir) = record.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            let mut all = cpanel_sa_state_at(&root).restorable;
+            all.extend(changed.iter().cloned());
+            all.sort();
+            all.dedup();
+            std::fs::write(&record, all.join("\n") + "\n")?;
+        }
     }
+    Ok(changed)
 }
 
 /// Is mail scored twice? `(ok, detail)` for the doctor.
 pub fn cpanel_sa_verdict(state: &CpanelSa) -> (bool, String) {
     if state.forced_on {
-        return (false, "Forced Global ON — every message is scored by cPanel's spamd before MailScanner scores it again".into());
+        return (false, "Forced Global ON (/etc/global_spamassassin_enable) — every message is scored by cPanel's spamd before MailScanner scores it again".into());
     }
-    if state.forced_off {
-        return (
+    match state.accounts_on.len() {
+        0 => (
             true,
-            "Forced Global OFF — MailScanner is the only spam scanner".into(),
-        );
-    }
-    match state.accounts_on {
-        0 => (true, "no account has cPanel Spam Filters on".into()),
+            "no account has cPanel Spam Filters on — MailScanner is the only spam scanner".into(),
+        ),
         n => (
             false,
             format!("{n} account(s) have cPanel Spam Filters on — their mail is scored twice, with cPanel's own threshold and +spam folder"),
@@ -189,61 +286,69 @@ mod tests {
     fn cpanel_sa_state_reads_the_flags_exim_tests() {
         let root = cpanel_fixture("state");
         let s = cpanel_sa_state_at(&root);
-        assert_eq!(
-            s,
-            CpanelSa {
-                forced_on: false,
-                forced_off: false,
-                accounts_on: 0
-            }
-        );
-        assert!(!s.would_scan());
+        assert!(!s.forced_on && s.accounts_on.is_empty() && !s.would_scan());
         assert!(cpanel_sa_verdict(&s).0);
 
         std::fs::write(root.join("home/alice/.spamassassinenable"), "").unwrap();
         std::fs::write(root.join("home2/carol/.spamassassinenable"), "").unwrap();
         let s = cpanel_sa_state_at(&root);
-        assert_eq!(s.accounts_on, 2, "homes outside /home count too");
+        assert_eq!(
+            s.accounts_on,
+            vec!["alice", "carol"],
+            "homes outside /home count too"
+        );
         assert!(s.would_scan());
         let (ok, d) = cpanel_sa_verdict(&s);
         assert!(!ok);
         assert!(d.starts_with("2 account(s)"), "{d}");
 
-        std::fs::write(root.join("etc/global_spamassassin_disable"), "").unwrap();
-        let s = cpanel_sa_state_at(&root);
-        assert!(
-            s.forced_off && !s.would_scan(),
-            "Forced Global OFF wins over accounts"
-        );
-        assert!(cpanel_sa_verdict(&s).0);
-
         std::fs::write(root.join("etc/global_spamassassin_enable"), "").unwrap();
         let s = cpanel_sa_state_at(&root);
-        assert!(s.forced_on && s.would_scan(), "Forced Global ON wins");
-        assert!(!cpanel_sa_verdict(&s).0);
+        assert!(s.forced_on && s.would_scan());
+        assert!(cpanel_sa_verdict(&s).1.starts_with("Forced Global ON"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn set_cpanel_sa_toggles_only_the_disable_flag() {
+    fn set_cpanel_sa_turns_accounts_off_and_restores_exactly_them() {
         let root = cpanel_fixture("toggle");
         std::env::set_var("MSFE_NG_CPANEL_ROOT", &root);
         std::fs::write(root.join("home/bob/.spamassassinenable"), "").unwrap();
-        set_cpanel_sa(false).unwrap();
-        assert!(root.join("etc/global_spamassassin_disable").is_file());
-        assert!(!cpanel_sa_state().would_scan());
-        set_cpanel_sa(true).unwrap();
-        set_cpanel_sa(true).unwrap(); // idempotent
-        assert!(!root.join("etc/global_spamassassin_disable").exists());
-        assert!(
-            !root.join("etc/global_spamassassin_enable").exists(),
-            "never forced on"
+        std::fs::write(root.join("home2/carol/.spamassassinenable"), "").unwrap();
+        std::fs::write(root.join("etc/global_spamassassin_enable"), "").unwrap();
+        std::fs::write(
+            root.join("etc/exim.conf.localopts"),
+            "spam_deferok=1\nglobalspamassassin=1\n",
+        )
+        .unwrap();
+
+        assert_eq!(set_cpanel_sa(false).unwrap(), vec!["bob", "carol"]);
+        let s = cpanel_sa_state();
+        assert!(!s.would_scan());
+        assert!(!root.join("etc/global_spamassassin_enable").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("etc/exim.conf.localopts")).unwrap(),
+            "spam_deferok=1\nglobalspamassassin=0\n"
         );
-        assert!(
-            root.join("home/bob/.spamassassinenable").exists(),
-            "account choice untouched"
+        assert_eq!(s.restorable, vec!["bob", "carol"]);
+        assert_eq!(
+            set_cpanel_sa(false).unwrap(),
+            Vec::<String>::new(),
+            "idempotent"
         );
-        assert!(cpanel_sa_state().would_scan());
+        assert_eq!(
+            cpanel_sa_state().restorable,
+            vec!["bob", "carol"],
+            "record kept"
+        );
+
+        // alice turned hers on meanwhile: restore brings back only bob + carol
+        std::fs::write(root.join("home/alice/.spamassassinenable"), "").unwrap();
+        assert_eq!(set_cpanel_sa(true).unwrap(), vec!["bob", "carol"]);
+        let s = cpanel_sa_state();
+        assert_eq!(s.accounts_on, vec!["alice", "bob", "carol"]);
+        assert!(s.restorable.is_empty());
+        assert!(!s.forced_on, "never forced globally on");
         std::env::remove_var("MSFE_NG_CPANEL_ROOT");
         let _ = std::fs::remove_dir_all(&root);
     }

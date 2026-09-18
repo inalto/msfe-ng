@@ -86,8 +86,8 @@ fn enable_logging_names_the_missing_conf_and_installs_nothing() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
-/// `exim disable-cpanel-spamassassin` writes cPanel's Forced-Global-OFF flag
-/// and nothing else; `enable-` removes it and leaves accounts' own choice.
+/// `exim disable-cpanel-spamassassin` turns Spam Filters off for the accounts
+/// that have it on and remembers them; `enable-` restores exactly those.
 #[test]
 fn cpanel_spamassassin_toggle_uses_the_forced_off_flag() {
     let d = tmp("cpanel-sa");
@@ -120,12 +120,16 @@ fn cpanel_spamassassin_toggle_uses_the_forced_off_flag() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(d.join("etc/global_spamassassin_disable").is_file());
-    assert!(String::from_utf8_lossy(&out.stdout).contains("Forced Global OFF"));
+    assert!(!d.join("home/alice/.spamassassinenable").exists());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("off for 1 account(s): alice"));
+    assert_eq!(
+        std::fs::read_to_string(d.join("etc/msfe-ng/cpanel-sa-accounts")).unwrap(),
+        "alice\n"
+    );
 
     let out = run(&["exim", "enable-cpanel-spamassassin"]);
     assert!(out.status.success());
-    assert!(!d.join("etc/global_spamassassin_disable").exists());
     assert!(d.join("home/alice/.spamassassinenable").exists());
+    assert!(!d.join("etc/msfe-ng/cpanel-sa-accounts").exists());
     let _ = std::fs::remove_dir_all(&d);
 }

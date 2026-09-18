@@ -1490,8 +1490,8 @@ fn service_status(cfg: &Config) -> Response {
                     let s = mailflow::cpanel_sa_state();
                     Json::Object(vec![
                         ("forced_on".into(), Json::Bool(s.forced_on)),
-                        ("forced_off".into(), Json::Bool(s.forced_off)),
-                        ("accounts_on".into(), Json::Int(s.accounts_on as i64)),
+                        ("accounts_on".into(), Json::Int(s.accounts_on.len() as i64)),
+                        ("restorable".into(), Json::Int(s.restorable.len() as i64)),
                         ("would_scan".into(), Json::Bool(s.would_scan())),
                     ])
                 } else {
@@ -1538,18 +1538,23 @@ fn service_control(req: &Request) -> Response {
     )
 }
 
-/// cPanel's Apache SpamAssassin: Forced Global OFF (`enabled:false`) or back
-/// to the per-account setting (`enabled:true`).
+/// cPanel's Apache SpamAssassin: off for every account (`enabled:false`) or
+/// back on for the accounts that were turned off here (`enabled:true`).
 fn service_cpanel_sa(req: &Request) -> Response {
     let v = Json::parse(&req.body).unwrap_or(Json::Null);
     let enabled = matches!(v.get("enabled"), Some(Json::Bool(true)));
     match mailflow::set_cpanel_sa(enabled) {
-        Ok(()) => Response::json(
+        Ok(changed) => Response::json(
             200,
-            &format!(
-                "{{\"ok\":true,\"would_scan\":{}}}",
-                mailflow::cpanel_sa_state().would_scan()
-            ),
+            &Json::Object(vec![
+                ("ok".into(), Json::Bool(true)),
+                ("changed".into(), Json::Int(changed.len() as i64)),
+                (
+                    "would_scan".into(),
+                    Json::Bool(mailflow::cpanel_sa_state().would_scan()),
+                ),
+            ])
+            .to_string(),
         ),
         Err(e) => Response::json(500, &format!("{{\"error\":\"cPanel SpamAssassin: {e}\"}}")),
     }

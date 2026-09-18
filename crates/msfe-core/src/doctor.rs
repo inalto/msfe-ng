@@ -372,7 +372,7 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
             ok,
             Level::Warn,
             detail,
-            "msfe-ng exim disable-cpanel-spamassassin (or the cPanel SpamAssassin toggle on the Service tab; WHM: Exim Configuration Manager → Apache SpamAssassin: Forced Global OFF)",
+            "msfe-ng exim disable-cpanel-spamassassin (or Disable cPanel SpamAssassin on the Service tab) — turns Spam Filters off per account via cPanel's API, restorable",
         ));
     }
 

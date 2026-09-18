@@ -1038,7 +1038,17 @@ fn cmd_exim(sub: Option<&str>) -> ExitCode {
         Some(a @ ("enable-cpanel-spamassassin" | "disable-cpanel-spamassassin")) => {
             let enable = a.starts_with("enable");
             match mailflow::set_cpanel_sa(enable) {
-                Ok(()) => {
+                Ok(changed) => {
+                    println!(
+                        "cPanel Spam Filters turned {} for {} account(s){}",
+                        if enable { "on" } else { "off" },
+                        changed.len(),
+                        if changed.is_empty() {
+                            String::new()
+                        } else {
+                            format!(": {}", changed.join(", "))
+                        }
+                    );
                     let (_, detail) = mailflow::cpanel_sa_verdict(&mailflow::cpanel_sa_state());
                     println!("cPanel SpamAssassin: {detail}");
                     ExitCode::SUCCESS

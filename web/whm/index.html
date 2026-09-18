@@ -1012,13 +1012,12 @@ async function renderService(){
     const cs=s.cpanel_sa;
     if(cs){
       const txt=cs.forced_on?'cPanel SpamAssassin forced ON for every account (double scan)'
-        :cs.forced_off?'cPanel SpamAssassin off — MailScanner is the only spam scanner'
         :cs.accounts_on?`cPanel SpamAssassin on for ${cs.accounts_on} account(s) (double scan)`
-        :'cPanel SpamAssassin: no account has Spam Filters on';
+        :'cPanel SpamAssassin off for every account — MailScanner is the only spam scanner';
       stat.append(el('span',{},el('span',{class:'dot',style:'background:'+(cs.would_scan?'var(--warning)':'var(--good)')}),txt));
-      csBtn.style.display='';
-      csBtn.textContent=cs.forced_off?'Re-enable cPanel SpamAssassin (per account)':'Disable cPanel SpamAssassin (double scan)';
-      csBtn.dataset.enable=cs.forced_off?'true':'false';
+      if(cs.would_scan){csBtn.textContent='Disable cPanel SpamAssassin (double scan)';csBtn.dataset.enable='false';csBtn.style.display='';}
+      else if(cs.restorable){csBtn.textContent=`Restore cPanel Spam Filters for ${cs.restorable} account(s)`;csBtn.dataset.enable='true';csBtn.style.display='';}
+      else csBtn.style.display='none';
     }
   }
   // Activity console: shows the exact commands run + their output, then keeps
@@ -1068,9 +1067,9 @@ async function renderService(){
   const csBtn=el('button',{class:'act plain',style:'display:none'},'…');
   csBtn.onclick=async()=>{
     const enable=csBtn.dataset.enable==='true';
-    if(!enable&&!confirm('Disable cPanel\u2019s Apache SpamAssassin for every account?\n\nMailScanner keeps scoring all mail; only cPanel\u2019s second scan (its own threshold and +spam folders) stops. Same as WHM \u2192 Exim Configuration Manager \u2192 Forced Global OFF; reversible here.'))return;
+    if(!enable&&!confirm('Turn cPanel\u2019s Spam Filters off for every account that has them on?\n\nMailScanner keeps scoring all mail; only cPanel\u2019s second scan (its own threshold and +spam folders) stops. Done through cPanel\u2019s own API per account; the accounts are remembered so you can restore them here.'))return;
     const r=await api('/api/service/cpanel-spamassassin',{method:'POST',body:{enabled:enable}});
-    toast(r&&r.ok?(r.would_scan?'cPanel SpamAssassin back to per-account setting':'cPanel SpamAssassin disabled'):(r.error||'failed'));
+    toast(r&&r.ok?`cPanel Spam Filters turned ${enable?'on':'off'} for ${r.changed} account(s)`:(r.error||'failed'));
     refreshStatus();
   };
   const cfgBtn=el('button',{class:'act plain'},'Configure for Exim');
