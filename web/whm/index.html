@@ -1254,6 +1254,50 @@ async function renderService(){
       engBtn.dataset.latest=e.latest;engBtn.style.display='';}
   };
   up.append(upline,engline,el('div',{class:'ctl'},upBtn,selfBtn,engBtn),jobCon);uc.append(up);
+  // Guided migration: ConfigServer's bundled MailScanner → the RPM. Shown only
+  // while the /usr/mailscanner tree exists; runs as the engine-migrate job.
+  const mig=el('div',{class:'card',style:'display:none'},el('h2',{},'Migrate from ConfigServer MailScanner'));
+  const migInfo=el('div',{class:'muted',style:'font-size:.85rem;margin-bottom:.5rem'});
+  const migList=el('ul',{style:'margin:.25rem 0 .5rem 1.2rem;font-size:.85rem'});
+  const migBtn=el('button',{class:'act danger'},'Migrate now');
+  const migCon=el('div',{style:'display:none;margin-top:.5rem'});
+  const migTitle=el('div',{class:'muted',style:'margin:.25rem 0;font-size:.8rem'});
+  const migPre=el('pre',{class:'log',style:'max-height:22rem'});
+  migCon.append(migTitle,migPre);
+  mig.append(migInfo,migList,el('div',{class:'ctl'},migBtn),migCon);uc.append(mig);
+  let migTimer=null;
+  function followMig(){
+    clearInterval(migTimer);migCon.style.display='';migTitle.textContent='Migration — running';
+    const tick=async()=>{
+      let s;try{s=await api('/api/jobs/engine-migrate');}catch(e){s=null;}
+      if(!s||s.error)return;
+      migPre.textContent=s.log||'(no output yet)';migPre.scrollTop=migPre.scrollHeight;
+      if(s.running)return;
+      clearInterval(migTimer);migTimer=null;migBtn.disabled=false;
+      migTitle.textContent=s.exit===0?'Migration — finished':`Migration — ${s.exit==null?'interrupted':'FAILED (exit '+s.exit+')'} — full log: ${s.log_path}`;
+      refreshStatus();loadMig();
+    };
+    tick();migTimer=setInterval(tick,2000);
+  }
+  async function loadMig(){
+    const p=await api('/api/engine/migrate');
+    if(!p||p.error||!p.legacy_engine){mig.style.display='none';return;}
+    mig.style.display='';migInfo.textContent=`${p.engine}. This replaces ConfigServer's bundled engine and front-end with the MailScanner RPM in one run: backup, snapshot of /usr/mailscanner/etc, stop, ConfigServer's uninstaller${p.uninstaller?'':' (not found — the tree is removed directly)'}, RPM install, configure for Exim carrying the org name over, logging plugin, rules, wiring${p.wiring?' (kept: '+p.wiring+')':' (set up)'}, start, doctor. Mail queues meanwhile — nothing is lost.`;
+    migList.innerHTML='';
+    (p.warnings||[]).forEach(w=>migList.append(el('li',{style:'color:var(--warning)'},w)));
+    (p.blockers||[]).forEach(b=>migList.append(el('li',{style:'color:var(--critical)'},b)));
+    if(p.remnants&&p.remnants.length)migList.append(el('li',{},'Legacy files found: '+p.remnants.join(', ')));
+    migBtn.disabled=!p.ok;
+  }
+  migBtn.onclick=async()=>{
+    if(!confirm('Migrate to the MailScanner RPM now?\n\nConfigServer\u2019s front-end and its /usr/mailscanner engine are removed and the RPM engine installed and configured. Takes several minutes; incoming mail queues meanwhile and is scanned afterwards. A backup of /etc/msfe-ng and a copy of the legacy etc are kept.'))return;
+    migBtn.disabled=true;
+    const r=await api('/api/jobs/engine-migrate',{method:'POST'});
+    if(!r||!r.ok){toast(r&&r.error||'cannot start');migBtn.disabled=false;return;}
+    followMig();
+  };
+  loadMig();
+  api('/api/jobs/engine-migrate').then(s=>{if(s&&s.running){mig.style.display='';migBtn.disabled=true;followMig();}}).catch(()=>{});
   // a job started earlier (or from another window) is still worth following
   for(const [n,l] of [['upgrade','Upgrade MSFE-NG'],['engine-upgrade','Upgrade MailScanner']]){
     api(`/api/jobs/${n}`).then(s=>{if(s&&s.running)followJob(n,l,n==='engine-upgrade'?()=>refreshStatus():null);}).catch(()=>{});

@@ -993,7 +993,10 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
         ("GET", "/api/service/conf") => service_conf_read(req, cfg, config_file),
         ("PUT", "/api/service/conf") => service_conf_write(req, cfg, config_file),
         ("GET", "/api/service/update") => service_update(cfg),
-        (m, p) if p.starts_with("/api/jobs/") => jobs_route(m, &p["/api/jobs/".len()..], req, cfg),
+        (m, p) if p.starts_with("/api/jobs/") => {
+            jobs_route(m, &p["/api/jobs/".len()..], req, cfg, config_file)
+        }
+        ("GET", "/api/engine/migrate") => engine_migrate_preflight(cfg, config_file),
 
         // ---- structured rule management (root-only admin surface) -----------
         ("GET", "/api/rules/files") => rules_files(config_file),
@@ -2021,11 +2024,43 @@ fn service_update(cfg: &Config) -> Response {
     )
 }
 
+/// What the ConfigServer → RPM migration would do on this host.
+fn engine_migrate_preflight(cfg: &Config, config_file: &Path) -> Response {
+    let pf = msfe_core::engine_migration::preflight(cfg, config_file);
+    let strs = |v: &[String]| Json::Array(v.iter().map(Json::str).collect());
+    Response::json(
+        200,
+        &Json::Object(vec![
+            ("legacy_engine".into(), Json::Bool(pf.legacy_engine)),
+            ("engine".into(), Json::str(&pf.engine)),
+            ("uninstaller".into(), Json::Bool(pf.uninstaller)),
+            ("remnants".into(), strs(&pf.remnants)),
+            ("policy_imported".into(), Json::Bool(pf.policy_imported)),
+            ("db_configured".into(), Json::Bool(pf.db_configured)),
+            ("queue_incoming".into(), Json::Int(pf.queue_incoming as i64)),
+            (
+                "wiring".into(),
+                pf.wiring.clone().map(Json::Str).unwrap_or(Json::Null),
+            ),
+            ("ok".into(), Json::Bool(pf.ok())),
+            ("blockers".into(), strs(&pf.blockers)),
+            ("warnings".into(), strs(&pf.warnings)),
+        ])
+        .to_string(),
+    )
+}
+
 /// Background jobs (`msfe_core::jobs`): GET status + log tail, POST start.
 /// Only the named upgrade jobs exist; a job is never a command from the API.
-fn jobs_route(method: &str, name: &str, req: &Request, cfg: &Config) -> Response {
-    use msfe_core::{jobs, upgrade};
-    if name != upgrade::SELF_JOB && name != upgrade::ENGINE_JOB {
+fn jobs_route(
+    method: &str,
+    name: &str,
+    req: &Request,
+    cfg: &Config,
+    config_file: &Path,
+) -> Response {
+    use msfe_core::{engine_migration, jobs, upgrade};
+    if name != upgrade::SELF_JOB && name != upgrade::ENGINE_JOB && name != engine_migration::JOB {
         return Response::json(404, r#"{"error":"no such job"}"#);
     }
     match method {
@@ -2062,6 +2097,12 @@ fn jobs_route(method: &str, name: &str, req: &Request, cfg: &Config) -> Response
             let v = Json::parse(&req.body).unwrap_or(Json::Null);
             let res = if name == upgrade::SELF_JOB {
                 upgrade::start_self(v.get("version").and_then(Json::as_str))
+            } else if name == engine_migration::JOB {
+                let pf = engine_migration::preflight(cfg, config_file);
+                match pf.blockers.first() {
+                    Some(b) => Err(std::io::Error::other(b.clone())),
+                    None => engine_migration::start_job(),
+                }
             } else {
                 let e = upgrade::engine_update(cfg);
                 match (e.upgradable, e.latest) {

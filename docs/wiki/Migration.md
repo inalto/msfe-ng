@@ -40,33 +40,49 @@ under cPanel's perl) — the installer detects that tree and points
    rewrites the managed rule files every 10 minutes, so make policy changes in
    MSFE-NG only from here on.
 
-## Decommissioning ConfigServer MSFE
+## Decommissioning ConfigServer MSFE — the guided migration
 
 The doctor's *legacy ConfigServer front-end* warning stays until `/usr/msfe`,
 its cron entries and its WHM registration are gone. **Its uninstaller
 (`/usr/msfe/uninstall.msfe.sh`) removes the bundled MailScanner engine too**,
-so pair it with installing the MailScanner RPM — in this order, which keeps
-mail spooling meanwhile (Exim keeps queuing into `/var/spool/exim_incoming`;
-nothing is lost, it is scanned once the new engine is up):
+and the RPM installer refuses to install beside `/usr/mailscanner`, so the
+two have to happen in one sequence. **Service → Migrate from ConfigServer
+MailScanner** (shown while `/usr/mailscanner` exists) does it as one
+background job and follows its log; `msfe-ng engine migrate-legacy` prints
+the preflight, `--run` does the same from a shell. Mail keeps spooling
+meanwhile (Exim queues into the scanning spool; nothing is lost, it is
+scanned once the new engine runs). The steps, each logged, stopping at the
+first failure:
 
-```sh
-msfe-ng backup /root/msfe-ng-before-decommission.tar.gz
-sh /usr/msfe/uninstall.msfe.sh      # legacy front-end + /usr/mailscanner engine
-msfe-ng engine install              # MailScanner 5.5 RPM (refuses to run beside /usr/mailscanner — hence the order)
-msfe-ng engine configure            # MailScanner.conf for Exim, shared SA state, Razor/Pyzor homes
-msfe-ng doctor                      # "Exim wired to MailScanner" — if not, msfe-ng engine wire
-msfe-ng mailscanner enable-logging  # the new conf needs the plugin hooked again
-msfe-ng sync && msfe-ng service restart
-```
+1. backup of `/etc/msfe-ng` into the backup dir (`pre-migration-<time>.tar.gz`)
+2. copy of `/usr/mailscanner/etc` to `/etc/msfe-ng/legacy-engine-etc` (org
+   name, custom rules, `spamassassin.conf` — for reference afterwards)
+3. stop the legacy MailScanner
+4. ConfigServer's uninstaller (answers *yes* to its prompts), then whatever it
+   left: `/usr/mailscanner`, `/usr/msfe`, `/etc/cron.d/msfe.sh`,
+   `/etc/cron.daily/mailscanner_daily.cron`, `/etc/init.d/MailScanner`, root's
+   crontab lines, the legacy WHM plugin registration. `csget` (ConfigServer's
+   shared updater, used by csf too) is never touched.
+5. `msfe-ng engine install` at the latest MailScanner v5 release
+6. `config.toml` pointed at `/etc/MailScanner/MailScanner.conf`
+7. `%org-name%`, `%org-long-name%`, `%web-site%` carried over from the legacy conf
+8. `msfe-ng engine configure` (queues, run-as user, shared SA state, Razor/Pyzor
+   homes, `envelope_sender_header`)
+9. `msfe-ng mailscanner enable-logging`
+10. `msfe-ng sync`
+11. Exim wiring: the two-config layout is kept if the uninstaller left it;
+    otherwise the named-queue wiring is set up
+12. startup latch on, unit enabled, MailScanner (re)started
+13. `msfe-ng doctor` — anything not OK is printed with its fix
 
-`config.toml` still names `/usr/mailscanner/etc/MailScanner.conf`; MSFE-NG
-follows the RPM's `/etc/MailScanner/MailScanner.conf` on its own once the
-old file is gone (the doctor's first line shows which conf is in use). Tidy
-the `mailscanner_conf` line when convenient.
+Preflight notes worth acting on before starting: *no policy imported yet*
+(the legacy settings vanish with `/usr/msfe` — run the import first) and
+*database not configured*.
 
-If the legacy uninstaller also undid the two-configuration Exim wiring, the
-doctor reports *Exim wired to MailScanner* as failed — `msfe-ng engine wire`
-sets up the named-queue method instead.
+If you already removed the front-end by hand (or its uninstaller took the
+engine with it), just run `msfe-ng engine install`, `msfe-ng engine
+configure`, `msfe-ng mailscanner enable-logging`, `msfe-ng sync` and check
+`msfe-ng doctor` for the wiring — the same steps, without the removal.
 
 ## What carries over
 

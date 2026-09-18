@@ -75,7 +75,11 @@ newer, an **Upgrade … now** button appears:
   for Exim* and restarts MailScanner. Mail queues meanwhile. A ConfigServer
   engine (`/usr/mailscanner`) is not upgraded in place — see [Migration](Migration).
 
-Both run as **background jobs**: transient systemd units that survive the
+**Migrate from ConfigServer MailScanner** appears as its own card while the
+legacy `/usr/mailscanner` tree exists — see [Migration](Migration) for what it
+does, step by step.
+
+All of these run as **background jobs**: transient systemd units that survive the
 daemon's own restart, logging to `/var/log/msfe-ng/jobs/<job>.log`. The job
 console under the card follows the log; reopening the tab while a job runs
 picks it up again. CLI: `msfe-ng upgrade [--check]`, `msfe-ng engine install`.

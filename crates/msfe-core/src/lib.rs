@@ -17,6 +17,7 @@ pub mod dbtools;
 pub mod digest;
 pub mod doctor;
 pub mod engine;
+pub mod engine_migration;
 pub mod geoip;
 pub mod housekeeping;
 pub mod jobs;

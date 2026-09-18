@@ -117,6 +117,46 @@ pub fn variable(text: &str, name: &str) -> Option<String> {
     (v != name && !v.is_empty()).then_some(v)
 }
 
+/// The conf with `%name% = value` set: the first live definition replaced,
+/// else appended after the last definition (they sit at the top of the file).
+pub fn set_variable(text: &str, name: &str, value: &str) -> String {
+    let is_def = |l: &str| {
+        let t = l.trim_start();
+        t.starts_with(name) && t[name.len()..].trim_start().starts_with('=')
+    };
+    let want = format!("{name} = {value}");
+    if text.lines().any(is_def) {
+        let mut done = false;
+        let mut out: Vec<String> = text
+            .lines()
+            .map(|l| {
+                if !done && is_def(l) {
+                    done = true;
+                    want.clone()
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect();
+        if !text.ends_with('\n') && !out.is_empty() {
+            out.push(String::new());
+        }
+        return out.join("\n") + if text.ends_with('\n') { "\n" } else { "" };
+    }
+    let last_def = text
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| l.trim_start().starts_with('%') && l.contains('='))
+        .map(|(i, _)| i)
+        .last();
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    match last_def {
+        Some(i) => lines.insert(i + 1, want),
+        None => lines.insert(0, want),
+    }
+    lines.join("\n") + "\n"
+}
+
 /// Substitute every `%name%` in `value` with its `%name% = …` definition from
 /// the conf; unknown variables are left as-is.
 pub fn expand_variables(text: &str, value: &str) -> String {
@@ -147,6 +187,29 @@ pub fn expand_variables(text: &str, value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_variable_replaces_or_inserts_among_the_definitions() {
+        let conf = "%org-name% = yoursite\n%etc-dir% = /etc/MailScanner\nMTA = exim\n";
+        assert_eq!(
+            set_variable(conf, "%org-name%", "acme"),
+            "%org-name% = acme\n%etc-dir% = /etc/MailScanner\nMTA = exim\n"
+        );
+        assert_eq!(
+            set_variable(conf, "%web-site%", "www.acme.example"),
+            "%org-name% = yoursite\n%etc-dir% = /etc/MailScanner\n%web-site% = www.acme.example\nMTA = exim\n"
+        );
+        assert_eq!(
+            set_variable("MTA = exim\n", "%org-name%", "x"),
+            "%org-name% = x\nMTA = exim\n"
+        );
+        // %org-name% must not match %org-long-name%
+        let both = "%org-long-name% = Long\n%org-name% = short\n";
+        assert_eq!(
+            set_variable(both, "%org-name%", "s2"),
+            "%org-long-name% = Long\n%org-name% = s2\n"
+        );
+    }
 
     #[test]
     fn variable_reads_a_definition_and_expands_nested_ones() {

@@ -73,6 +73,8 @@ pub fn remnants(root: &Path) -> Vec<String> {
         };
         let mut names: Vec<String> = rd
             .flatten()
+            // csget is ConfigServer's shared updater (csf, cxs, …), not the front-end's
+            .filter(|e| e.file_name() != "csget")
             .filter(|e| e.path().is_file() && mentions_legacy(&e.path()))
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
@@ -350,7 +352,6 @@ mod tests {
             vec![
                 "/usr/msfe".to_string(),
                 "/etc/cron.d/msfe".to_string(),
-                "/etc/cron.daily/csget".to_string(),
                 "/etc/cron.daily/mailscanner_daily.cron".to_string(),
                 "/var/spool/cron/root".to_string(),
                 "/var/cpanel/apps/msfe.conf".to_string(),

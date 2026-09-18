@@ -36,6 +36,7 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
     match (cmd, sub) {
         ("exim", _) => Some(NONE),
         ("engine", Some("wire" | "unwire")) => Some(DRY),
+        ("engine", Some("migrate-legacy")) => Some(&["--run"]),
         ("engine", _) => Some(NONE),
         ("service", Some("spool-repair")) => Some(DRY),
         ("service", _) => Some(NONE),
@@ -814,6 +815,42 @@ fn cmd_engine(sub: Option<&str>) -> ExitCode {
                 }
             }
         }
+        Some("migrate-legacy") => {
+            use msfe_core::engine_migration as mig;
+            let run = std::env::args().any(|x| x == "--run");
+            if !run {
+                let pf = mig::preflight(&cfg, &config_path());
+                println!("engine: {}", pf.engine);
+                println!(
+                    "legacy ConfigServer tree: {}; uninstaller: {}; policy imported: {}; wiring: {}",
+                    if pf.legacy_engine { "present" } else { "absent" },
+                    if pf.uninstaller { "present" } else { "absent" },
+                    pf.policy_imported,
+                    pf.wiring.as_deref().unwrap_or("none")
+                );
+                for w in &pf.warnings {
+                    println!("note: {w}");
+                }
+                for b in &pf.blockers {
+                    println!("blocked: {b}");
+                }
+                if pf.ok() {
+                    println!("\nrun it with: msfe-ng engine migrate-legacy --run   (or from the Service tab)");
+                }
+                return if pf.ok() {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::from(1)
+                };
+            }
+            match mig::run(&config_path()) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("\nmsfe-ng engine migrate-legacy: {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
         Some(a @ ("wire" | "unwire")) => {
             let dry = std::env::args().any(|x| x == "--dry-run");
             let cfg = Config::load(&config_path());
@@ -1308,6 +1345,7 @@ COMMANDS:
     digest [--dry-run]  Email quarantine digests to digest-enabled domains
     housekeeping        Prune old mail-log rows (cleanmysql retention)
     monitor [--dry-run] Auto-clean the delivery queue, fix misfiled spool files, send Telegram alerts (cron)
+    engine migrate-legacy [--run]     ConfigServer MailScanner → the MailScanner RPM (preflight without --run)
     exim <status|enable-scanning|disable-scanning>   Toggle MailScanner scanning
     exim <enable|disable>-cpanel-spamassassin        cPanel's own SpamAssassin (double scan)
     upgrade [--check]                 Upgrade MSFE-NG to the latest release (or just compare)
