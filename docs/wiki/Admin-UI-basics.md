@@ -19,7 +19,9 @@ every tab is described on its own wiki page.
 When any doctor check is not OK, a banner appears above the content on every
 tab. Expand it to see each finding with its level (fail / warn), a one-line
 explanation and the **fix** — usually the exact CLI command or the button to
-click. It disappears on its own once the check passes.
+click. **Fix what can be fixed** applies the mechanical ones in one go (see
+[Troubleshooting](Troubleshooting), *Start with the doctor*); what needs a
+decision stays listed. It disappears on its own once every check passes.
 
 ## Conventions
 

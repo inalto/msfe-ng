@@ -133,3 +133,36 @@ fn cpanel_spamassassin_toggle_uses_the_forced_off_flag() {
     assert!(!d.join("etc/msfe-ng/cpanel-sa-accounts").exists());
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// `doctor --fix` with nothing installed has nothing mechanical to do and
+/// says so; it never invents work (no engine → the doctor stops early).
+#[test]
+fn doctor_fix_reports_nothing_to_fix_without_an_engine() {
+    let d = tmp("doctor-fix");
+    std::fs::write(
+        d.join("config.toml"),
+        format!(
+            "mailscanner_conf = \"{}\"\nmailscanner_rules_dir = \"{}\"\n",
+            d.join("MailScanner.conf").display(),
+            d.join("rules").display()
+        ),
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_msfe-ng"))
+        .args(["doctor", "--fix"])
+        .env("MSFE_NG_CONFIG", d.join("config.toml"))
+        .env("MSFE_NG_MS_BIN", d.join("no-such-engine"))
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("nothing to fix automatically"), "{text}");
+    assert!(!d.join("rules").exists(), "no sync ran");
+    // a flag the doctor does not take is still rejected
+    let out = Command::new(env!("CARGO_BIN_EXE_msfe-ng"))
+        .args(["doctor", "--force"])
+        .env("MSFE_NG_CONFIG", d.join("config.toml"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let _ = std::fs::remove_dir_all(&d);
+}

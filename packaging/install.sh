@@ -276,8 +276,8 @@ ok "MSFE-NG installed."
 # its fix. Never fails the install.
 echo
 info "MailScanner.conf: $MS_CONF"
-info "system check (msfe-ng doctor)"
-"$BINDIR/msfe-ng" doctor || warn "the checks above reported problems — each line includes its fix"
+info "system check (msfe-ng doctor --fix: repairs what is mechanical, then reports)"
+"$BINDIR/msfe-ng" doctor --fix || warn "the checks above reported problems — each line includes its fix"
 echo
 case "$panel" in
     cpanel)      info "Open WHM > Plugins > 'MSFE-NG MailScanner Front-End'." ;;

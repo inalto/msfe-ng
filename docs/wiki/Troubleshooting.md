@@ -12,6 +12,19 @@ ClamAV socket actually connectable, database, logging plugin, Telegram — and
 prints a fix for each failing check. The same result drives the banner at the
 top of the admin UI and the health dot in the rail.
 
+`msfe-ng doctor --fix` (the banner's **Fix what can be fixed**) applies the
+mechanical fixes first, then reports: installs the logging plugin's perl
+modules (`DBI`, `DBD::mysql`) and restarts MailScanner; re-runs *Configure for
+Exim* for anything it owns (Razor identity, Pyzor/Bayes homes, envelope-sender
+header, archive dir, spam-check size, the Exim message-id shim) — only on an
+engine already set to `MTA = exim`; runs the phishing-list updater; `sync`
+when archive rules are missing; spool repair; starts MailScanner when it is
+wired and the startup latch is on but it is stopped. Decisions are never made
+for you: the mailflow kill switch, cPanel SpamAssassin, the DNS resolver,
+database creation, enabling message logging and config paths stay listed with
+their fix. The installer runs `doctor --fix` at the end of every install and
+upgrade, and the guided migration runs it as its last step.
+
 ## Mail stops flowing
 
 1. **Service tab** — is MailScanner *running*, *wired*, *scanning enabled*, and

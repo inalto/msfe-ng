@@ -26,6 +26,7 @@ impl Level {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Check {
     pub name: &'static str,
     pub level: Level,
@@ -611,7 +612,7 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
         "Dashboard → Enable message logging (or msfe-ng mailscanner enable-logging)",
     ));
     if logging {
-        for (module, pkg) in [("DBI", "perl-DBI"), ("DBD::mysql", "perl-DBD-MySQL")] {
+        for (module, pkg) in setup::LOGGING_MODULES {
             let ok = setup::perl_module_ok(&lay.perl, module);
             out.push(check(
                 "logging perl modules",
@@ -1205,6 +1206,160 @@ pub fn queue_dirs_verdict(method: engine::EximMethod, inc: &Path) -> (bool, &'st
     }
 }
 
+// ---- auto-fix ----------------------------------------------------------------
+
+/// A repair the doctor can apply by itself. Decisions (kill switch, cPanel
+/// SpamAssassin, DNS resolver, DB creation, enabling logging, config paths)
+/// never appear here — only mechanical, idempotent steps the named fixes
+/// already prescribe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Fix {
+    /// `dnf install` the logging plugin's perl modules, then restart.
+    LoggingModules,
+    /// `engine configure` — only when the engine already targets Exim.
+    EngineConfigure,
+    /// run the phishing-list updater (after `engine configure` patched it).
+    PhishingUpdate,
+    /// `sync` — archive rules missing while archiving is on.
+    Sync,
+    /// `service spool-repair`.
+    SpoolRepair,
+    /// start MailScanner: wired, latch on, but not running.
+    Start,
+}
+
+/// Which fixes the findings call for. `engine_targets_exim`: `MTA = exim`
+/// already set (a never-configured engine is left to the Service tab).
+pub fn plan(checks: &[Check], engine_targets_exim: bool) -> Vec<Fix> {
+    let mut fixes = Vec::new();
+    let wired = checks
+        .iter()
+        .any(|c| c.name == "Exim wired to MailScanner" && c.level == Level::Ok);
+    let latch_on = checks
+        .iter()
+        .any(|c| c.name == "safety switch (run_mailscanner)" && c.level == Level::Ok);
+    for c in checks.iter().filter(|c| c.level != Level::Ok) {
+        let fix = match c.name {
+            "logging perl modules" => Some(Fix::LoggingModules),
+            "engine configured for Exim"
+            | "MailScanner reads the Exim message-id format"
+            | "Bayes DB shared with MailScanner"
+            | "Razor reporting identity"
+            | "Pyzor shared home"
+            | "SpamAssassin envelope-sender header"
+            | "large messages get spam-checked"
+            | "archive directory ready"
+            | "quarantine writable by scan user"
+                if engine_targets_exim =>
+            {
+                Some(Fix::EngineConfigure)
+            }
+            "phishing site lists updating" if engine_targets_exim => Some(Fix::PhishingUpdate),
+            "message archive configured" => Some(Fix::Sync),
+            "spool files correctly placed" => Some(Fix::SpoolRepair),
+            "MailScanner running" if wired && latch_on => Some(Fix::Start),
+            _ => None,
+        };
+        if let Some(f) = fix {
+            if !fixes.contains(&f) {
+                fixes.push(f);
+            }
+        }
+    }
+    // configure before the updater it patches; modules before the restart
+    fixes.sort();
+    fixes
+}
+
+/// Apply every fix the findings call for; returns what was done (one line
+/// each), then callers re-run the doctor for the post-fix state.
+pub fn fix(cfg: &Config, config_file: &Path) -> Vec<String> {
+    let checks = run(cfg, config_file);
+    let conf = std::fs::read_to_string(&cfg.mailscanner_conf).unwrap_or_default();
+    let targets_exim = mailscanner::get_directive(&conf, "MTA") == Some("exim");
+    let mut done = Vec::new();
+    let mut restart = false;
+    for f in plan(&checks, targets_exim) {
+        match f {
+            Fix::LoggingModules => {
+                let lines = setup::ensure_logging_modules(cfg);
+                restart |= lines.iter().any(|l| l.starts_with("installed"));
+                done.extend(lines);
+            }
+            Fix::EngineConfigure => match engine::configure(cfg) {
+                Ok(r) => {
+                    for l in r
+                        .set
+                        .iter()
+                        .chain(r.created.iter())
+                        .chain(r.repaired.iter())
+                    {
+                        done.push(format!("engine configure: {l}"));
+                    }
+                    for w in &r.warnings {
+                        done.push(format!("engine configure warning: {w}"));
+                    }
+                    if r.set.is_empty() && r.created.is_empty() && r.repaired.is_empty() {
+                        done.push("engine configure: nothing to change".into());
+                    }
+                }
+                Err(e) => done.push(format!("engine configure failed: {e}")),
+            },
+            Fix::PhishingUpdate => {
+                let updater = layout::resolve(cfg).phishing_updater;
+                let ok = Command::new(&updater)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .is_ok_and(|s| s.success());
+                done.push(format!(
+                    "{}: {}",
+                    updater.display(),
+                    if ok {
+                        "phishing lists updated"
+                    } else {
+                        "FAILED"
+                    }
+                ));
+            }
+            Fix::Sync => match crate::sync::run(cfg, config_file, None) {
+                Ok(r) => {
+                    if r.changed > 0 {
+                        crate::sync::reload_mailscanner();
+                    }
+                    done.push(format!(
+                        "sync: {} rule files ({} changed)",
+                        r.files, r.changed
+                    ));
+                }
+                Err(e) => done.push(format!("sync failed: {e}")),
+            },
+            Fix::SpoolRepair => {
+                let (_, outq) = service::queue_dirs(cfg);
+                match service::repair_spool(&outq, false) {
+                    Ok(r) => done.push(format!("spool repair: {} file(s) moved", r.moved)),
+                    Err(e) => done.push(format!("spool repair failed: {e}")),
+                }
+            }
+            Fix::Start => {
+                let o = service::control("start");
+                done.push(format!(
+                    "start MailScanner: {}",
+                    if o.ok { "ok" } else { "FAILED" }
+                ));
+            }
+        }
+    }
+    if restart && service::status().active {
+        let o = service::control("restart");
+        done.push(format!(
+            "restarted MailScanner for the new perl modules: {}",
+            if o.ok { "ok" } else { "FAILED" }
+        ));
+    }
+    done
+}
+
 /// Does spamassassin.conf's `envelope_sender_header` name the header
 /// MailScanner stamps the envelope sender into (its `Envelope From Header`)?
 pub fn envelope_header_verdict(ms_conf: &str, sa_conf: &str) -> (bool, String) {
@@ -1569,6 +1724,69 @@ mod tests {
         assert!(ok);
         assert!(fix.contains("engine configure"));
         assert!(!queue_dirs_verdict(TwoConfig, Path::new("/var/spool/exim/mailscanner/input")).0);
+    }
+
+    fn chk(name: &'static str, level: Level) -> Check {
+        Check {
+            name,
+            level,
+            detail: String::new(),
+            fix: None,
+        }
+    }
+
+    #[test]
+    fn plan_maps_findings_to_mechanical_fixes_only() {
+        let checks = vec![
+            chk("MailScanner engine installed", Level::Ok),
+            chk("logging perl modules", Level::Fail),
+            chk("Razor reporting identity", Level::Warn),
+            chk("Pyzor shared home", Level::Warn),
+            chk("phishing site lists updating", Level::Warn),
+            chk("message archive configured", Level::Warn),
+            chk("spool files correctly placed", Level::Fail),
+            chk("scanning kill switch", Level::Warn),
+            chk("cPanel SpamAssassin double scan", Level::Warn),
+            chk("DNS blocklists answering", Level::Warn),
+            chk("database credentials configured", Level::Fail),
+            chk("message logging enabled", Level::Warn),
+        ];
+        assert_eq!(
+            plan(&checks, true),
+            vec![
+                Fix::LoggingModules,
+                Fix::EngineConfigure,
+                Fix::PhishingUpdate,
+                Fix::Sync,
+                Fix::SpoolRepair
+            ],
+            "decisions are never planned; configure listed once"
+        );
+        // an engine never configured for Exim is left to the Service tab
+        assert_eq!(
+            plan(&checks, false),
+            vec![Fix::LoggingModules, Fix::Sync, Fix::SpoolRepair]
+        );
+        assert!(plan(&[chk("logging perl modules", Level::Ok)], true).is_empty());
+    }
+
+    #[test]
+    fn plan_starts_mailscanner_only_when_wired_and_latched_on() {
+        let stopped = chk("MailScanner running", Level::Fail);
+        let wired = chk("Exim wired to MailScanner", Level::Ok);
+        let latch = chk("safety switch (run_mailscanner)", Level::Ok);
+        assert_eq!(
+            plan(&[stopped.clone(), wired.clone(), latch.clone()], true),
+            vec![Fix::Start]
+        );
+        assert!(
+            plan(&[stopped.clone(), wired.clone()], true).is_empty(),
+            "latch off: not started"
+        );
+        assert!(
+            plan(&[stopped, latch], true).is_empty(),
+            "unwired: nothing to feed it"
+        );
     }
 
     #[test]

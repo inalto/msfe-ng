@@ -8,7 +8,7 @@ the UI does is also a command, which is what the cron jobs and the doctor's
 msfe-ng health                      check the running daemon via its Unix socket
 msfe-ng panel                       report the detected control panel
 msfe-ng config                      print the effective config as JSON (password redacted)
-msfe-ng doctor                      check every link of the scanning chain; names each fix
+msfe-ng doctor [--fix]              check every link of the scanning chain; names each fix (--fix applies the mechanical ones)
 msfe-ng upgrade [--check]           upgrade MSFE-NG to the latest release (or just compare versions)
 msfe-ng version | help
 

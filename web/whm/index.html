@@ -2042,6 +2042,19 @@ async function refreshDoctor(){
       el('span',{class:'badge',style:'background:'+(c.level==='fail'?'var(--critical)':'var(--warning)')},c.level),
       ' ',el('b',{},c.name),' — ',c.detail,
       c.fix?el('div',{class:'muted',style:'margin-left:2.6rem'},'fix: '+c.fix):'')));
+  // the mechanical repairs (perl modules, engine configure, phishing lists,
+  // rules, spool, start) in one go; decisions stay listed with their fix
+  const fixBtn=el('button',{class:'act plain',style:'margin:.4rem 0 0 .5rem'},'Fix what can be fixed');
+  fixBtn.onclick=async()=>{
+    fixBtn.disabled=true;fixBtn.textContent='Fixing…';
+    const r=await api('/api/doctor/fix',{method:'POST'});
+    fixBtn.disabled=false;fixBtn.textContent='Fix what can be fixed';
+    if(!r||!r.ok){toast(r&&r.error||'fix failed');return;}
+    if(!r.done||!r.done.length)toast('Nothing to fix automatically — the remaining items need a decision (see their fix hints)');
+    else alert('Applied:\n\n'+r.done.join('\n'));
+    refreshDoctor();
+  };
+  det.append(fixBtn);
   bar.append(det);
 }
 refreshDoctor();

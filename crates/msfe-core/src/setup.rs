@@ -172,25 +172,40 @@ pub(crate) fn perl_module_ok(perl: &[String], module: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Install the logging plugin, hook the directive, restart MailScanner.
-pub fn enable_logging(cfg: &Config) -> io::Result<Vec<String>> {
+/// The perl modules the logging plugin needs (`DBI`, `DBD::mysql`) and the
+/// packages that provide them.
+pub const LOGGING_MODULES: [(&str, &str); 2] =
+    [("DBI", "perl-DBI"), ("DBD::mysql", "perl-DBD-MySQL")];
+
+/// Make sure the plugin's perl modules load under the engine's perl:
+/// `dnf install`, then `cpanm` as a fallback. Missing modules fail silently
+/// from the operator's viewpoint (errors only in the mail log), so this is
+/// surfaced — and repaired — wherever logging is set up or checked.
+pub fn ensure_logging_modules(cfg: &Config) -> Vec<String> {
     let mut log = Vec::new();
-    // The plugin needs DBI + DBD::mysql at runtime; missing
-    // modules fail silently from the operator's viewpoint (errors only in the
-    // mail log), so surface — and try to fix — them here.
     let perl = crate::layout::resolve(cfg).perl;
-    for (module, pkg) in [("DBI", "perl-DBI"), ("DBD::mysql", "perl-DBD-MySQL")] {
+    for (module, pkg) in LOGGING_MODULES {
+        if perl_module_ok(&perl, module) {
+            continue;
+        }
+        let _ = Command::new("dnf").args(["-y", "install", pkg]).output();
         if !perl_module_ok(&perl, module) {
-            let _ = Command::new("dnf").args(["-y", "install", pkg]).output();
-            if perl_module_ok(&perl, module) {
-                log.push(format!("installed missing perl module {module} ({pkg})"));
-            } else {
-                log.push(format!(
-                    "WARNING: perl module {module} is missing and could not be installed — messages will NOT be recorded until it is (dnf install {pkg} or cpanm {module})"
-                ));
-            }
+            let _ = Command::new("cpanm").args(["--notest", module]).output();
+        }
+        if perl_module_ok(&perl, module) {
+            log.push(format!("installed missing perl module {module} ({pkg})"));
+        } else {
+            log.push(format!(
+                "WARNING: perl module {module} is missing and could not be installed — messages will NOT be recorded until it is (dnf install {pkg} or cpanm {module})"
+            ));
         }
     }
+    log
+}
+
+/// Install the logging plugin, hook the directive, restart MailScanner.
+pub fn enable_logging(cfg: &Config) -> io::Result<Vec<String>> {
+    let mut log = ensure_logging_modules(cfg);
     let conf_path = Path::new(&cfg.mailscanner_conf);
     let text = std::fs::read_to_string(conf_path)?;
     let dir = mailscanner::custom_functions_dir(&text, &cfg.mailscanner_custom_dir);

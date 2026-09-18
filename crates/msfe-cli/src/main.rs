@@ -42,6 +42,7 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
         ("service", _) => Some(NONE),
         ("mailscanner", _) => Some(NONE),
         ("upgrade", _) => Some(&["--check"]),
+        ("doctor", _) => Some(&["--fix"]),
         _ => None,
     }
 }
@@ -65,6 +66,7 @@ fn usage_of(cmd: &str) -> &'static str {
         }
         "mailscanner" => "msfe-ng mailscanner <status|enable-logging|disable-logging>",
         "upgrade" => "msfe-ng upgrade [--check]",
+        "doctor" => "msfe-ng doctor [--fix]",
         _ => "msfe-ng help",
     }
 }
@@ -73,11 +75,16 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or("help");
 
-    if let Some(flag) = rejected_flag(
-        cmd,
-        args.get(1).map(String::as_str),
-        args.get(2..).unwrap_or(&[]),
-    ) {
+    // `doctor --fix`: a flag right after the command is an option, not a
+    // subcommand, and gets checked like any other
+    let (sub, rest) = match args.get(1) {
+        Some(a) if a.starts_with('-') => (None, &args[1..]),
+        _ => (
+            args.get(1).map(String::as_str),
+            args.get(2..).unwrap_or(&[]),
+        ),
+    };
+    if let Some(flag) = rejected_flag(cmd, sub, rest) {
         eprintln!(
             "msfe-ng {cmd}: unknown option '{flag}'\nusage: {}",
             usage_of(cmd)
@@ -112,7 +119,7 @@ fn main() -> ExitCode {
         "service" => cmd_service(args.get(1).map(String::as_str)),
         "rules" => cmd_rules(args.get(1).map(String::as_str)),
         "engine" => cmd_engine(args.get(1).map(String::as_str)),
-        "doctor" => cmd_doctor(),
+        "doctor" => cmd_doctor(args.iter().any(|a| a == "--fix")),
         "backup" => cmd_backup(args.get(1).map(String::as_str)),
         "restore" => cmd_restore(args.get(1).map(String::as_str)),
         "help" | "--help" | "-h" => {
@@ -713,9 +720,20 @@ fn cmd_digest(flag: Option<&str>) -> ExitCode {
 
 /// One pass over every link of the scanning chain; each problem names its fix.
 /// Exit code 1 when anything FAILS (warnings alone stay 0).
-fn cmd_doctor() -> ExitCode {
+fn cmd_doctor(fix: bool) -> ExitCode {
     use msfe_core::doctor::{self, Level};
     let cfg = Config::load(&config_path());
+    if fix {
+        let done = doctor::fix(&cfg, &config_path());
+        if done.is_empty() {
+            println!("doctor --fix: nothing to fix automatically");
+        } else {
+            for l in &done {
+                println!("fix: {l}");
+            }
+        }
+        println!();
+    }
     let checks = doctor::run(&cfg, &config_path());
     for c in &checks {
         let tag = match c.level {
@@ -1350,7 +1368,7 @@ COMMANDS:
     exim <enable|disable>-cpanel-spamassassin        cPanel's own SpamAssassin (double scan)
     upgrade [--check]                 Upgrade MSFE-NG to the latest release (or just compare)
     service <status|start|stop|reload|restart|queue-fix|spool-repair>   MailScanner service & queues
-    doctor              Check every link of the scanning chain; names each fix
+    doctor [--fix]      Check every link of the scanning chain; names each fix (--fix applies the mechanical ones)
     rules lint          Check managed ruleset files for unparsable lines
     rules adopt [--from <dir>]   Borrow existing on-disk rules into the custom store
     engine <status|install|configure|enable|disable|lint>   Manage the MailScanner engine itself

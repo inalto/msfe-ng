@@ -634,6 +634,25 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             }
             Err(e) => Response::json(500, &format!("{{\"error\":\"configure: {e}\"}}")),
         },
+        ("POST", "/api/doctor/fix") => {
+            let done = msfe_core::doctor::fix(cfg, config_file);
+            let checks = msfe_core::doctor::run(cfg, config_file);
+            Response::json(
+                200,
+                &Json::Object(vec![
+                    ("ok".into(), Json::Bool(true)),
+                    (
+                        "done".into(),
+                        Json::Array(done.iter().map(Json::str).collect()),
+                    ),
+                    (
+                        "healthy".into(),
+                        Json::Bool(msfe_core::doctor::healthy(&checks)),
+                    ),
+                ])
+                .to_string(),
+            )
+        }
         ("GET", "/api/doctor") => {
             let checks = msfe_core::doctor::run(cfg, config_file);
             let items: Vec<Json> = checks

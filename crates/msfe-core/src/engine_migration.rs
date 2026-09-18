@@ -319,7 +319,10 @@ pub fn run(config_file: &Path) -> io::Result<()> {
         }
     }
 
-    step(13, "doctor");
+    step(13, "doctor (repairing what is mechanical first)");
+    for l in crate::doctor::fix(&cfg, config_file) {
+        println!("  fix: {l}");
+    }
     let checks = crate::doctor::run(&cfg, config_file);
     for c in checks
         .iter()
