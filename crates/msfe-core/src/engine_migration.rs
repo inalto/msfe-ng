@@ -79,7 +79,13 @@ impl Preflight {
     }
 }
 
+/// What the migration would do; `starting` adds the "already running" blocker
+/// (meaningless from inside the running job itself).
 pub fn preflight(cfg: &Config, config_file: &Path) -> Preflight {
+    preflight_for(cfg, config_file, true)
+}
+
+pub fn preflight_for(cfg: &Config, config_file: &Path, starting: bool) -> Preflight {
     let lay = layout::resolve(cfg);
     let legacy_engine = at(LEGACY_TREE).is_dir();
     let (settings, _, _) = sync::load_policy(&sync::policy_dir(config_file));
@@ -106,7 +112,7 @@ pub fn preflight(cfg: &Config, config_file: &Path) -> Preflight {
             "no ConfigServer engine at {LEGACY_TREE} — nothing to migrate"
         ));
     }
-    if crate::jobs::status(JOB).running {
+    if starting && crate::jobs::status(JOB).running {
         p.blockers.push("a migration is already running".into());
     }
     if !p.policy_imported {
@@ -153,7 +159,8 @@ fn fail(msg: String) -> io::Error {
 /// failure with what to do next.
 pub fn run(config_file: &Path) -> io::Result<()> {
     let cfg = Config::load(config_file);
-    let pf = preflight(&cfg, config_file);
+    // this very run is the job: the "already running" blocker must not apply
+    let pf = preflight_for(&cfg, config_file, false);
     println!("preflight: {}", pf.engine);
     for w in &pf.warnings {
         println!("  note: {w}");
@@ -580,6 +587,25 @@ mod tests {
         std::fs::create_dir_all(root.join("usr/mailscanner")).unwrap();
         let pf = preflight(&cfg, &root.join("etc/msfe-ng/config.toml"));
         assert!(pf.ok(), "{:?}", pf.blockers);
+
+        // the job itself is running (its pid file names this process): the
+        // run's own preflight must not block, the start path must
+        // same per-process dir the jobs tests use (the env var is process-wide)
+        let jobs = std::env::temp_dir().join(format!("msfe-jobs-{}", std::process::id()));
+        std::fs::create_dir_all(&jobs).unwrap();
+        std::env::set_var("MSFE_NG_JOBS_DIR", &jobs);
+        std::fs::write(jobs.join(format!("{JOB}.log")), "").unwrap();
+        std::fs::write(
+            jobs.join(format!("{JOB}.pid")),
+            format!("{}\n", std::process::id()),
+        )
+        .unwrap();
+        assert!(crate::jobs::status(JOB).running);
+        let pf = preflight_for(&cfg, &root.join("etc/msfe-ng/config.toml"), false);
+        assert!(pf.ok(), "inside the job: {:?}", pf.blockers);
+        let pf = preflight(&cfg, &root.join("etc/msfe-ng/config.toml"));
+        assert!(pf.blockers.iter().any(|b| b.contains("already running")));
+        let _ = std::fs::remove_file(jobs.join(format!("{JOB}.pid")));
         assert!(
             pf.warnings.iter().any(|w| w.contains("no policy imported")),
             "{:?}",
