@@ -719,6 +719,8 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
         }
         ("POST", "/api/service/sync") => service_sync(cfg, config_file),
         ("GET", "/api/service/maillog") => service_maillog(req, cfg),
+        ("GET", "/api/service/maillog/search") => service_maillog_search(req, cfg),
+        ("GET", "/api/service/maillog/window") => service_maillog_window(req, cfg),
         ("GET", "/api/service/journal") => {
             let lines = stats::clamp_int(req.query_param("lines").as_deref(), 80, 10, 500);
             let j = service::journal(lines as usize);
@@ -1553,15 +1555,97 @@ fn service_sync(cfg: &Config, config_file: &Path) -> Response {
     }
 }
 
-fn service_maillog(req: &Request, cfg: &Config) -> Response {
-    let lines = stats::clamp_int(req.query_param("lines").as_deref(), 200, 10, 2000);
-    let path = match req.query_param("which").as_deref() {
+/// Which log the `which=` query parameter selects.
+fn log_path<'a>(req: &Request, cfg: &'a Config) -> &'a str {
+    match req.query_param("which").as_deref() {
         Some("exim") => &cfg.exim_mainlog_path,
         _ => &cfg.maillog_path,
-    };
+    }
+}
+
+fn service_maillog(req: &Request, cfg: &Config) -> Response {
+    let lines = stats::clamp_int(req.query_param("lines").as_deref(), 200, 10, 2000);
+    let path = log_path(req, cfg);
     match service::tail_file(Path::new(path), lines as usize) {
         Ok(text) => Response::text(200, &text),
         Err(e) => Response::text(200, &format!("(cannot read {path}: {e})")),
+    }
+}
+
+/// Longest search pattern accepted by `/api/service/maillog/search`.
+const MAX_SEARCH_PATTERN: usize = 200;
+/// Most hit offsets returned per search (the newest survive).
+const MAX_SEARCH_HITS: usize = 5000;
+
+fn cannot_read(path: &str, e: std::io::Error) -> Response {
+    Response::json(
+        200,
+        &Json::Object(vec![(
+            "error".into(),
+            Json::str(format!("cannot read {path}: {e}")),
+        )])
+        .to_string(),
+    )
+}
+
+/// `GET /api/service/maillog/search?q=text[&which=exim]` — offsets of every
+/// line containing `q` (case-insensitive) across the whole current log file.
+fn service_maillog_search(req: &Request, cfg: &Config) -> Response {
+    let q = req.query_param("q").unwrap_or_default();
+    let q = q.trim();
+    if q.is_empty() || q.len() > MAX_SEARCH_PATTERN {
+        return Response::json(
+            400,
+            &Json::Object(vec![(
+                "error".into(),
+                Json::str(format!(
+                    "pattern must be 1 to {MAX_SEARCH_PATTERN} characters"
+                )),
+            )])
+            .to_string(),
+        );
+    }
+    let path = log_path(req, cfg);
+    match service::search_file(Path::new(path), q, MAX_SEARCH_HITS) {
+        Ok(r) => Response::json(
+            200,
+            &Json::Object(vec![
+                ("total".into(), Json::Int(r.total as i64)),
+                ("truncated".into(), Json::Bool(r.truncated)),
+                ("size".into(), Json::Int(r.size as i64)),
+                (
+                    "offsets".into(),
+                    Json::Array(r.offsets.iter().map(|&o| Json::Int(o as i64)).collect()),
+                ),
+            ])
+            .to_string(),
+        ),
+        Err(e) => cannot_read(path, e),
+    }
+}
+
+/// `GET /api/service/maillog/window?at=offset[&before=N&after=N&which=exim]`
+/// — the lines around the line starting at byte `at`.
+fn service_maillog_window(req: &Request, cfg: &Config) -> Response {
+    let at: u64 = req
+        .query_param("at")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let before = stats::clamp_int(req.query_param("before").as_deref(), 200, 0, 1000);
+    let after = stats::clamp_int(req.query_param("after").as_deref(), 200, 0, 1000);
+    let path = log_path(req, cfg);
+    match service::window_file(Path::new(path), at, before as usize, after as usize) {
+        Ok(w) => Response::json(
+            200,
+            &Json::Object(vec![
+                ("text".into(), Json::str(w.text)),
+                ("anchor".into(), Json::Int(w.anchor as i64)),
+                ("start".into(), Json::Int(w.start as i64)),
+                ("end".into(), Json::Int(w.end as i64)),
+            ])
+            .to_string(),
+        ),
+        Err(e) => cannot_read(path, e),
     }
 }
 
@@ -2122,5 +2206,98 @@ fn apply_override(
             )
         }
         Err(e) => Response::json(500, &format!("{{\"error\":\"sync failed: {e}\"}}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn get(path: &str, query: &str) -> Request {
+        Request {
+            method: "GET".into(),
+            path: path.into(),
+            query: query.into(),
+            body: String::new(),
+            user: String::new(),
+        }
+    }
+
+    /// Serialise a response and split it into (status, body).
+    fn send(r: Response) -> (u16, String) {
+        let mut out = Vec::new();
+        r.write(&mut out).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        let (_, body) = s.split_once("\r\n\r\n").unwrap();
+        (r.status, body.to_string())
+    }
+
+    fn log_fixture(name: &str, body: &str) -> (std::path::PathBuf, Config) {
+        let d = std::env::temp_dir().join(format!("msfe-api-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("maillog");
+        std::fs::write(&f, body).unwrap();
+        let cfg = Config {
+            maillog_path: f.display().to_string(),
+            exim_mainlog_path: d.join("missing").display().to_string(),
+            ..Default::default()
+        };
+        (d, cfg)
+    }
+
+    #[test]
+    fn maillog_search_returns_offsets_json() {
+        let (d, cfg) = log_fixture("search", "alpha\nBETA one\ngamma\nbeta two\n");
+        let (st, body) = send(handle(
+            &get("/api/service/maillog/search", "q=beta"),
+            &cfg,
+            &d,
+        ));
+        assert_eq!(st, 200);
+        assert_eq!(
+            body,
+            r#"{"total":2,"truncated":false,"size":30,"offsets":[6,21]}"#
+        );
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn maillog_search_rejects_an_empty_or_huge_pattern() {
+        let (d, cfg) = log_fixture("searchbad", "x\n");
+        for q in ["", "q=", "q=%20%20", &format!("q={}", "a".repeat(201))] {
+            let (st, body) = send(handle(&get("/api/service/maillog/search", q), &cfg, &d));
+            assert_eq!(st, 400, "{q}");
+            assert!(body.contains("error"), "{body}");
+        }
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn maillog_search_reports_unreadable_files() {
+        let (d, cfg) = log_fixture("searchmissing", "x\n");
+        let (st, body) = send(handle(
+            &get("/api/service/maillog/search", "q=x&which=exim"),
+            &cfg,
+            &d,
+        ));
+        assert_eq!(st, 200);
+        assert!(body.starts_with(r#"{"error":"cannot read"#), "{body}");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn maillog_window_returns_lines_around_the_offset() {
+        let (d, cfg) = log_fixture("window", "l0\nl1\nl2\nl3\nl4\n");
+        let (st, body) = send(handle(
+            &get("/api/service/maillog/window", "at=6&before=1&after=1"),
+            &cfg,
+            &d,
+        ));
+        assert_eq!(st, 200);
+        assert_eq!(
+            body,
+            r#"{"text":"l1\nl2\nl3","anchor":1,"start":3,"end":12}"#
+        );
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }

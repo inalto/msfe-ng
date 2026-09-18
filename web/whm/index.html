@@ -1177,19 +1177,90 @@ async function renderLogs(){
   const lsrc=el('select');[['mail','Mail log (MailScanner/syslog)'],['exim','Exim mainlog (deliveries)']].forEach(([val,lbl])=>lsrc.append(el('option',{value:val},lbl)));
   const lsel=el('select');[100,300,1000].forEach(n=>lsel.append(el('option',{value:n},n+' lines')));
   const pre=el('pre',{class:'log',style:'max-height:30rem'},'Loading…');
+  const which=()=>lsrc.value==='exim'?'&which=exim':'';
+  // Search state: hits are line-start byte offsets across the whole file; the
+  // viewer only ever holds a window of lines around the current hit.
+  const S={mode:'tail',needle:'',hits:[],cur:-1,truncated:false,win:null};
   async function refreshLog(){
-    const which=lsrc.value==='exim'?'&which=exim':'';
-    const text=await api('/api/service/maillog?lines='+lsel.value+which,{raw:true});
+    if(S.mode==='search')return;
+    const text=await api('/api/service/maillog?lines='+lsel.value+which(),{raw:true});
     const stick=pre.scrollTop+pre.clientHeight>=pre.scrollHeight-4;
     pre.textContent=text||'(empty)';
     if(stick)pre.scrollTop=pre.scrollHeight;
   }
-  lsrc.onchange=()=>{pre.textContent='Loading…';refreshLog();};
   const auto=el('input',{type:'checkbox',id:'logauto'});
   auto.onchange=()=>{clearInterval(logTimer);logTimer=auto.checked?setInterval(refreshLog,5000):null;};
+  lsel.onchange=refreshLog;
   lctl.append(lsrc,lsel,
     Object.assign(el('button',{class:'act plain'},'Refresh'),{onclick:refreshLog}),
     auto,el('label',{for:'logauto',class:'muted'},'follow (5s)'));
+
+  // Whole-file search: server returns hit offsets, we page windows around them.
+  const sctl=el('div',{class:'ctl'});lc.append(sctl);
+  const sinp=el('input',{placeholder:'search whole log… (Enter: older hit, Shift+Enter: newer, Esc: clear)',style:'width:24rem'});
+  const sbtn=el('button',{class:'act plain'},'Search');
+  const prev=el('button',{class:'act plain',title:'older hit'},'◀ older');
+  const next=el('button',{class:'act plain',title:'newer hit'},'newer ▶');
+  const count=el('span',{class:'muted'});
+  const clr=el('button',{class:'act plain',title:'clear search'},'✕');
+  sctl.append(sinp,sbtn,prev,next,count,clr);
+  function setNav(){
+    prev.disabled=S.cur<=0;next.disabled=S.cur<0||S.cur>=S.hits.length-1;
+    if(S.mode!=='search'){count.textContent='';return;}
+    count.textContent=(S.cur+1)+' / '+S.hits.length+(S.truncated?' (newest only, older hits not listed)':'');
+  }
+  // Highlight every occurrence of the needle in one line (HTML-escaped).
+  function markLine(line){
+    const lo=line.toLowerCase(),nd=S.needle.toLowerCase();let out='',i=0;
+    for(;;){const j=lo.indexOf(nd,i);if(j<0)break;out+=esc(line.slice(i,j))+'<mark>'+esc(line.slice(j,j+nd.length))+'</mark>';i=j+nd.length;}
+    return out+esc(line.slice(i));
+  }
+  function renderWindow(w){
+    S.win=w;
+    pre.innerHTML=w.text.split('\n').map(l=>'<span class="ln">'+markLine(l)+'</span>').join('\n');
+  }
+  // Line index of a hit inside the current window (hits are line starts).
+  function lineIndexOf(off){
+    const lines=S.win.text.split('\n');let pos=S.win.start;
+    for(let i=0;i<lines.length;i++){if(pos===off)return i;pos+=lines[i].length+1;}
+    return -1;
+  }
+  async function showHit(){
+    const off=S.hits[S.cur];
+    if(!S.win||off<S.win.start||off>=S.win.end){
+      const w=await api('/api/service/maillog/window?at='+off+'&before=200&after=200'+which());
+      if(!w||w.error){pre.textContent=w?.error||'(error)';return;}
+      renderWindow(w);
+    }
+    pre.querySelectorAll('.ln.cur').forEach(n=>n.classList.remove('cur'));
+    const idx=lineIndexOf(off),ln=pre.querySelectorAll('.ln')[idx];
+    if(ln){ln.classList.add('cur');pre.scrollTop=ln.offsetTop-pre.clientHeight/2+ln.offsetHeight/2;}
+    setNav();
+  }
+  async function doSearch(){
+    const q=sinp.value.trim();
+    if(!q){clearSearch();return;}
+    if(S.mode==='search'&&q===S.needle){step(-1);return;}
+    count.textContent='searching…';
+    const r=await api('/api/service/maillog/search?q='+encodeURIComponent(q)+which());
+    if(!r||r.error){count.textContent=r?.error||'error';return;}
+    if(!r.total){count.textContent='no matches';return;}
+    auto.checked=false;clearInterval(logTimer);logTimer=null;
+    Object.assign(S,{mode:'search',needle:q,hits:r.offsets,truncated:r.truncated,win:null,cur:r.offsets.length-1});
+    await showHit();
+  }
+  function step(d){if(S.mode!=='search')return;const n=S.cur+d;if(n<0||n>=S.hits.length)return;S.cur=n;showHit();}
+  function clearSearch(){
+    Object.assign(S,{mode:'tail',needle:'',hits:[],cur:-1,truncated:false,win:null});
+    sinp.value='';setNav();pre.textContent='Loading…';refreshLog();
+  }
+  sbtn.onclick=doSearch;prev.onclick=()=>step(-1);next.onclick=()=>step(1);clr.onclick=clearSearch;
+  sinp.onkeydown=e=>{
+    if(e.key==='Enter'){e.preventDefault();e.shiftKey?step(1):doSearch();}
+    else if(e.key==='Escape'){e.preventDefault();clearSearch();}
+  };
+  lsrc.onchange=()=>{if(S.mode==='search')clearSearch();else{pre.textContent='Loading…';refreshLog();}};
+  setNav();
   lc.append(pre);
   refreshLog();
 }

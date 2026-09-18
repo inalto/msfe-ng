@@ -455,6 +455,24 @@
     white-space: pre-wrap;
     word-break: break-all;
     margin: 0;
+    position: relative; /* so .ln offsetTop is relative to the pane */
+  }
+  /* log search: every occurrence marked, the current hit's line emphasised */
+  pre.log mark {
+    background: var(--accent-weak);
+    color: var(--ink);
+    border-radius: 2px;
+    box-shadow: 0 0 0 1px var(--accent);
+  }
+  pre.log .ln.cur {
+    background: rgba(217, 138, 11, 0.16);
+    box-shadow: 0 0 0 1px var(--warning);
+    border-radius: 2px;
+  }
+  pre.log .ln.cur mark {
+    background: var(--warning);
+    color: #fff;
+    box-shadow: none;
   }
   .statline {
     display: flex;

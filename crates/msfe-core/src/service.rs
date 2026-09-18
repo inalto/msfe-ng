@@ -992,6 +992,145 @@ pub fn tail_file(path: &Path, lines: usize) -> io::Result<String> {
     Ok(all[from..].join("\n"))
 }
 
+// ---- maillog search ----------------------------------------------------------
+
+/// Result of `search_file`: where the matching lines start.
+#[derive(Debug, Default)]
+pub struct LogSearch {
+    /// Every match in the file, even those dropped by the cap.
+    pub total: usize,
+    /// Byte offset of the start of each matching line, ascending; only the
+    /// newest `max` survive the cap.
+    pub offsets: Vec<u64>,
+    pub truncated: bool,
+    /// File length at the time of the scan.
+    pub size: u64,
+}
+
+/// True when `hay` contains `needle_lower` ignoring ASCII case (`needle_lower`
+/// must already be lower-cased).
+fn contains_ci(hay: &[u8], needle_lower: &[u8]) -> bool {
+    !needle_lower.is_empty()
+        && hay.len() >= needle_lower.len()
+        && hay
+            .windows(needle_lower.len())
+            .any(|w| w.eq_ignore_ascii_case(needle_lower))
+}
+
+/// Case-insensitive substring search over the whole of `path` (`grep -iF`),
+/// streamed line by line so a multi-hundred-MB log is never held in memory.
+/// Keeps the last `max` matching line offsets; `total` still counts them all.
+pub fn search_file(path: &Path, needle: &str, max: usize) -> io::Result<LogSearch> {
+    use std::collections::VecDeque;
+    use std::io::{BufRead, BufReader};
+    let needle_lower = needle.to_ascii_lowercase().into_bytes();
+    let f = std::fs::File::open(path)?;
+    let size = f.metadata()?.len();
+    let mut rd = BufReader::with_capacity(256 * 1024, f);
+    let mut line = Vec::new();
+    let mut pos: u64 = 0;
+    let mut total = 0;
+    let mut hits: VecDeque<u64> = VecDeque::new();
+    loop {
+        line.clear();
+        let n = rd.read_until(b'\n', &mut line)?;
+        if n == 0 {
+            break;
+        }
+        if contains_ci(&line, &needle_lower) {
+            total += 1;
+            hits.push_back(pos);
+            if hits.len() > max {
+                hits.pop_front();
+            }
+        }
+        pos += n as u64;
+    }
+    Ok(LogSearch {
+        total,
+        truncated: total > hits.len(),
+        offsets: hits.into(),
+        size,
+    })
+}
+
+/// A slice of a log around one line, for the search viewer.
+#[derive(Debug, Default)]
+pub struct LogWindow {
+    /// The lines, joined with `\n`, no trailing newline.
+    pub text: String,
+    /// Index in `text` of the line that starts at the requested offset.
+    pub anchor: usize,
+    /// Byte range of the file covered by `text` (end exclusive, includes the
+    /// final newline when there is one).
+    pub start: u64,
+    pub end: u64,
+}
+
+/// Up to `before` lines before the line starting at byte `at`, that line, and
+/// up to `after` more after it. Each direction reads at most 256 KiB so a
+/// pathological line cannot blow up the response.
+pub fn window_file(path: &Path, at: u64, before: usize, after: usize) -> io::Result<LogWindow> {
+    use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+    const MAX_SIDE: u64 = 256 * 1024;
+    let mut f = std::fs::File::open(path)?;
+    let len = f.metadata()?.len();
+    let at = at.min(len);
+
+    // Backwards: read the chunk before `at`, keep the last `before` full lines.
+    let start_scan = at.saturating_sub(MAX_SIDE);
+    f.seek(SeekFrom::Start(start_scan))?;
+    let mut buf = vec![0u8; (at - start_scan) as usize];
+    f.read_exact(&mut buf)?;
+    // `buf` ends right before `at`, so its last byte is the '\n' closing the
+    // previous line. Walk newlines backwards to find where the window begins;
+    // when the chunk started mid-file its first (cut) line is never included.
+    let mut cut = buf.len(); // exclusive end of the not-yet-taken part
+    let mut start = at;
+    for _ in 0..before {
+        let Some(p) = cut
+            .checked_sub(1)
+            .and_then(|e| buf[..e].iter().rposition(|&b| b == b'\n'))
+        else {
+            if start_scan == 0 {
+                start = 0;
+            }
+            break;
+        };
+        start = start_scan + p as u64 + 1;
+        cut = p + 1;
+    }
+    let before_text = &buf[(start - start_scan) as usize..];
+    let anchor = before_text.iter().filter(|&&b| b == b'\n').count();
+
+    // Forwards: the anchor line plus `after` more.
+    f.seek(SeekFrom::Start(at))?;
+    let mut rd = BufReader::new(f.take(MAX_SIDE));
+    let mut fwd = Vec::new();
+    let mut line = Vec::new();
+    let mut end = at;
+    for _ in 0..=after {
+        line.clear();
+        let n = rd.read_until(b'\n', &mut line)?;
+        if n == 0 {
+            break;
+        }
+        fwd.extend_from_slice(&line);
+        end += n as u64;
+    }
+    let mut all = before_text.to_vec();
+    all.extend_from_slice(&fwd);
+    let text = String::from_utf8_lossy(&all)
+        .trim_end_matches('\n')
+        .to_string();
+    Ok(LogWindow {
+        text,
+        anchor,
+        start,
+        end,
+    })
+}
+
 // ---- ruleset / config file access --------------------------------------------
 
 /// True for plain filenames safe to resolve inside a managed directory.
@@ -1136,6 +1275,96 @@ mod tests {
         std::fs::write(&f, "one\ntwo\nthree\nfour\n").unwrap();
         assert_eq!(tail_file(&f, 2).unwrap(), "three\nfour");
         assert_eq!(tail_file(&f, 99).unwrap(), "one\ntwo\nthree\nfour");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn search_finds_lines_case_insensitively() {
+        let d = tmpdir("search");
+        let f = d.join("log");
+        std::fs::write(&f, "alpha one\nBETA two\ngamma\nbeta three\n").unwrap();
+        let r = search_file(&f, "Beta", 100).unwrap();
+        assert_eq!(r.total, 2);
+        assert_eq!(r.offsets, vec![10, 25]);
+        assert!(!r.truncated);
+        assert_eq!(r.size, 36);
+        let none = search_file(&f, "zzz", 100).unwrap();
+        assert_eq!(none.total, 0);
+        assert!(none.offsets.is_empty());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn search_cap_keeps_the_newest_hits() {
+        let d = tmpdir("searchcap");
+        let f = d.join("log");
+        std::fs::write(&f, "x0\nx1\nx2\nx3\nx4\n").unwrap();
+        let r = search_file(&f, "x", 2).unwrap();
+        assert_eq!(r.total, 5);
+        assert!(r.truncated);
+        assert_eq!(r.offsets, vec![9, 12]);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn window_around_an_offset() {
+        let d = tmpdir("window");
+        let f = d.join("log");
+        // 10 lines "l0".."l9", each 3 bytes; line n starts at 3n
+        let body: String = (0..10).map(|i| format!("l{i}\n")).collect();
+        std::fs::write(&f, &body).unwrap();
+        let w = window_file(&f, 15, 2, 3).unwrap();
+        assert_eq!(w.text, "l3\nl4\nl5\nl6\nl7\nl8");
+        assert_eq!(w.anchor, 2);
+        assert_eq!((w.start, w.end), (9, 27));
+        // at the first line: nothing before
+        let w = window_file(&f, 0, 5, 2).unwrap();
+        assert_eq!(w.text, "l0\nl1\nl2");
+        assert_eq!(w.anchor, 0);
+        assert_eq!((w.start, w.end), (0, 9));
+        // at the last line: nothing after; `before` larger than the file
+        let w = window_file(&f, 27, 99, 99).unwrap();
+        assert_eq!(w.text, body.trim_end());
+        assert_eq!(w.anchor, 9);
+        assert_eq!((w.start, w.end), (0, 30));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn window_drops_the_partial_line_at_the_backward_limit() {
+        let d = tmpdir("windowbig");
+        let f = d.join("log");
+        // a 300 KiB line, then "mid", then "hit": asking for many lines before
+        // "hit" must stop at the 256 KiB read limit and drop the cut line.
+        let mut body = vec![b'a'; 300 * 1024];
+        body.extend_from_slice(b"\nmid\nhit\n");
+        std::fs::write(&f, &body).unwrap();
+        let at = 300 * 1024 + 1 + 4;
+        let w = window_file(&f, at, 50, 0).unwrap();
+        assert_eq!(w.text, "mid\nhit");
+        assert_eq!(w.anchor, 1);
+        assert_eq!(w.start, 300 * 1024 + 1);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn window_anchor_line_starts_at_the_offset() {
+        let d = tmpdir("windowrt");
+        let f = d.join("log");
+        std::fs::write(&f, "first\nsecond line\nthird\n").unwrap();
+        let hit = search_file(&f, "SECOND", 10).unwrap().offsets[0];
+        let w = window_file(&f, hit, 1, 1).unwrap();
+        let line = w.text.lines().nth(w.anchor).unwrap();
+        assert_eq!(line, "second line");
+        assert_eq!(
+            w.start
+                + w.text
+                    .lines()
+                    .take(w.anchor)
+                    .map(|l| l.len() as u64 + 1)
+                    .sum::<u64>(),
+            hit
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 

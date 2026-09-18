@@ -186,6 +186,7 @@ impl Response {
     pub fn write<W: Write>(&self, mut stream: W) -> io::Result<()> {
         let reason = match self.status {
             200 => "OK",
+            400 => "Bad Request",
             403 => "Forbidden",
             404 => "Not Found",
             500 => "Internal Server Error",
