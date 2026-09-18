@@ -174,9 +174,27 @@ pub fn exec_start_path(show_output: &str) -> Option<PathBuf> {
     }
 }
 
+/// The unit names MailScanner is known by: the RPM's, then the SysV-generated
+/// one a ConfigServer install gets from its init script.
+pub const UNIT_NAMES: [&str; 2] = ["mailscanner", "MailScanner"];
+
+/// The MailScanner unit systemd has loaded on this server (the RPM's name
+/// when neither answers — its absence is then the error to report).
+pub fn service_unit() -> &'static str {
+    UNIT_NAMES
+        .into_iter()
+        .find(|unit| {
+            Command::new("systemctl")
+                .args(["show", "-p", "LoadState", "--value", unit])
+                .output()
+                .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "loaded")
+        })
+        .unwrap_or(UNIT_NAMES[0])
+}
+
 /// ExecStart of the live MailScanner unit, whichever spelling it uses.
 fn unit_exec_start() -> Option<PathBuf> {
-    for unit in ["mailscanner", "MailScanner"] {
+    for unit in UNIT_NAMES {
         let out = Command::new("systemctl")
             .args(["show", "-p", "ExecStart", "--value", unit])
             .output()

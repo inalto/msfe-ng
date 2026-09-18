@@ -55,6 +55,20 @@ detect_panel() {
     fi
 }
 
+# The MailScanner.conf of the engine on this server: what config.toml names
+# when that file exists, else the MailScanner RPM's, else ConfigServer's
+# bundled tree (/usr/mailscanner). Echoes the RPM default when none exists yet
+# (the engine is not installed). Mirrors Config::resolve_engine_paths.
+detect_ms_conf() {
+    _cfg="$1"   # path to config.toml (may be absent)
+    _c="$(grep -oP '(?<=^mailscanner_conf = ")[^"]*' "$_cfg" 2>/dev/null || true)"
+    [ -n "$_c" ] && [ -f "$_c" ] && { echo "$_c"; return 0; }
+    for _c in /etc/MailScanner/MailScanner.conf /usr/mailscanner/etc/MailScanner.conf; do
+        [ -f "$_c" ] && { echo "$_c"; return 0; }
+    done
+    echo /etc/MailScanner/MailScanner.conf
+}
+
 # Locate the built binaries. Checks, in order: a sibling dist/ dir (release
 # tarball), the cargo target/release dir (dev checkout), then $PATH. Echoes the
 # directory containing msfe-ngd, or empty if not found.

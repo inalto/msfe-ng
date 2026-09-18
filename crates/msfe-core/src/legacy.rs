@@ -41,6 +41,46 @@ pub struct LegacyImport {
     pub lang: Vec<(String, String)>,
 }
 
+/// The original front-end's install directory.
+pub const LEGACY_DIR: &str = "/usr/msfe";
+
+/// What is left of the original ConfigServer front-end under `root` (`/` on a
+/// live host): its directory, cron entries that still run it, and its WHM app
+/// registration — absolute paths, deterministic order. Empty when it is gone.
+pub fn remnants(root: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    let at = |rel: &str| root.join(rel.trim_start_matches('/'));
+    if at(LEGACY_DIR).is_dir() {
+        found.push(LEGACY_DIR.to_string());
+    }
+    let mentions_legacy =
+        |p: &Path| std::fs::read_to_string(p).is_ok_and(|t| mentions_legacy_dir(&t));
+    for dir in ["/etc/cron.d", "/var/spool/cron", "/var/cpanel/apps"] {
+        let Ok(rd) = std::fs::read_dir(at(dir)) else {
+            continue;
+        };
+        let mut names: Vec<String> = rd
+            .flatten()
+            .filter(|e| e.path().is_file() && mentions_legacy(&e.path()))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        found.extend(names.into_iter().map(|n| format!("{dir}/{n}")));
+    }
+    found
+}
+
+/// Does `text` refer to `/usr/msfe` itself — not `/usr/msfe-ng` or any other
+/// path that merely starts with it?
+pub fn mentions_legacy_dir(text: &str) -> bool {
+    text.match_indices(LEGACY_DIR).any(|(i, m)| {
+        !text[i + m.len()..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    })
+}
+
 /// Parse `key=value` lines (msconfig.txt / mslang.*.txt). Splits on the FIRST
 /// `=` so values may contain `=`. Skips blanks and `#` comments. Order-preserving.
 pub fn parse_keyval(text: &str) -> Vec<(String, String)> {
@@ -231,6 +271,63 @@ impl LegacyImport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mentions_legacy_dir_ignores_our_own_paths() {
+        assert!(mentions_legacy_dir("0 * * * * root /usr/msfe/msbe.pl"));
+        assert!(mentions_legacy_dir("target=/usr/msfe\n"));
+        assert!(!mentions_legacy_dir("PATH=/usr/msfe-ng/bin"));
+        assert!(!mentions_legacy_dir("/usr/msfe_ng/x"));
+    }
+
+    #[test]
+    fn remnants_lists_the_legacy_front_ends_footprint() {
+        let root = std::env::temp_dir().join(format!("msfe-legacy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("etc/cron.d")).unwrap();
+        assert!(remnants(&root).is_empty(), "clean host");
+
+        std::fs::create_dir_all(root.join("usr/msfe")).unwrap();
+        std::fs::create_dir_all(root.join("var/spool/cron")).unwrap();
+        std::fs::create_dir_all(root.join("var/cpanel/apps")).unwrap();
+        std::fs::write(
+            root.join("etc/cron.d/msfe"),
+            "0 * * * * root /usr/msfe/msbe.pl\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("etc/cron.d/other"), "0 * * * * root /bin/true\n").unwrap();
+        std::fs::write(
+            root.join("var/spool/cron/root"),
+            "5 * * * * /usr/msfe/msfe.cron\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("var/cpanel/apps/msfe.conf"),
+            "url=/cgi/msfe/index.cgi\ntarget=/usr/msfe\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("var/cpanel/apps/msfe_ng.conf"),
+            "url=/cgi/msfe_ng/\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("etc/cron.d/msfe-ng"),
+            "*/10 * * * * root /usr/msfe-ng/bin/x\n",
+        )
+        .unwrap();
+        let found = remnants(&root);
+        assert_eq!(
+            found,
+            vec![
+                "/usr/msfe".to_string(),
+                "/etc/cron.d/msfe".to_string(),
+                "/var/spool/cron/root".to_string(),
+                "/var/cpanel/apps/msfe.conf".to_string(),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn keyval_splits_on_first_equals() {

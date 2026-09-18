@@ -19,6 +19,8 @@ across, then takes over rule generation and the UI. It shares MailScanner and th
 
 1. **Install MSFE-NG** (see `admin-guide.md`). It installs under its own
    namespace (`/opt/msfe-ng`, `/etc/msfe-ng`) and does not touch `/usr/msfe`.
+   It detects ConfigServer's engine (`/usr/mailscanner/etc/MailScanner.conf`)
+   and writes the rules where that engine reads them.
 
 2. **Point it at the database.** Set `db_*` in `/etc/msfe-ng/config.toml`. You can
    reuse the existing `mailscanner`/MailWatch database (the `maillog` schema is
@@ -51,7 +53,12 @@ across, then takes over rule generation and the UI. It shares MailScanner and th
 
 6. **Decommission the old front-end.** Once satisfied, remove the legacy plugin
    with its own uninstaller (`/usr/msfe/uninstall.msfe.sh`). MSFE-NG does not
-   depend on any `/usr/msfe` file after import.
+   depend on any `/usr/msfe` file after import — but **that uninstaller also
+   removes the bundled `/usr/mailscanner` engine**, so install the MailScanner
+   RPM right after it (`msfe-ng engine install`, `msfe-ng engine configure`,
+   check the wiring with `msfe-ng doctor`, re-run `msfe-ng mailscanner
+   enable-logging`). The wiki's *Migration* page has the exact order; the
+   doctor's *legacy ConfigServer front-end* warning reminds you until it is done.
 
 ## What carries over vs. not
 

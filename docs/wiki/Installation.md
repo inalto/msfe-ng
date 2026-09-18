@@ -14,7 +14,9 @@ curl -fsSL https://raw.githubusercontent.com/inalto/msfe-ng/main/packaging/get.s
 ```
 
 What it does: preflight check, installs the daemon + CLI under `/opt/msfe-ng`,
-seeds `/etc/msfe-ng/config.toml`, starts the `msfe-ng` systemd service,
+seeds `/etc/msfe-ng/config.toml` (pointing `mailscanner_conf` at the engine it
+finds: the MailScanner RPM's `/etc/MailScanner`, or ConfigServer's
+`/usr/mailscanner` tree), starts the `msfe-ng` systemd service,
 registers the WHM/DA plugin and the cron jobs (rule sync every 10 min, queue
 monitor every 5 min, digests and housekeeping nightly). On upgrade it keeps
 your config, applies new DB migrations and restarts the daemon.
@@ -48,8 +50,11 @@ Then, on the [Service](Service) tab:
 The doctor banner at the top of every tab tells you if any link of the chain
 is still unhealthy, with the fix.
 
-Migrating from the original ConfigServer MSFE? `msfe-ng import /usr/msfe --save`
-reads its old config files — see `docs/migration.md` in the repository.
+Migrating from the original ConfigServer MSFE? Install on top of it — the
+installer finds its engine's `MailScanner.conf` under `/usr/mailscanner` —
+then `msfe-ng import /usr/msfe --save` reads the old config files. See
+[Migration](Migration), including the order for decommissioning the old
+front-end (its uninstaller removes the engine too).
 
 ## Backup, uninstall
 

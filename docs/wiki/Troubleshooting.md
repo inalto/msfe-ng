@@ -55,12 +55,17 @@ Servers migrated from ConfigServer MSFE often still run its bundled engine —
 the MailScanner 5.5 RPM at `/usr/sbin/MailScanner`. MSFE-NG follows the engine
 the service actually runs: it takes the binary from `MailScanner.service`'s
 `ExecStart` (or the tree next to `mailscanner_conf`), and reads that engine's
-perl, `ms-update-phishing` and `defaults` file from the same place. So with
-`mailscanner_conf = "/usr/mailscanner/etc/MailScanner.conf"` in
-`/etc/msfe-ng/config.toml`, the Health Check lints the 5.4 engine, the doctor
-tests SpamAssassin under cPanel's perl, and the phishing fix names the right
-updater. `msfe-ng engine status` and the doctor's first line print which
-engine and version were found.
+perl, `ms-update-phishing` and `defaults` file from the same place. The conf
+follows suit: when the `mailscanner_conf` in `/etc/msfe-ng/config.toml` does
+not exist, MSFE-NG uses the first of `/etc/MailScanner/MailScanner.conf` and
+`/usr/mailscanner/etc/MailScanner.conf` that does, and `sync` writes the rule
+files into that conf's `%rules-dir%` (unless `mailscanner_rules_dir` is set).
+Set `mailscanner_conf` explicitly to pick one engine when both confs exist.
+`msfe-ng engine status` and the doctor's first line print which engine,
+version and conf were found; the doctor checks *MailScanner.conf found* and
+*rules dir is the engine's %rules-dir%* fail when they disagree with the
+engine — before that, a missing conf showed up as "still carries sendmail
+defaults", "unknown version" and rules the engine never read.
 
 A 5.4 engine has no `Exim Command` directive (it is a syntax error there), so
 *Configure for Exim* leaves it out — and comments out one left by an older

@@ -92,11 +92,14 @@ MSFE-NG files. It never drops the database automatically — it prints the
 
 ## Config reference (`/etc/msfe-ng/config.toml`)
 
-`db_host/db_port/db_name/db_user/db_pass`, `mailscanner_conf`,
-`mailscanner_custom_dir` (fallback only — the logging plugin goes wherever
-`Custom Functions Dir` in `MailScanner.conf` points), `mailscanner_rules_dir`,
+`db_host/db_port/db_name/db_user/db_pass`, `mailscanner_conf` (the engine's
+conf, detected at install time — the RPM's `/etc/MailScanner` or ConfigServer's
+`/usr/mailscanner` tree; MSFE-NG falls back to whichever exists when the named
+file is gone), `mailscanner_custom_dir` (fallback only — the logging plugin
+goes wherever `Custom Functions Dir` in `MailScanner.conf` points),
+`mailscanner_rules_dir` (leave unset: `sync` follows the conf's `%rules-dir%`),
 `spambox_conf`, `quarantine_dir`, `socket`, `webroot`. See comments in the
-seeded file.
+seeded file; `msfe-ng config` prints the values in effect.
 
 ## Message bodies (archiving)
 

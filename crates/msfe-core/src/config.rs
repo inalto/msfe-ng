@@ -132,11 +132,42 @@ impl Default for Config {
     }
 }
 
+/// Where MailScanner.conf lives, in preference order: the MailScanner RPM's,
+/// then ConfigServer's bundled tree.
+pub const MS_CONF_CANDIDATES: [&str; 2] = [
+    "/etc/MailScanner/MailScanner.conf",
+    "/usr/mailscanner/etc/MailScanner.conf",
+];
+
 impl Config {
-    /// Load config from `path`, falling back to defaults for anything absent.
+    /// Load config from `path`, falling back to defaults for anything absent,
+    /// then follow the engine actually installed (see `resolve_engine_paths`).
     pub fn load(path: &Path) -> Config {
         let text = std::fs::read_to_string(path).unwrap_or_default();
-        Config::from_toml_str(&text)
+        let mut c = Config::from_toml_str(&text);
+        c.resolve_engine_paths(&MS_CONF_CANDIDATES);
+        c
+    }
+
+    /// Follow the engine that is really installed: when the `mailscanner_conf`
+    /// file does not exist, take the first existing candidate (ConfigServer
+    /// keeps its conf under /usr/mailscanner, where the RPM default never
+    /// exists — and after that tree is decommissioned, the RPM's is the one
+    /// left); when `mailscanner_rules_dir` is still the default, use the
+    /// conf's own `%rules-dir%` — rules written anywhere else are never read.
+    /// A conf that exists, or an explicit rules dir, is always respected.
+    pub fn resolve_engine_paths(&mut self, candidates: &[&str]) {
+        if !Path::new(&self.mailscanner_conf).is_file() {
+            if let Some(c) = candidates.iter().find(|c| Path::new(c).is_file()) {
+                self.mailscanner_conf = c.to_string();
+            }
+        }
+        if self.mailscanner_rules_dir == Config::default().mailscanner_rules_dir {
+            let text = std::fs::read_to_string(&self.mailscanner_conf).unwrap_or_default();
+            if let Some(dir) = crate::mailscanner::variable(&text, "%rules-dir%") {
+                self.mailscanner_rules_dir = dir;
+            }
+        }
     }
 
     pub fn from_toml_str(text: &str) -> Config {
@@ -209,6 +240,10 @@ impl Config {
             ("db_user".into(), Json::str(&self.db_user)),
             ("db_pass_set".into(), Json::Bool(!self.db_pass.is_empty())),
             ("mailscanner_conf".into(), Json::str(&self.mailscanner_conf)),
+            (
+                "mailscanner_rules_dir".into(),
+                Json::str(&self.mailscanner_rules_dir),
+            ),
             ("db_configured".into(), Json::Bool(self.db_configured())),
             ("refresh_secs".into(), Json::Int(self.refresh_secs as i64)),
             ("rows_per_page".into(), Json::Int(self.rows_per_page as i64)),
@@ -336,5 +371,78 @@ mod tests {
         let c = Config::from_toml_str("");
         assert_eq!(c.db_name, "msfe_ng");
         assert!(c.db_configured());
+    }
+
+    fn fake_engine(tag: &str) -> (std::path::PathBuf, String, String) {
+        let base = std::env::temp_dir().join(format!("msfe-cfg-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let etc = base.join("usr/mailscanner/etc");
+        std::fs::create_dir_all(&etc).unwrap();
+        let conf = etc.join("MailScanner.conf");
+        let rules = etc.join("rules").display().to_string();
+        std::fs::write(
+            &conf,
+            format!(
+                "%etc-dir% = {}\n%rules-dir% = {rules}\nMTA = exim\n",
+                etc.display()
+            ),
+        )
+        .unwrap();
+        (base, conf.display().to_string(), rules)
+    }
+
+    #[test]
+    fn follows_the_engine_conf_when_the_default_is_missing() {
+        let (base, conf, rules) = fake_engine("follow");
+        let missing = base.join("etc/MailScanner/MailScanner.conf");
+        let mut c = Config::default();
+        c.resolve_engine_paths(&[&missing.display().to_string(), &conf]);
+        assert_eq!(c.mailscanner_conf, conf);
+        assert_eq!(
+            c.mailscanner_rules_dir, rules,
+            "rules dir follows %rules-dir%"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn keeps_an_existing_conf_and_an_explicit_rules_dir() {
+        let (base, conf, _) = fake_engine("explicit");
+        let mine = base.join("mine.conf");
+        std::fs::write(&mine, "%rules-dir% = /theirs\n").unwrap();
+        let mut c = Config::from_toml_str(&format!(
+            "mailscanner_conf = \"{}\"\nmailscanner_rules_dir = \"/my/rules\"\n",
+            mine.display()
+        ));
+        c.resolve_engine_paths(&[&conf]);
+        assert_eq!(c.mailscanner_conf, mine.display().to_string());
+        assert_eq!(c.mailscanner_rules_dir, "/my/rules");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_configured_conf_that_is_gone_falls_back_to_the_engine_left() {
+        // the ConfigServer tree was decommissioned; config.toml still names it
+        let (base, conf, rules) = fake_engine("gone");
+        let mut c = Config::from_toml_str(&format!(
+            "mailscanner_conf = \"{}\"\n",
+            base.join("usr/mailscanner-removed/etc/MailScanner.conf")
+                .display()
+        ));
+        c.resolve_engine_paths(&[&conf]);
+        assert_eq!(c.mailscanner_conf, conf);
+        assert_eq!(c.mailscanner_rules_dir, rules);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn default_rules_dir_stays_when_the_conf_defines_none() {
+        let (base, conf, _) = fake_engine("norules");
+        std::fs::write(&conf, "MTA = exim\n").unwrap();
+        let mut c = Config::default();
+        c.resolve_engine_paths(&[&conf]);
+        assert_eq!(c.mailscanner_conf, conf);
+        assert_eq!(c.mailscanner_rules_dir, "/etc/MailScanner/rules");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

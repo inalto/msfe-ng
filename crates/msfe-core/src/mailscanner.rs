@@ -110,20 +110,35 @@ pub fn custom_functions_dir(text: &str, fallback: &str) -> std::path::PathBuf {
     }
 }
 
+/// The conf's own definition of `%name%` (e.g. `%rules-dir%`), variables
+/// expanded; `None` when the conf does not define it.
+pub fn variable(text: &str, name: &str) -> Option<String> {
+    let v = expand_variables(text, name);
+    (v != name && !v.is_empty()).then_some(v)
+}
+
 /// Substitute every `%name%` in `value` with its `%name% = …` definition from
 /// the conf; unknown variables are left as-is.
 fn expand_variables(text: &str, value: &str) -> String {
     let mut out = value.to_string();
-    for line in text.lines() {
-        let t = line.trim_start();
-        if !t.starts_with('%') {
-            continue;
-        }
-        if let Some((name, val)) = t.split_once('=') {
-            let name = name.trim();
-            if name.ends_with('%') && out.contains(name) {
-                out = out.replace(name, val.trim());
+    // Definitions may reference earlier ones (`%rules-dir% = %etc-dir%/rules`),
+    // so pass again while something still expands (bounded: no cycles matter).
+    for _ in 0..4 {
+        let before = out.clone();
+        for line in text.lines() {
+            let t = line.trim_start();
+            if !t.starts_with('%') {
+                continue;
             }
+            if let Some((name, val)) = t.split_once('=') {
+                let name = name.trim();
+                if name.ends_with('%') && out.contains(name) {
+                    out = out.replace(name, val.trim());
+                }
+            }
+        }
+        if out == before {
+            break;
         }
     }
     out
@@ -132,6 +147,17 @@ fn expand_variables(text: &str, value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn variable_reads_a_definition_and_expands_nested_ones() {
+        let conf = "%etc-dir% = /usr/mailscanner/etc\n%rules-dir% = %etc-dir%/rules\nMTA = exim\n";
+        assert_eq!(
+            variable(conf, "%rules-dir%").as_deref(),
+            Some("/usr/mailscanner/etc/rules")
+        );
+        assert_eq!(variable(conf, "%org-name%"), None);
+        assert_eq!(variable("", "%rules-dir%"), None);
+    }
 
     #[test]
     fn remove_directive_disables_every_live_line_and_keeps_the_rest() {

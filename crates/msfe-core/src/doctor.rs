@@ -56,9 +56,10 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
         Level::Fail,
         if engine {
             format!(
-                "MailScanner {} at {}",
+                "MailScanner {} at {} (conf {})",
                 lay.version_string(),
-                lay.bin.display()
+                lay.bin.display(),
+                lay.conf.display()
             )
         } else {
             "mail cannot be scanned without the engine".into()
@@ -67,6 +68,23 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
     ));
     if !engine {
         return out; // everything else depends on it
+    }
+    // Every check below reads this file; linting an absent one only yields
+    // nonsense ("sendmail defaults", "unknown version", rules nobody reads).
+    let conf_found = Path::new(&cfg.mailscanner_conf).is_file();
+    out.push(check(
+        "MailScanner.conf found",
+        conf_found,
+        Level::Fail,
+        cfg.mailscanner_conf.clone(),
+        &format!(
+            "set mailscanner_conf in {} to this engine's conf (known locations: {})",
+            msfe_api::DEFAULT_CONFIG_FILE,
+            crate::config::MS_CONF_CANDIDATES.join(", ")
+        ),
+    ));
+    if !conf_found {
+        return out;
     }
 
     let conf = std::fs::read_to_string(&cfg.mailscanner_conf).unwrap_or_default();
@@ -405,6 +423,31 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
     // and only a cron mail full of gzip errors says so.
     out.push(phishing_lists_check(cfg));
 
+    // ---- rules dir + legacy front-end -----------------------------------
+    let (rules_ok, detail) = rules_dir_verdict(&conf, &cfg.mailscanner_rules_dir);
+    out.push(check(
+        "rules dir is the engine's %rules-dir%",
+        rules_ok,
+        Level::Warn,
+        detail,
+        &format!(
+            "remove mailscanner_rules_dir from {} (it then follows the engine), or set it to that dir",
+            msfe_api::DEFAULT_CONFIG_FILE
+        ),
+    ));
+    let legacy = crate::legacy::remnants(Path::new("/"));
+    out.push(check(
+        "legacy ConfigServer front-end",
+        legacy.is_empty(),
+        Level::Warn,
+        if legacy.is_empty() {
+            "not installed".into()
+        } else {
+            format!("still present: {}", legacy.join(", "))
+        },
+        "once the import is verified, decommission it — its uninstaller also removes the /usr/mailscanner engine, so follow the wiki (Migration → Decommissioning ConfigServer MSFE) to switch to the RPM engine at the same time",
+    ));
+
     // ---- message bodies (archive) ----------------------------------------
     let (settings, _, _) = crate::sync::load_policy(&crate::sync::policy_dir(config_file));
     let archive_on = settings
@@ -460,14 +503,21 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
                     },
                 )
             }
-            _ => (true, "disk usage unknown".into()),
+            _ => (
+                false,
+                "cannot measure disk usage — does the archive directory exist?".into(),
+            ),
         };
         out.push(check(
             "archive disk headroom",
             headroom_ok,
             Level::Warn,
             detail,
-            "lower 'Keep message bodies for (days)' in Settings, or turn archiving off",
+            if writable {
+                "lower 'Keep message bodies for (days)' in Settings, or turn archiving off"
+            } else {
+                "msfe-ng engine configure (creates the archive directory)"
+            },
         ));
     }
 
@@ -1131,6 +1181,19 @@ pub fn queue_dirs_verdict(method: engine::EximMethod, inc: &Path) -> (bool, &'st
     }
 }
 
+/// Does `sync` write where this engine reads? Compares `mailscanner_rules_dir`
+/// with the conf's `%rules-dir%`; a conf that defines none cannot disagree.
+pub fn rules_dir_verdict(conf: &str, configured: &str) -> (bool, String) {
+    let configured = configured.trim_end_matches('/');
+    match mailscanner::variable(conf, "%rules-dir%") {
+        Some(engine) if engine.trim_end_matches('/') != configured => (
+            false,
+            format!("sync writes to {configured} but MailScanner reads {engine}"),
+        ),
+        _ => (true, format!("sync writes to {configured}")),
+    }
+}
+
 /// Is MailScanner.conf set up for Exim? `Exim Command` is required only on
 /// engines whose parser knows it (5.5+); on older ones it is a syntax error.
 pub fn engine_configured_verdict(conf: &str, supports_exim_command: bool) -> (bool, String) {
@@ -1459,6 +1522,23 @@ mod tests {
         assert!(ok);
         assert!(fix.contains("engine configure"));
         assert!(!queue_dirs_verdict(TwoConfig, Path::new("/var/spool/exim/mailscanner/input")).0);
+    }
+
+    #[test]
+    fn rules_dir_verdict_compares_with_the_engines_rules_dir() {
+        let conf = "%etc-dir% = /usr/mailscanner/etc\n%rules-dir% = %etc-dir%/rules\n";
+        let (ok, d) = rules_dir_verdict(conf, "/usr/mailscanner/etc/rules");
+        assert!(ok, "{d}");
+        let (ok, d) = rules_dir_verdict(conf, "/usr/mailscanner/etc/rules/");
+        assert!(ok, "trailing slash is the same dir: {d}");
+        let (ok, d) = rules_dir_verdict(conf, "/etc/MailScanner/rules");
+        assert!(!ok);
+        assert_eq!(
+            d,
+            "sync writes to /etc/MailScanner/rules but MailScanner reads /usr/mailscanner/etc/rules"
+        );
+        // a conf without the variable cannot disagree
+        assert!(rules_dir_verdict("MTA = exim\n", "/anywhere").0);
     }
 
     #[test]

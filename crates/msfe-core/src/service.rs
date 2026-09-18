@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// systemd unit / SysV service names for MailScanner.
-const SYSTEMD_UNIT: &str = "mailscanner";
+/// SysV service name (ConfigServer's init script; also the RPM's alias).
 const SYSV_NAME: &str = "MailScanner";
 
 /// Fallback queue locations for a cPanel split-spool MailScanner setup, used
@@ -255,7 +255,7 @@ pub fn lint_with(bin: &Path) -> LintReport {
 
 pub fn status() -> ServiceStatus {
     let active = Command::new("systemctl")
-        .args(["is-active", "--quiet", SYSTEMD_UNIT])
+        .args(["is-active", "--quiet", crate::layout::service_unit()])
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
@@ -342,7 +342,8 @@ pub fn control(action: &str) -> ControlOutcome {
             }
         }
     };
-    let ok = run("systemctl", &[sysd_verb, SYSTEMD_UNIT]) || run("service", &[SYSV_NAME, action]);
+    let ok = run("systemctl", &[sysd_verb, crate::layout::service_unit()])
+        || run("service", &[SYSV_NAME, action]);
     ControlOutcome { ok, transcript }
 }
 
@@ -354,9 +355,9 @@ pub fn journal(lines: usize) -> String {
     Command::new("journalctl")
         .args([
             "-u",
-            SYSTEMD_UNIT,
+            crate::layout::UNIT_NAMES[0],
             "-u",
-            SYSV_NAME,
+            crate::layout::UNIT_NAMES[1],
             "-n",
             &n,
             "--no-pager",

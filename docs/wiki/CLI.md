@@ -48,5 +48,13 @@ Seeded by the installer with comments; editable from the [Config](Config) tab.
 | Queue auto-clean | `queue_clean_frozen_hours`, `queue_clean_bounce_hours`, `queue_clean_spam_score` |
 | Telegram | `telegram_bot_token`, `telegram_chat_id`, `alert_queue_size`, `alert_scan_stuck_mins`, `alert_burst_per_hour`, `alert_cooldown_mins` |
 
+`mailscanner_conf` is seeded with the engine's conf found at install time
+(`/etc/MailScanner/MailScanner.conf`, or ConfigServer's
+`/usr/mailscanner/etc/MailScanner.conf`); when the file it names is missing,
+MSFE-NG falls back to whichever of those exists. `mailscanner_rules_dir` is
+normally left out: `sync` then writes into that conf's `%rules-dir%`. Set it
+only to write somewhere else on purpose. `msfe-ng config` prints the values
+in effect.
+
 Policy (scores, actions, retention, lists, per-domain overrides) lives under
 `/etc/msfe-ng/policy/` and is what `sync` turns into rule files.

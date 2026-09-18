@@ -343,9 +343,12 @@ pub fn adopt_rules(
 }
 
 /// Best-effort MailScanner reload (systemd first, then SysV). Returns success.
+/// The systemd attempt is silent: from the sync cron, its "unit not found"
+/// would otherwise be mailed every 10 minutes on a SysV-only install.
 pub fn reload_mailscanner() -> bool {
     std::process::Command::new("systemctl")
-        .args(["reload-or-restart", "mailscanner"])
+        .args(["reload-or-restart", crate::layout::service_unit()])
+        .stderr(std::process::Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false)

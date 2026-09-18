@@ -11,6 +11,7 @@ alerts. It is a clean-room replacement for the discontinued ConfigServer MSFE.
 
 **Getting started**
 - [Installation](Installation) — one-line install, first-time setup, upgrade, uninstall
+- [Migration from ConfigServer MSFE](Migration) — import the old policy, decommission the old front-end
 - [Navigating the admin UI](Admin-UI-basics) — the rail, health dot, doctor banner, theme
 
 **Admin UI, tab by tab** (WHM → Plugins → MSFE-NG)

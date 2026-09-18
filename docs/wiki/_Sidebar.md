@@ -2,6 +2,7 @@
 
 Getting started
 - [Installation](Installation)
+- [Migration from ConfigServer MSFE](Migration)
 - [Admin UI basics](Admin-UI-basics)
 
 Admin tabs

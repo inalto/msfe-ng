@@ -497,6 +497,14 @@ fn cmd_mailscanner(sub: Option<&str>) -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("enable-logging") => {
+            if !Path::new(&cfg.mailscanner_conf).is_file() {
+                eprintln!(
+                    "msfe-ng mailscanner: {}: not found — set mailscanner_conf in {} to this engine's conf",
+                    cfg.mailscanner_conf,
+                    config_path().display()
+                );
+                return ExitCode::from(1);
+            }
             // 1. copy the plugin into the custom-functions directory
             let src = std::env::var("MSFE_NG_MS_PLUGIN_SRC")
                 .unwrap_or_else(|_| msfe_api::DEFAULT_MS_PLUGIN_SRC.to_string());
@@ -548,12 +556,13 @@ fn cmd_mailscanner(sub: Option<&str>) -> ExitCode {
 /// Read a config file, transform it, and write it back after making a one-time
 /// `.msfe-ng.bak` backup of the original.
 fn edit_conf(path: &str, f: impl FnOnce(&str) -> String) -> std::io::Result<()> {
-    let original = std::fs::read_to_string(path)?;
+    let named = |e: std::io::Error| std::io::Error::new(e.kind(), format!("{path}: {e}"));
+    let original = std::fs::read_to_string(path).map_err(named)?;
     let backup = format!("{path}.msfe-ng.bak");
     if !Path::new(&backup).exists() {
-        std::fs::write(&backup, &original)?;
+        std::fs::write(&backup, &original).map_err(named)?;
     }
-    std::fs::write(path, f(&original))
+    std::fs::write(path, f(&original)).map_err(named)
 }
 
 /// Prune old mail-log rows (retention from the `cleanmysql` policy setting).
@@ -679,9 +688,10 @@ fn cmd_engine(sub: Option<&str>) -> ExitCode {
             if installed {
                 let st = service::status();
                 println!(
-                    "engine: MailScanner {} at {}, {} ({} processes)",
+                    "engine: MailScanner {} at {} (conf {}), {} ({} processes)",
                     lay.version_string(),
                     lay.bin.display(),
+                    lay.conf.display(),
                     if st.active { "active" } else { "stopped" },
                     st.procs
                 );

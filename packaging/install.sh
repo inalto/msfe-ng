@@ -75,6 +75,7 @@ install -m 0644 "$REPO"/db/migrations/*.sql "$PREFIX/db/migrations/"
 install -m 0644 "$REPO/panel/mailscanner/MSFENG.pm" "$PREFIX/mailscanner/MSFENG.pm"
 [ -f "$LOGFILE" ] || { : > "$LOGFILE"; chmod 0640 "$LOGFILE"; }
 # seed a default config only if absent (never clobber operator changes)
+MS_CONF="$(detect_ms_conf "$CONFDIR/config.toml")"
 if [ ! -f "$CONFDIR/config.toml" ]; then
     cat > "$CONFDIR/config.toml" <<EOF
 # MSFE-NG configuration.
@@ -90,11 +91,14 @@ db_user = "msfe_ng"
 db_pass = ""
 
 # MailScanner integration (for: msfe-ng mailscanner enable-logging).
+# mailscanner_conf is the engine's conf, detected at install time (the RPM's
+# /etc/MailScanner, or ConfigServer's /usr/mailscanner tree). The rules dir
+# follows that conf's %rules-dir% unless mailscanner_rules_dir is set here.
 # The logging plugin is installed into MailScanner's own `Custom Functions Dir`
 # (read from mailscanner_conf); mailscanner_custom_dir is only the fallback
 # when that directive is missing.
-mailscanner_conf = "/etc/MailScanner/MailScanner.conf"
-mailscanner_custom_dir = "/etc/MailScanner/custom"
+mailscanner_conf = "$MS_CONF"
+mailscanner_custom_dir = "$(dirname "$MS_CONF")/custom"
 
 # Where copies of scanned messages are kept (archive/quarantine), so the
 # Messages tab can show content. Retention is the 'bodydays' policy setting.
@@ -207,8 +211,6 @@ if [ -n "$PREV_VER" ]; then
     # The plugin lives where MailScanner loads custom functions from — its own
     # `Custom Functions Dir` (ConfigServer layouts keep it under
     # /usr/mailscanner, with no /etc/MailScanner/custom symlink).
-    MS_CONF="$(grep -oP '(?<=^mailscanner_conf = ")[^"]*' "$CONFDIR/config.toml" 2>/dev/null)"
-    MS_CONF="${MS_CONF:-/etc/MailScanner/MailScanner.conf}"
     if grep -q '^Always Looked Up Last = &MSFENGLogging' "$MS_CONF" 2>/dev/null; then
         MS_CUSTOM_DIR="$(grep -oP '^Custom Functions Dir\s*=\s*\K\S+' "$MS_CONF" 2>/dev/null | tail -1)"
         case "$MS_CUSTOM_DIR" in
@@ -270,6 +272,7 @@ ok "MSFE-NG installed."
 # Notify about anything in the scanning chain that is not up; every line names
 # its fix. Never fails the install.
 echo
+info "MailScanner.conf: $MS_CONF"
 info "system check (msfe-ng doctor)"
 "$BINDIR/msfe-ng" doctor || warn "the checks above reported problems — each line includes its fix"
 echo
@@ -285,6 +288,8 @@ else
     info "  1. Create the MySQL DB + user, set creds in $CONFDIR/config.toml"
     info "  2. Apply the schema:        msfe-ng db-migrate"
     info "  3. Import existing policy:  msfe-ng import /usr/msfe --save   (optional, from a legacy MSFE)"
+    info "     Keep the legacy ConfigServer MSFE until the import is verified, then decommission it"
+    info "     as the wiki describes (Migration → Decommissioning): its uninstaller also removes the engine."
     info "  4. Generate rules:          msfe-ng sync        (also runs every 10 min via cron)"
     info "  5. Enable message logging:  msfe-ng mailscanner enable-logging   (then restart MailScanner)"
     info "  6. Enable SpamBox:          msfe-ng spambox enable   (then include it in Exim)"

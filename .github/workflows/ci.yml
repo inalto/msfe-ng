@@ -70,6 +70,8 @@ jobs:
         # -S warning: info-level notes (SC2015 with an intentional `|| true`,
         # SC1091 dynamic source) are fine; warnings and errors still fail.
         run: shellcheck -S warning packaging/*.sh packaging/tests/*.sh
+      - name: lib.sh contract test
+        run: sh packaging/tests/lib.sh
       - name: exim-shim contract test
         run: sh packaging/tests/exim-shim.sh
       - name: engine-install contract test
