@@ -1,12 +1,15 @@
 //! MSFE-NG daemon (`msfe-ngd`).
 //!
-//! Listens on a Unix domain socket and speaks minimal HTTP/1.1. In M0 it serves
-//! placeholder WHM/user pages plus a `/health` endpoint. The panel shims
-//! (cPanel UAPI module, DirectAdmin CGI, WHM CGI) connect to this socket and
-//! forward the browser request, so all real logic can live here in Rust.
+//! Listens on a Unix domain socket and speaks minimal HTTP/1.1. The panel
+//! shims (cPanel UAPI module, DirectAdmin CGI, WHM CGI) connect to this socket
+//! and forward the browser request, so all real logic can live here in Rust.
 //!
-//! Dependency-free on purpose (std only) — later milestones swap in an async
-//! runtime + router. Keep the handler small until then.
+//! Dependency-free on purpose (std only). Each connection is served on its own
+//! thread — connections are short-lived and local, and a long read (a search
+//! over the whole maillog) must not stall the dashboard or the end-user page.
+//! Mutating requests are serialised by `WRITE_LOCK` so handlers that rewrite
+//! config or drive the queue never interleave, exactly as when the daemon was
+//! single-threaded.
 
 mod api;
 mod http;
@@ -19,6 +22,16 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
+use std::sync::Mutex;
+
+/// Held for the whole of every non-GET request: handlers that write policy
+/// files, run sync, or repair the queue were never concurrent and must stay so.
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Anything but a GET may change state on disk and takes `WRITE_LOCK`.
+fn is_mutating(method: &str) -> bool {
+    method != "GET"
+}
 
 fn socket_path() -> String {
     std::env::var("MSFE_NG_SOCKET").unwrap_or_else(|_| DEFAULT_SOCKET_PATH.to_string())
@@ -59,10 +72,11 @@ fn main() -> io::Result<()> {
     for stream in listener.incoming() {
         match stream {
             Ok(s) => {
-                // M0 is single-threaded; connections are short. M1 adds a pool.
-                if let Err(e) = handle(s) {
-                    eprintln!("msfe-ngd: connection error: {e}");
-                }
+                std::thread::spawn(move || {
+                    if let Err(e) = handle(s) {
+                        eprintln!("msfe-ngd: connection error: {e}");
+                    }
+                });
             }
             Err(e) => eprintln!("msfe-ngd: accept error: {e}"),
         }
@@ -75,6 +89,9 @@ fn handle(stream: UnixStream) -> io::Result<()> {
     if let Some(denied) = http::peer_scope(&mut req, peer_uid(&stream), users::username_of_uid) {
         return denied.write(stream);
     }
+    // A handler that panicked while holding the lock must not wedge the daemon.
+    let _serialised =
+        is_mutating(&req.method).then(|| WRITE_LOCK.lock().unwrap_or_else(|p| p.into_inner()));
     let panel = detect_panel();
 
     let resp = if req.path == "/health" || req.path == "/api/health" {
@@ -143,4 +160,17 @@ fn peer_uid(stream: &UnixStream) -> Option<u32> {
         )
     };
     (rc == 0 && len as usize == std::mem::size_of::<Ucred>()).then_some(cred.uid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_get_requests_skip_the_write_lock() {
+        assert!(!is_mutating("GET"));
+        for m in ["POST", "PUT", "DELETE", "PATCH", ""] {
+            assert!(is_mutating(m), "{m}");
+        }
+    }
 }
