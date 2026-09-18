@@ -40,6 +40,7 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
         ("service", Some("spool-repair")) => Some(DRY),
         ("service", _) => Some(NONE),
         ("mailscanner", _) => Some(NONE),
+        ("upgrade", _) => Some(&["--check"]),
         _ => None,
     }
 }
@@ -62,6 +63,7 @@ fn usage_of(cmd: &str) -> &'static str {
             "msfe-ng service <status|start|stop|reload|restart|queue-fix|spool-repair [--dry-run]>"
         }
         "mailscanner" => "msfe-ng mailscanner <status|enable-logging|disable-logging>",
+        "upgrade" => "msfe-ng upgrade [--check]",
         _ => "msfe-ng help",
     }
 }
@@ -98,6 +100,7 @@ fn main() -> ExitCode {
         "db-migrate" => cmd_db_migrate(args.get(1).map(String::as_str)),
         "db" => cmd_db(args.get(1).map(String::as_str)),
         "mailscanner" => cmd_mailscanner(args.get(1).map(String::as_str)),
+        "upgrade" => cmd_upgrade(args.iter().any(|a| a == "--check")),
         "sync" => cmd_sync(args.get(1).map(String::as_str)),
         "spambox" => cmd_spambox(args.get(1).map(String::as_str)),
         "selftest" => cmd_selftest(),
@@ -474,6 +477,64 @@ fn cmd_db_migrate(flag: Option<&str>) -> ExitCode {
 /// Opt-in activation of the MailScanner logging plugin. Edits the live
 /// MailScanner.conf (with a `.msfe-ng.bak` backup) and copies the plugin into
 /// MailScanner's own `Custom Functions Dir`. Never run by the installer.
+/// Upgrade MSFE-NG to the latest release (get.sh in the foreground), or
+/// just compare versions with --check.
+fn cmd_upgrade(check_only: bool) -> ExitCode {
+    use msfe_core::{service, upgrade};
+    let current = msfe_api::VERSION;
+    let Some(latest) = service::latest_version() else {
+        eprintln!("msfe-ng upgrade: cannot reach the release server");
+        return ExitCode::from(1);
+    };
+    let newer = service::version_newer(&latest, current);
+    println!(
+        "MSFE-NG {current} installed, {latest} latest{}",
+        if newer {
+            " — upgrade available"
+        } else {
+            " — up to date"
+        }
+    );
+    let cfg = Config::load(&config_path());
+    let e = upgrade::engine_update(&cfg);
+    println!(
+        "MailScanner {} installed, {} latest{}",
+        e.version.as_deref().unwrap_or("?"),
+        e.latest.as_deref().unwrap_or("?"),
+        if e.upgradable {
+            " — upgrade available: msfe-ng engine install (forced) or the Service tab"
+        } else if !e.rpm {
+            " — not the RPM engine: see the wiki, Migration"
+        } else {
+            " — up to date"
+        }
+    );
+    if check_only || !newer {
+        return ExitCode::SUCCESS;
+    }
+    if !Path::new(upgrade::GET_SCRIPT).exists() {
+        eprintln!(
+            "msfe-ng upgrade: {} not found (reinstall MSFE-NG)",
+            upgrade::GET_SCRIPT
+        );
+        return ExitCode::from(1);
+    }
+    match std::process::Command::new("sh")
+        .arg(upgrade::GET_SCRIPT)
+        .status()
+    {
+        Ok(s) if s.success() => ExitCode::SUCCESS,
+        Ok(_) => {
+            eprintln!("msfe-ng upgrade: failed (see output above)");
+            ExitCode::from(1)
+        }
+        Err(e) => {
+            eprintln!("msfe-ng upgrade: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn cmd_mailscanner(sub: Option<&str>) -> ExitCode {
     use msfe_core::mailscanner as ms;
     let cfg = Config::load(&config_path());
@@ -1249,6 +1310,7 @@ COMMANDS:
     monitor [--dry-run] Auto-clean the delivery queue, fix misfiled spool files, send Telegram alerts (cron)
     exim <status|enable-scanning|disable-scanning>   Toggle MailScanner scanning
     exim <enable|disable>-cpanel-spamassassin        cPanel's own SpamAssassin (double scan)
+    upgrade [--check]                 Upgrade MSFE-NG to the latest release (or just compare)
     service <status|start|stop|reload|restart|queue-fix|spool-repair>   MailScanner service & queues
     doctor              Check every link of the scanning chain; names each fix
     rules lint          Check managed ruleset files for unparsable lines

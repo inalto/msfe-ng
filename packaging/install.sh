@@ -53,13 +53,16 @@ PREV_VER=""
 
 # ---- core install ------------------------------------------------------------
 info "installing core files"
-mkdir -p "$BINDIR" "$WEBROOT" "$CONFDIR" "$SOCKET_DIR" "$PREFIX/db/migrations" "$PREFIX/mailscanner"
+mkdir -p "$BINDIR" "$WEBROOT" "$CONFDIR" "$SOCKET_DIR" "$PREFIX/db/migrations" "$PREFIX/mailscanner" /var/log/msfe-ng/jobs
 install -m 0755 "$BINSRC/msfe-ngd" "$BINDIR/msfe-ngd"
 install -m 0755 "$BINSRC/msfe-ng"  "$BINDIR/msfe-ng"
 # convenience symlink so admins can just run `msfe-ng`
 ln -sf "$BINDIR/msfe-ng" /usr/local/bin/msfe-ng
 # engine installer kept on disk so `msfe-ng engine install` works post-install
 install -m 0755 "$HERE/engine-install.sh" "$BINDIR/msfe-ng-engine-install"
+# bootstrap installer kept on disk: the Service tab's "Upgrade now" and
+# `msfe-ng upgrade` run it (download latest release, verify, install)
+install -m 0755 "$HERE/get.sh" "$BINDIR/msfe-ng-get"
 # `Exim Command` shim: MailScanner 5.5.3 misreads Exim 4.100's version banner
 # (cPanel 138) and misfiles every outgoing spool file; `engine configure`
 # points MailScanner.conf here (see exim-shim.sh).

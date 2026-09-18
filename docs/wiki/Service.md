@@ -62,5 +62,20 @@ Opens the [end-user panel](End-user-panel) impersonating an account (root only)
 
 ## Updates
 
-**Check for updates** compares the installed version with the latest GitHub
-release. Upgrade with the same one-liner as the install ([Installation](Installation)).
+**Check for updates** compares MSFE-NG with its latest GitHub release and the
+MailScanner engine with the latest MailScanner v5 release. When something is
+newer, an **Upgrade … now** button appears:
+
+- **Upgrade MSFE-NG now** — downloads the release, verifies its checksum and
+  runs the installer (the same as the install one-liner). The daemon restarts
+  in the middle; the console keeps polling and the page reloads once the new
+  version answers. Settings, policy and wiring are kept.
+- **Upgrade MailScanner now** — only for the RPM engine (`/usr/sbin/MailScanner`):
+  installs the newer RPM, checks its perl dependencies, re-applies *Configure
+  for Exim* and restarts MailScanner. Mail queues meanwhile. A ConfigServer
+  engine (`/usr/mailscanner`) is not upgraded in place — see [Migration](Migration).
+
+Both run as **background jobs**: transient systemd units that survive the
+daemon's own restart, logging to `/var/log/msfe-ng/jobs/<job>.log`. The job
+console under the card follows the log; reopening the tab while a job runs
+picks it up again. CLI: `msfe-ng upgrade [--check]`, `msfe-ng engine install`.

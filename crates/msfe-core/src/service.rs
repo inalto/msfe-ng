@@ -1254,12 +1254,20 @@ pub fn save_conf(path: &Path, content: &str) -> io::Result<()> {
 // ---- release check -----------------------------------------------------------
 
 const UPDATE_REPO: &str = "inalto/msfe-ng";
+/// The MailScanner project's release repository (RHEL RPMs).
+pub const MAILSCANNER_REPO: &str = "MailScanner/v5";
 
 /// Latest released version, resolved on demand from the GitHub release-page
 /// redirect via curl (the codebase has no TLS client). Never called
 /// automatically — only from the admin's explicit "check for updates".
 pub fn latest_version() -> Option<String> {
     let repo = std::env::var("MSFE_NG_UPDATE_REPO").unwrap_or_else(|_| UPDATE_REPO.to_string());
+    latest_release(&repo)
+}
+
+/// Latest release tag of any GitHub repo, `v` prefix dropped (`5.5.3-2` for
+/// MailScanner, `0.0.49` for us).
+pub fn latest_release(repo: &str) -> Option<String> {
     let url = format!("https://github.com/{repo}/releases/latest");
     let out = Command::new("curl")
         .args([
@@ -1280,12 +1288,33 @@ pub fn latest_version() -> Option<String> {
     extract_tag(String::from_utf8_lossy(&out.stdout).trim())
 }
 
-/// `…/releases/tag/v1.2.3` → `1.2.3`.
+/// `…/releases/tag/v1.2.3` → `1.2.3`; `…/tag/5.5.3-2` → `5.5.3-2`. Only a
+/// tag that starts with a digit (after an optional `v`) is a release.
 fn extract_tag(url: &str) -> Option<String> {
     let tag = url.rsplit('/').next()?;
-    let ver = tag.strip_prefix('v')?;
-    (!ver.is_empty() && ver.bytes().all(|b| b.is_ascii_digit() || b == b'.'))
-        .then(|| ver.to_string())
+    let ver = tag.strip_prefix('v').unwrap_or(tag);
+    (ver.bytes().next().is_some_and(|b| b.is_ascii_digit())
+        && ver
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b == b'.' || b == b'-'))
+    .then(|| ver.to_string())
+}
+
+/// Leading numeric components of a version (`5.5.3-2` → `[5, 5, 3]`); the
+/// RPM re-release suffix is not part of it.
+pub fn version_parts(v: &str) -> Vec<u32> {
+    v.split('-')
+        .next()
+        .unwrap_or("")
+        .split('.')
+        .map_while(|p| p.parse().ok())
+        .collect()
+}
+
+/// Is `latest` a newer release than `current` (numeric, component-wise)?
+pub fn version_newer(latest: &str, current: &str) -> bool {
+    let (l, c) = (version_parts(latest), version_parts(current));
+    !l.is_empty() && l > c
 }
 
 #[cfg(test)]
@@ -1595,5 +1624,20 @@ mod tests {
             extract_tag("https://github.com/x/y/releases/tag/main"),
             None
         );
+        assert_eq!(
+            extract_tag("https://github.com/MailScanner/v5/releases/tag/5.5.3-2"),
+            Some("5.5.3-2".into())
+        );
+    }
+
+    #[test]
+    fn version_comparison_ignores_the_rpm_release_suffix() {
+        assert!(version_newer("0.0.50", "0.0.49"));
+        assert!(version_newer("0.1.0", "0.0.49"));
+        assert!(!version_newer("0.0.49", "0.0.49"));
+        assert!(!version_newer("0.0.48", "0.0.49"));
+        assert!(version_newer("5.5.4-1", "5.5.3"));
+        assert!(!version_newer("5.5.3-3", "5.5.3"));
+        assert!(!version_newer("main", "0.0.49"));
     }
 }

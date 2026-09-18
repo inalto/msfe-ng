@@ -19,6 +19,7 @@ pub mod doctor;
 pub mod engine;
 pub mod geoip;
 pub mod housekeeping;
+pub mod jobs;
 pub mod json;
 pub mod layout;
 pub mod legacy;
@@ -40,6 +41,7 @@ pub mod spambox;
 pub mod stats;
 pub mod sync;
 pub mod telegram;
+pub mod upgrade;
 pub mod users;
 
 pub use config::Config;

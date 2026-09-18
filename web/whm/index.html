@@ -1183,20 +1183,81 @@ async function renderService(){
       }})));
     uc.append(imp);
   }
+  // Updates: MSFE-NG itself and the MailScanner engine, each upgradable from
+  // here as a background job (a transient systemd unit — it survives the
+  // daemon's own restart) whose log the job console follows.
   const up=el('div',{class:'card'},el('h2',{},'Updates'));
   const upline=el('div',{class:'statline'},el('span',{class:'muted'},'MSFE-NG v{{VERSION}}'));
+  const engline=el('div',{class:'statline'},el('span',{class:'muted'},'MailScanner engine — check for updates to compare'));
   const upBtn=el('button',{class:'act plain'},'Check for updates');
+  const selfBtn=el('button',{class:'act',style:'display:none'},'Upgrade MSFE-NG now');
+  const engBtn=el('button',{class:'act',style:'display:none'},'Upgrade MailScanner now');
+  const jobCon=el('div',{style:'display:none;margin-top:.5rem'});
+  const jobTitle=el('div',{class:'muted',style:'margin:.25rem 0;font-size:.8rem'});
+  const jobPre=el('pre',{class:'log',style:'max-height:22rem'});
+  jobCon.append(jobTitle,jobPre);
+  let jobTimer=null;
+  // Follow a job: poll its status + log; fetch failures while the daemon is
+  // being replaced are expected and just shown.
+  function followJob(name,label,onDone){
+    clearInterval(jobTimer);jobCon.style.display='';jobTitle.textContent=`${label} — running`;jobPre.textContent='';
+    let failures=0;
+    const tick=async()=>{
+      let s;
+      try{s=await api(`/api/jobs/${name}`);}catch(e){s=null;}
+      if(!s||s.error){
+        failures++;jobTitle.textContent=`${label} — daemon restarting… (${failures})`;
+        if(failures>90){clearInterval(jobTimer);jobTitle.textContent=`${label} — lost contact with the daemon; check ${name}.log in /var/log/msfe-ng/jobs`;}
+        return;
+      }
+      failures=0;jobPre.textContent=s.log||'(no output yet)';jobPre.scrollTop=jobPre.scrollHeight;
+      if(s.running){jobTitle.textContent=`${label} — running`;return;}
+      clearInterval(jobTimer);jobTimer=null;
+      if(s.exit===0){jobTitle.textContent=`${label} — finished`;onDone&&onDone();}
+      else jobTitle.textContent=`${label} — ${s.exit==null?'interrupted':'FAILED (exit '+s.exit+')'} — full log: ${s.log_path}`;
+    };
+    tick();jobTimer=setInterval(tick,2000);
+  }
+  async function startJob(name,label,onDone){
+    const r=await api(`/api/jobs/${name}`,{method:'POST'});
+    if(!r||!r.ok){toast(r&&r.error||'cannot start');return;}
+    followJob(name,label,onDone);
+  }
+  selfBtn.onclick=()=>{
+    if(!confirm(`Upgrade MSFE-NG to v${selfBtn.dataset.latest}?\n\nThe release is downloaded and verified, then installed; the daemon restarts (a few seconds without the console). Settings, policy and wiring are kept.`))return;
+    startJob('upgrade','Upgrade MSFE-NG',()=>{
+      // the new daemon is up when /api/health reports another version
+      const t=setInterval(async()=>{try{const h=await api('/api/health');if(h&&h.version&&h.version!=='{{VERSION}}'){clearInterval(t);location.reload();}}catch(e){}},2000);
+    });
+  };
+  engBtn.onclick=()=>{
+    if(!confirm(`Upgrade MailScanner to ${engBtn.dataset.latest}?\n\nThe RPM is downloaded and verified, its dependencies checked, the configuration re-applied and MailScanner restarted. Takes a few minutes; mail queues meanwhile.`))return;
+    startJob('engine-upgrade','Upgrade MailScanner',()=>refreshStatus());
+  };
   upBtn.onclick=async()=>{
     upBtn.disabled=true;
     const r=await api('/api/service/update');
     upBtn.disabled=false;
-    upline.innerHTML='';
-    if(!r||!r.latest){upline.append(el('span',{class:'muted'},'Could not reach the release server.'));return;}
-    if(r.latest===r.current)upline.append(el('span',{style:'color:var(--good)'},`v${r.current} — up to date`));
-    else upline.append(el('span',{style:'color:var(--warning)'},`v${r.latest} available (installed v${r.current}) — `),
+    upline.innerHTML='';engline.innerHTML='';selfBtn.style.display='none';engBtn.style.display='none';
+    if(!r||!r.latest){upline.append(el('span',{class:'muted'},'Could not reach the release server.'));}
+    else if(!r.upgradable)upline.append(el('span',{style:'color:var(--good)'},`MSFE-NG v${r.current} — up to date`));
+    else{upline.append(el('span',{style:'color:var(--warning)'},`MSFE-NG v${r.latest} available (installed v${r.current}) — `),
       el('a',{href:'https://github.com/inalto/msfe-ng/releases',target:'_blank'},'release notes'));
+      selfBtn.dataset.latest=r.latest;selfBtn.style.display='';}
+    const e=r&&r.engine;
+    if(!e||!e.version)engline.append(el('span',{class:'muted'},'MailScanner engine: version unknown'));
+    else if(!e.rpm)engline.append(el('span',{class:'muted'},`MailScanner ${e.version} (not the RPM engine — an in-place upgrade is not offered; see the wiki, Migration)`));
+    else if(!e.latest)engline.append(el('span',{class:'muted'},`MailScanner ${e.version} — could not reach the MailScanner release server`));
+    else if(!e.upgradable)engline.append(el('span',{style:'color:var(--good)'},`MailScanner ${e.version} — up to date (latest ${e.latest})`));
+    else{engline.append(el('span',{style:'color:var(--warning)'},`MailScanner ${e.latest} available (installed ${e.version}) — `),
+      el('a',{href:'https://github.com/MailScanner/v5/releases',target:'_blank'},'release notes'));
+      engBtn.dataset.latest=e.latest;engBtn.style.display='';}
   };
-  up.append(upline,upBtn);uc.append(up);
+  up.append(upline,engline,el('div',{class:'ctl'},upBtn,selfBtn,engBtn),jobCon);uc.append(up);
+  // a job started earlier (or from another window) is still worth following
+  for(const [n,l] of [['upgrade','Upgrade MSFE-NG'],['engine-upgrade','Upgrade MailScanner']]){
+    api(`/api/jobs/${n}`).then(s=>{if(s&&s.running)followJob(n,l,n==='engine-upgrade'?()=>refreshStatus():null);}).catch(()=>{});
+  }
 
   refreshStatus();refreshQueue();
 }

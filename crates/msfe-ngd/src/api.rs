@@ -992,7 +992,8 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
         ("GET", "/api/service/rules/view") => service_rules_view(req, cfg),
         ("GET", "/api/service/conf") => service_conf_read(req, cfg, config_file),
         ("PUT", "/api/service/conf") => service_conf_write(req, cfg, config_file),
-        ("GET", "/api/service/update") => service_update(),
+        ("GET", "/api/service/update") => service_update(cfg),
+        (m, p) if p.starts_with("/api/jobs/") => jobs_route(m, &p["/api/jobs/".len()..], req, cfg),
 
         // ---- structured rule management (root-only admin surface) -----------
         ("GET", "/api/rules/files") => rules_files(config_file),
@@ -1993,16 +1994,90 @@ fn service_conf_write(req: &Request, cfg: &Config, config_file: &Path) -> Respon
     }
 }
 
-fn service_update() -> Response {
+fn service_update(cfg: &Config) -> Response {
     let latest = service::latest_version();
+    let upgradable = latest
+        .as_deref()
+        .is_some_and(|l| service::version_newer(l, msfe_api::VERSION));
+    let e = msfe_core::upgrade::engine_update(cfg);
+    let opt = |v: Option<String>| v.map(Json::Str).unwrap_or(Json::Null);
     Response::json(
         200,
         &Json::Object(vec![
             ("current".into(), Json::str(msfe_api::VERSION)),
-            ("latest".into(), latest.map(Json::Str).unwrap_or(Json::Null)),
+            ("latest".into(), opt(latest)),
+            ("upgradable".into(), Json::Bool(upgradable)),
+            (
+                "engine".into(),
+                Json::Object(vec![
+                    ("version".into(), opt(e.version)),
+                    ("latest".into(), opt(e.latest)),
+                    ("rpm".into(), Json::Bool(e.rpm)),
+                    ("upgradable".into(), Json::Bool(e.upgradable)),
+                ]),
+            ),
         ])
         .to_string(),
     )
+}
+
+/// Background jobs (`msfe_core::jobs`): GET status + log tail, POST start.
+/// Only the named upgrade jobs exist; a job is never a command from the API.
+fn jobs_route(method: &str, name: &str, req: &Request, cfg: &Config) -> Response {
+    use msfe_core::{jobs, upgrade};
+    if name != upgrade::SELF_JOB && name != upgrade::ENGINE_JOB {
+        return Response::json(404, r#"{"error":"no such job"}"#);
+    }
+    match method {
+        "GET" => {
+            let s = jobs::status(name);
+            Response::json(
+                200,
+                &Json::Object(vec![
+                    ("name".into(), Json::str(name)),
+                    ("known".into(), Json::Bool(s.known)),
+                    ("running".into(), Json::Bool(s.running)),
+                    (
+                        "exit".into(),
+                        s.exit.map(|c| Json::Int(c as i64)).unwrap_or(Json::Null),
+                    ),
+                    ("log".into(), Json::str(&s.log_tail)),
+                    (
+                        "log_path".into(),
+                        Json::Str(
+                            jobs::dir()
+                                .join(format!("{name}.log"))
+                                .display()
+                                .to_string(),
+                        ),
+                    ),
+                ])
+                .to_string(),
+            )
+        }
+        "POST" => {
+            if jobs::status(name).running {
+                return Response::json(409, r#"{"error":"already running"}"#);
+            }
+            let v = Json::parse(&req.body).unwrap_or(Json::Null);
+            let res = if name == upgrade::SELF_JOB {
+                upgrade::start_self(v.get("version").and_then(Json::as_str))
+            } else {
+                let e = upgrade::engine_update(cfg);
+                match (e.upgradable, e.latest) {
+                    (true, Some(latest)) => upgrade::start_engine(&latest),
+                    _ => Err(std::io::Error::other(
+                        "the engine is not upgradable in place (not the RPM engine, or no newer release)",
+                    )),
+                }
+            };
+            match res {
+                Ok(()) => Response::json(200, r#"{"ok":true}"#),
+                Err(e) => Response::json(500, &format!("{{\"error\":\"{e}\"}}")),
+            }
+        }
+        _ => Response::json(405, r#"{"error":"method not allowed"}"#),
+    }
 }
 
 fn policy_json(settings: &[(String, String)], wl: &[String], bl: &[String]) -> Json {
@@ -2364,6 +2439,25 @@ mod tests {
             ..Default::default()
         };
         (d, cfg)
+    }
+
+    #[test]
+    fn jobs_api_knows_only_the_upgrade_jobs() {
+        let d = std::env::temp_dir().join(format!("msfe-api-jobs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::env::set_var("MSFE_NG_JOBS_DIR", &d);
+        let cfg = Config::default();
+        let (st, _) = send(handle(&get("/api/jobs/rm-rf", ""), &cfg, &d));
+        assert_eq!(st, 404);
+        let (st, body) = send(handle(&get("/api/jobs/upgrade", ""), &cfg, &d));
+        assert_eq!(st, 200);
+        assert!(
+            body.contains(r#""known":false"#) && body.contains(r#""running":false"#),
+            "{body}"
+        );
+        assert!(body.contains(r#""exit":null"#), "{body}");
+        std::env::remove_var("MSFE_NG_JOBS_DIR");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
