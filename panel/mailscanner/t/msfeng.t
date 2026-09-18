@@ -104,4 +104,9 @@ MailScanner::CustomConfig::EndMSFENGLogging();
 MailScanner::CustomConfig::MSFENGLogging(message('m4'));
 ok((grep { $_ eq 'm4' } rows()), 'reconnects after End');
 
+# Release the plugin's connection before global destruction: DBD::SQLite on
+# perl 5.26 (EL8) can segfault when a live handle is torn down at exit,
+# which would fail the run after every test passed.
+MailScanner::CustomConfig::EndMSFENGLogging();
+
 done_testing;
