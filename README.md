@@ -11,11 +11,23 @@ ConfigServer MailScanner Front-End (MSFE). It reads MSFE's old config files so
 you can migrate, but ships **no licensing, no phone-home, and no obfuscation** —
 just maintainable, auditable code.
 
-> **Status: v0.0.39 — in production.** Runs on a live cPanel/Exim server:
+> **Status: v0.0.48 — in production.** Runs on a live cPanel/Exim server:
 > installs (optionally including MailScanner itself), wires Exim to the scanner,
 > logs and archives every message to MySQL, manages the queues, and alerts via
 > Telegram. Releases are tagged continuously; upgrade in place with the same
 > one-liner as the install.
+
+## Install
+
+One line, as root on a cPanel/WHM or DirectAdmin server — it downloads the
+latest release, verifies it and installs (or upgrades in place):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/inalto/msfe-ng/main/packaging/get.sh | sh
+```
+
+See [Quick start](#quick-start-as-root-on-a-cpanel-or-directadmin-server) for
+installing MailScanner along with it and for the first-time setup commands.
 
 ## Screenshots
 
@@ -67,7 +79,7 @@ per tab of the admin UI, plus the end-user panel, CLI and troubleshooting.
 ## Quick start (as root on a cPanel or DirectAdmin server)
 
 ```sh
-# bootstrap: download + verify the latest release, then install
+# bootstrap: download + verify the latest release, then install (see Install above)
 curl -fsSL https://raw.githubusercontent.com/inalto/msfe-ng/main/packaging/get.sh | sh
 
 # no MailScanner yet? let the installer set it up too:

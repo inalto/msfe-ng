@@ -8,7 +8,7 @@
 <body>
   <div class="app">
     <aside class="rail">
-      <div class="brand"><span class="logo">MS</span><b>MSFE-NG</b></div>
+      <div class="brand"><span class="logo">MS</span><b>MSFE-NG</b><button class="iconbtn railtoggle" id="railtoggle" title="Collapse the sidebar">«</button></div>
       <nav id="tabs" aria-label="Sections">
         <button data-tab="dash" aria-selected="true"><span class="ico">◧</span>Dashboard</button>
         <button data-tab="settings" aria-selected="false"><span class="ico">⚙</span>Settings</button>
@@ -26,7 +26,7 @@
         <div style="display:flex;align-items:center;gap:.4rem">
           <button class="iconbtn" id="themebtn" title="Toggle light / dark / auto">◑ Theme</button>
         </div>
-        <div>{{VIEW}} · {{PANEL}} · v{{VERSION}}</div>
+        <div class="version">{{VIEW}} · {{PANEL}} · v{{VERSION}}</div>
       </div>
     </aside>
     <div class="content">
@@ -73,8 +73,22 @@ const rlbl=r=>r.reloaded?'reloaded':(r.changed===0?'no reload needed (unchanged)
   const apply=t=>t==='light'||t==='dark'?document.documentElement.setAttribute('data-theme',t):document.documentElement.removeAttribute('data-theme');
   let cur=localStorage.getItem(KEY)||'auto';apply(cur);
   const btn=$('#themebtn');
-  if(btn){const sync=()=>btn.textContent=label[cur]||'◑ Theme';sync();
+  if(btn){const sync=()=>{const l=label[cur]||'◑ Theme';const mini=document.querySelector('.app.mini');btn.textContent=mini?l.slice(0,1):l;btn.title=mini?l.slice(2)+' (click to change)':'Toggle light / dark / auto';};sync();
+    window.syncTheme=sync;
     btn.onclick=()=>{cur=cur==='auto'?'light':cur==='light'?'dark':'auto';try{localStorage.setItem(KEY,cur);}catch(e){}apply(cur);sync();};}
+})();
+
+// rail: full width with labels, or icons only; persisted.
+(function(){
+  const KEY='msfe-rail',app=$('.app'),btn=$('#railtoggle');
+  if(!app||!btn)return;
+  const nav=[...document.querySelectorAll('#tabs button')];
+  const apply=mini=>{app.classList.toggle('mini',mini);btn.textContent=mini?'»':'«';btn.title=mini?'Expand the sidebar':'Collapse the sidebar';
+    nav.forEach(b=>{if(mini)b.title=[...b.childNodes].filter(n=>n.nodeType===3).map(n=>n.textContent).join('').trim();else b.removeAttribute('title');});
+    if(window.syncTheme)window.syncTheme();};
+  let mini=false;try{mini=localStorage.getItem(KEY)==='mini';}catch(e){}
+  apply(mini);
+  btn.onclick=()=>{mini=!mini;try{localStorage.setItem(KEY,mini?'mini':'full');}catch(e){}apply(mini);};
 })();
 
 // ---- modal -------------------------------------------------------------------
@@ -334,6 +348,7 @@ $('#tabs').addEventListener('click',e=>{
   clearInterval(msgTimer);msgTimer=null;
   clearInterval(dashTimer);dashTimer=null;
   document.querySelectorAll('#tabs button').forEach(x=>x.setAttribute('aria-selected',x===b));
+  $('#view').classList.toggle('fill',b.dataset.tab==='logs');
   tabs[b.dataset.tab]();
 });
 
@@ -1176,7 +1191,7 @@ async function renderLogs(){
   const lctl=el('div',{class:'ctl'});lc.append(lctl);
   const lsrc=el('select');[['mail','Mail log (MailScanner/syslog)'],['exim','Exim mainlog (deliveries)']].forEach(([val,lbl])=>lsrc.append(el('option',{value:val},lbl)));
   const lsel=el('select');[100,300,1000].forEach(n=>lsel.append(el('option',{value:n},n+' lines')));
-  const pre=el('pre',{class:'log',style:'max-height:30rem'},'Loading…');
+  const pre=el('pre',{class:'log'},'Loading…');
   const which=()=>lsrc.value==='exim'?'&which=exim':'';
   // Search state: hits are [file, line-start offset] across the live log and
   // its rotated siblings; the viewer only ever holds a window around one hit.

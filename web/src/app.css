@@ -124,7 +124,8 @@
   .app {
     display: grid;
     grid-template-columns: 15rem 1fr;
-    min-height: 100vh;
+    height: 100vh;
+    transition: grid-template-columns 0.15s ease;
   }
   .rail {
     @apply bg-surface;
@@ -158,6 +159,11 @@
   .rail .brand b {
     font-size: 0.9rem;
     letter-spacing: -0.01em;
+  }
+  .rail .brand .railtoggle {
+    margin-left: auto;
+    padding: 0.15rem 0.45rem;
+    line-height: 1.3;
   }
   .rail nav {
     display: flex;
@@ -213,9 +219,73 @@
   }
   .content {
     min-width: 0;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
   }
   .content > main {
     padding: 1.25rem 1.4rem;
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+  }
+  /* a tab that wants the whole height (Logs): the card stretches to the
+     bottom and its log pane takes whatever is left */
+  .content > main.fill {
+    display: flex;
+    flex-direction: column;
+  }
+  main.fill .card.logs {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    margin-bottom: 0;
+  }
+  main.fill .card.logs pre.log {
+    flex: 1;
+    min-height: 8rem;
+    max-height: none;
+  }
+
+  /* ---- collapsed rail: icons only, labels as tooltips ------------------- */
+  @media (min-width: 721px) {
+    .app.mini {
+      grid-template-columns: 3.6rem 1fr;
+    }
+    .app.mini .rail {
+      padding-left: 0.45rem;
+      padding-right: 0.45rem;
+    }
+    .app.mini .rail .brand {
+      flex-direction: column;
+      gap: 0.5rem;
+      padding-bottom: 0.7rem;
+    }
+    .app.mini .rail .brand b,
+    .app.mini .rail .foot .version,
+    .app.mini .rail .health span:last-child {
+      display: none;
+    }
+    .app.mini .rail .brand .railtoggle {
+      margin-left: 0;
+    }
+    .app.mini .rail nav button {
+      font-size: 0; /* hides the label text node; the icon keeps its size */
+      justify-content: center;
+      padding: 0.55rem 0;
+    }
+    .app.mini .rail nav button .ico {
+      font-size: 0.95rem;
+      width: auto;
+    }
+    .app.mini .rail .health {
+      justify-content: center;
+      padding: 0.4rem 0;
+    }
+    .app.mini .rail .foot {
+      align-items: center;
+    }
   }
   .topbar {
     display: flex;
