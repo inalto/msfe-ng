@@ -146,13 +146,17 @@ elif ! perl_has Mail::SpamAssassin; then
     fi
 fi
 
-# Perl DBI + DBD::mysql: needed by the MSFE-NG logging plugin to record
+# Perl DBI + a MySQL driver: needed by the MSFE-NG logging plugin to record
 # scanned messages into the database.
 if [ "$DRY" = 1 ]; then
-    info "would ensure perl DBI + DBD::mysql are installed"
+    info "would ensure perl DBI + DBD::mysql/DBD::MariaDB are installed"
 else
     perl_has DBI || run "$PKG" -y install perl-DBI || true
-    perl_has DBD::mysql || run "$PKG" -y install perl-DBD-MySQL || true
+    # EL9's perl-DBD-MySQL is uninstallable beside the MariaDB repo's packages
+    # (needs mysql-libs, obsoleted by MariaDB-common): fall back to DBD::MariaDB
+    perl_has DBD::mysql || perl_has DBD::MariaDB \
+        || run "$PKG" -y install perl-DBD-MySQL \
+        || run "$PKG" -y install perl-DBD-MariaDB || true
 fi
 
 # ClamAV: install clamd + signatures unless opted out (MSFE_NG_NO_CLAMAV=1).

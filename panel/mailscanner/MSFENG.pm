@@ -25,9 +25,12 @@ use warnings;
 
 use Sys::Hostname qw(hostname);
 
-# DBI/DBD::mysql are only needed once a message is logged, and only in the live
-# MailScanner environment. require (not use) so `perl -c` passes on CI hosts
-# without the driver installed.
+# DBI and a MySQL driver are only needed once a message is logged, and only in
+# the live MailScanner environment. require (not use) so `perl -c` passes on
+# CI hosts without the driver installed. Either DBD::mysql or DBD::MariaDB
+# works: on a cPanel host running MariaDB from the MariaDB repo, EL9's
+# perl-DBD-MySQL is uninstallable (it needs mysql-libs, which MariaDB-common
+# obsoletes), so perl-DBD-MariaDB is what gets installed there.
 
 my $CONF_FILE = $ENV{MSFE_NG_CONFIG} || '/etc/msfe-ng/config.toml';
 our @COLS;   # insert column list, intersected with the live table at connect
@@ -89,8 +92,18 @@ sub read_db_config {
 
 # ---- per-child persistent connection ----------------------------------------
 
+# The installed driver: DBD::mysql, else DBD::MariaDB (same wire protocol,
+# same DSN keys). Undef when neither loads — connect then fails and logs it.
+sub db_driver {
+    for my $d (qw(mysql MariaDB)) {
+        return $d if eval { require "DBD/$d.pm"; 1 };
+    }
+    return;
+}
+
 sub db_dsn {
-    return "DBI:mysql:database=$DB{db_name};host=$DB{db_host};port=$DB{db_port}";
+    my $driver = db_driver() || 'mysql';
+    return "DBI:$driver:database=$DB{db_name};host=$DB{db_host};port=$DB{db_port}";
 }
 
 sub db_connect {
@@ -98,9 +111,10 @@ sub db_connect {
     require DBI;
     # AutoInactiveDestroy: MailScanner children fork helpers (virus scanners
     # etc.); their exit must not tear down the connection they inherited.
-    $DBH = DBI->connect(db_dsn(), $DB{db_user}, $DB{db_pass},
-        { PrintError => 0, RaiseError => 0, AutoInactiveDestroy => 1,
-          mysql_enable_utf8mb4 => 1 });
+    # DBD::MariaDB speaks utf8mb4 by default; DBD::mysql must be told.
+    my %attr = ( PrintError => 0, RaiseError => 0, AutoInactiveDestroy => 1 );
+    $attr{mysql_enable_utf8mb4} = 1 if (db_driver() || '') eq 'mysql';
+    $DBH = DBI->connect(db_dsn(), $DB{db_user}, $DB{db_pass}, \%attr);
     unless ($DBH) {
         $LAST_FAIL = time;
         _log("MSFE-NG: DB connect failed: $DBI::errstr");

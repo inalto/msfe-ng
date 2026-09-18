@@ -172,32 +172,57 @@ pub(crate) fn perl_module_ok(perl: &[String], module: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// The perl modules the logging plugin needs (`DBI`, `DBD::mysql`) and the
-/// packages that provide them.
-pub const LOGGING_MODULES: [(&str, &str); 2] =
-    [("DBI", "perl-DBI"), ("DBD::mysql", "perl-DBD-MySQL")];
+/// MySQL drivers the logging plugin can use, with the package providing each.
+/// EL9's perl-DBD-MySQL needs mysql-libs, which MariaDB-common (the MariaDB
+/// repo cPanel hosts use) obsoletes — perl-DBD-MariaDB installs there instead.
+pub const DB_DRIVERS: [(&str, &str); 2] = [
+    ("DBD::mysql", "perl-DBD-MySQL"),
+    ("DBD::MariaDB", "perl-DBD-MariaDB"),
+];
 
-/// Make sure the plugin's perl modules load under the engine's perl:
-/// `dnf install`, then `cpanm` as a fallback. Missing modules fail silently
-/// from the operator's viewpoint (errors only in the mail log), so this is
-/// surfaced — and repaired — wherever logging is set up or checked.
+/// The DB driver that loads under the engine's perl, if any.
+pub fn db_driver(perl: &[String]) -> Option<&'static str> {
+    DB_DRIVERS
+        .iter()
+        .find(|(m, _)| perl_module_ok(perl, m))
+        .map(|(m, _)| *m)
+}
+
+/// Make sure the plugin's perl modules load under the engine's perl: DBI,
+/// then one of the DB drivers — `dnf install` each candidate, `cpanm` as a
+/// last resort. Missing modules fail silently from the operator's viewpoint
+/// (errors only in the mail log), so this is surfaced — and repaired —
+/// wherever logging is set up or checked.
 pub fn ensure_logging_modules(cfg: &Config) -> Vec<String> {
     let mut log = Vec::new();
     let perl = crate::layout::resolve(cfg).perl;
-    for (module, pkg) in LOGGING_MODULES {
-        if perl_module_ok(&perl, module) {
-            continue;
-        }
-        let _ = Command::new("dnf").args(["-y", "install", pkg]).output();
-        if !perl_module_ok(&perl, module) {
-            let _ = Command::new("cpanm").args(["--notest", module]).output();
-        }
-        if perl_module_ok(&perl, module) {
-            log.push(format!("installed missing perl module {module} ({pkg})"));
+    if !perl_module_ok(&perl, "DBI") {
+        let _ = Command::new("dnf")
+            .args(["-y", "install", "perl-DBI"])
+            .output();
+        if perl_module_ok(&perl, "DBI") {
+            log.push("installed missing perl module DBI (perl-DBI)".into());
         } else {
-            log.push(format!(
-                "WARNING: perl module {module} is missing and could not be installed — messages will NOT be recorded until it is (dnf install {pkg} or cpanm {module})"
-            ));
+            log.push("WARNING: perl module DBI is missing and could not be installed — messages will NOT be recorded until it is (dnf install perl-DBI)".into());
+        }
+    }
+    if db_driver(&perl).is_none() {
+        for (module, pkg) in DB_DRIVERS {
+            let _ = Command::new("dnf").args(["-y", "install", pkg]).output();
+            if perl_module_ok(&perl, module) {
+                log.push(format!("installed missing perl module {module} ({pkg})"));
+                break;
+            }
+        }
+    }
+    if db_driver(&perl).is_none() {
+        let _ = Command::new("cpanm")
+            .args(["--notest", "DBD::MariaDB"])
+            .output();
+        if let Some(m) = db_driver(&perl) {
+            log.push(format!("installed missing perl module {m} (cpanm)"));
+        } else {
+            log.push("WARNING: no MySQL driver (DBD::mysql or DBD::MariaDB) could be installed — messages will NOT be recorded until one is (dnf install perl-DBD-MariaDB, or cpanm DBD::MariaDB)".into());
         }
     }
     log

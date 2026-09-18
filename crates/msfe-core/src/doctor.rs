@@ -612,22 +612,30 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
         "Dashboard → Enable message logging (or msfe-ng mailscanner enable-logging)",
     ));
     if logging {
-        for (module, pkg) in setup::LOGGING_MODULES {
-            let ok = setup::perl_module_ok(&lay.perl, module);
+        let dbi = setup::perl_module_ok(&lay.perl, "DBI");
+        out.push(check(
+            "logging perl modules",
+            dbi,
+            Level::Fail,
+            if dbi {
+                "DBI loads".into()
+            } else {
+                "DBI missing — the logging plugin cannot write to the DB".into()
+            },
+            "msfe-ng doctor --fix (dnf -y install perl-DBI)",
+        ));
+        if dbi {
+            let driver = setup::db_driver(&lay.perl);
             out.push(check(
-                "logging perl modules",
-                ok,
+                "logging DB driver",
+                driver.is_some(),
                 Level::Fail,
-                if ok {
-                    format!("{module} loads")
-                } else {
-                    format!("{module} missing — the logging plugin cannot write to the DB")
+                match driver {
+                    Some(m) => format!("{m} loads"),
+                    None => "no MySQL driver (DBD::mysql or DBD::MariaDB) — the logging plugin cannot write to the DB".into(),
                 },
-                &format!("dnf -y install {pkg}"),
+                "msfe-ng doctor --fix (dnf -y install perl-DBD-MariaDB — perl-DBD-MySQL conflicts with the MariaDB repo's packages)",
             ));
-            if !ok {
-                break;
-            }
         }
         // the plugin (group mail) must read the credentials; the world must not
         use std::os::unix::fs::MetadataExt;
@@ -1240,7 +1248,7 @@ pub fn plan(checks: &[Check], engine_targets_exim: bool) -> Vec<Fix> {
         .any(|c| c.name == "safety switch (run_mailscanner)" && c.level == Level::Ok);
     for c in checks.iter().filter(|c| c.level != Level::Ok) {
         let fix = match c.name {
-            "logging perl modules" => Some(Fix::LoggingModules),
+            "logging perl modules" | "logging DB driver" => Some(Fix::LoggingModules),
             "engine configured for Exim"
             | "MailScanner reads the Exim message-id format"
             | "Bayes DB shared with MailScanner"

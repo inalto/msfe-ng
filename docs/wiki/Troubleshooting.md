@@ -14,7 +14,9 @@ top of the admin UI and the health dot in the rail.
 
 `msfe-ng doctor --fix` (the banner's **Fix what can be fixed**) applies the
 mechanical fixes first, then reports: installs the logging plugin's perl
-modules (`DBI`, `DBD::mysql`) and restarts MailScanner; re-runs *Configure for
+modules (`DBI` and a MySQL driver — `DBD::mysql`, or `DBD::MariaDB` where
+`perl-DBD-MySQL` cannot be installed beside the MariaDB repo's packages) and
+restarts MailScanner; re-runs *Configure for
 Exim* for anything it owns (Razor identity, Pyzor/Bayes homes, envelope-sender
 header, archive dir, spam-check size, the Exim message-id shim) — only on an
 engine already set to `MTA = exim`; runs the phishing-list updater; `sync`
