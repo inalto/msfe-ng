@@ -167,7 +167,7 @@ msfe-ng db <backup|fix|bayes-repair|bayes-recreate>
 msfe-ng mailscanner <status|enable-logging|disable-logging>
 msfe-ng spambox <enable|disable|status>
 msfe-ng digest [--dry-run] | housekeeping | selftest
-msfe-ng exim <status|enable-scanning|disable-scanning>
+msfe-ng exim <status|enable-scanning|disable-scanning|enable-cpanel-spamassassin|disable-cpanel-spamassassin>
 msfe-ng backup <file.tgz> | restore <file.tgz>
 ```
 

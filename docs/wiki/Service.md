@@ -20,6 +20,15 @@ the right.
   incoming spool directory. Safe to re-run.
 - **Enable / Disable MailScanner (mailflow)** — the instant kill switch: with
   scanning disabled, mail bypasses MailScanner entirely (Exim delivers directly).
+- **Disable cPanel SpamAssassin (double scan)** (cPanel only) — cPanel's own
+  Apache SpamAssassin runs in Exim *before* MailScanner sees the message, for
+  every account with Spam Filters on (or all of them under WHM's *Forced
+  Global ON*): two scores, two thresholds, cPanel's own `+spam` folders.
+  The button sets WHM's *Forced Global OFF* (`/etc/global_spamassassin_disable`;
+  no Exim rebuild) so MailScanner is the only spam scanner; *Re-enable* goes
+  back to each account's own setting. The status line and the doctor check
+  *cPanel SpamAssassin double scan* show which applies. CLI:
+  `msfe-ng exim <enable|disable>-cpanel-spamassassin`.
 - **Update rules now** — runs a sync immediately (also every 10 min by cron).
 - **Wire Exim → MailScanner / Unwire** — adds (or removes) the Exim named queue
   that holds incoming mail for scanning. **Preview wiring (dry-run)** prints

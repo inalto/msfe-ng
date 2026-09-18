@@ -179,6 +179,16 @@ Lists that never answer are dead: SORBS shut down in 2024, yet MailScanner
 SORBS), so every message waited on it until `Spam List Timeout`. *Configure
 for Exim* drops undefined and known-defunct entries from `Spam List`.
 
+## Lint: `envelope_sender_header … should match X-YourOrg-MailScanner-From`
+
+MailScanner stamps the envelope sender into the header named by its
+`Envelope From Header` directive (`X-%org-name%-MailScanner-From`) and
+SpamAssassin must be told the same name in `spamassassin.conf`
+(`envelope_sender_header`), or SPF and `whitelist_from` look at the wrong
+sender. *Configure for Exim* / `msfe-ng engine configure` sets it from the
+directive; the doctor check *SpamAssassin envelope-sender header* warns while
+they differ.
+
 ## A spam shows as `not spam (too large)`
 
 MailScanner skips *every* spam check — RBLs and SpamAssassin — for messages

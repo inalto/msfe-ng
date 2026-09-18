@@ -85,3 +85,47 @@ fn enable_logging_names_the_missing_conf_and_installs_nothing() {
     );
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// `exim disable-cpanel-spamassassin` writes cPanel's Forced-Global-OFF flag
+/// and nothing else; `enable-` removes it and leaves accounts' own choice.
+#[test]
+fn cpanel_spamassassin_toggle_uses_the_forced_off_flag() {
+    let d = tmp("cpanel-sa");
+    std::fs::create_dir_all(d.join("etc")).unwrap();
+    std::fs::create_dir_all(d.join("home/alice")).unwrap();
+    std::fs::write(
+        d.join("etc/passwd"),
+        "alice:x:1001:1001::/home/alice:/bin/bash\n",
+    )
+    .unwrap();
+    std::fs::write(d.join("home/alice/.spamassassinenable"), "").unwrap();
+    std::fs::write(d.join("config.toml"), "panel = \"cpanel\"\n").unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_msfe-ng"))
+            .args(args)
+            .env("MSFE_NG_CONFIG", d.join("config.toml"))
+            .env("MSFE_NG_EXISCANDISABLE", d.join("exiscandisable"))
+            .env("MSFE_NG_CPANEL_ROOT", &d)
+            .output()
+            .unwrap()
+    };
+    let out = run(&["exim", "status"]);
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("1 account(s) have cPanel Spam Filters on")
+    );
+
+    let out = run(&["exim", "disable-cpanel-spamassassin"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(d.join("etc/global_spamassassin_disable").is_file());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Forced Global OFF"));
+
+    let out = run(&["exim", "enable-cpanel-spamassassin"]);
+    assert!(out.status.success());
+    assert!(!d.join("etc/global_spamassassin_disable").exists());
+    assert!(d.join("home/alice/.spamassassinenable").exists());
+    let _ = std::fs::remove_dir_all(&d);
+}

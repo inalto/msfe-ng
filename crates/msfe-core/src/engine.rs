@@ -253,6 +253,16 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
                 sa_conf.display()
             ));
         }
+        // MailScanner's lint: "envelope_sender_header … is not correct"
+        let header = envelope_from_header(&text);
+        let sa_text = std::fs::read_to_string(&sa_conf).unwrap_or_default();
+        if let Some(fixed) = ensure_envelope_sender_header(&sa_text, &header) {
+            service::save_conf(&sa_conf, &fixed)?;
+            set.push(format!(
+                "{}: envelope_sender_header {header}",
+                sa_conf.display()
+            ));
+        }
     }
     setup_network_homes(&site, &mut created, &mut warnings);
 
@@ -401,6 +411,45 @@ pub fn pyzor_home(site: &Path) -> std::path::PathBuf {
 /// (`spamassassin -r`) dies with "report requires authentication" without it.
 pub fn razor_identity(site: &Path) -> std::path::PathBuf {
     razor_home(site).join("identity")
+}
+
+/// The header MailScanner stamps the envelope sender into: its `Envelope From
+/// Header` directive (variables expanded, trailing colon dropped), which
+/// defaults to `X-%org-name%-MailScanner-From`. SpamAssassin must be told the
+/// same name or its SPF / whitelist_from checks look at the wrong sender.
+pub fn envelope_from_header(ms_conf: &str) -> String {
+    let raw = mailscanner::get_directive(ms_conf, "Envelope From Header")
+        .filter(|v| !v.is_empty())
+        .unwrap_or("X-%org-name%-MailScanner-From");
+    let mut h = mailscanner::expand_variables(ms_conf, raw);
+    if h.contains("%org-name%") {
+        h = h.replace("%org-name%", "yoursite");
+    }
+    h.trim_end_matches(':').to_string()
+}
+
+/// spamassassin.conf with `envelope_sender_header` set to `header`; `None`
+/// when it already is. Replaces every live line (MailScanner's lint reads the
+/// last one), else appends.
+pub fn ensure_envelope_sender_header(text: &str, header: &str) -> Option<String> {
+    let want = format!("envelope_sender_header {header}");
+    let mut found = false;
+    let mut lines: Vec<String> = text
+        .lines()
+        .map(|l| {
+            if l.trim_start().starts_with("envelope_sender_header") {
+                found = true;
+                want.clone()
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    if !found {
+        lines.push(want);
+    }
+    let out = lines.join("\n") + "\n";
+    (out != text).then_some(out)
 }
 
 pub(crate) const SA_NETWORK_BEGIN: &str =
@@ -1754,6 +1803,40 @@ if [ $CURLORWGET = 'curl' ]; then\n  curl -S -A \"msv5 Update Script v0.3.1\" -z
     }
 
     #[test]
+    fn envelope_from_header_follows_the_directive_and_org_name() {
+        let conf =
+            "%org-name% = transfervda\nEnvelope From Header = X-%org-name%-MailScanner-From:\n";
+        assert_eq!(envelope_from_header(conf), "X-transfervda-MailScanner-From");
+        // stock conf with the default org name
+        assert_eq!(
+            envelope_from_header("MTA = exim\n"),
+            "X-yoursite-MailScanner-From"
+        );
+        let custom = "%org-name% = acme\nEnvelope From Header = X-Acme-Sender\n";
+        assert_eq!(envelope_from_header(custom), "X-Acme-Sender");
+    }
+
+    #[test]
+    fn ensure_envelope_sender_header_replaces_or_appends_once() {
+        let h = "X-acme-MailScanner-From";
+        let stale = "lock_method flock\nenvelope_sender_header X-YourOrg-MailScanner-From\n";
+        assert_eq!(
+            ensure_envelope_sender_header(stale, h).as_deref(),
+            Some("lock_method flock\nenvelope_sender_header X-acme-MailScanner-From\n")
+        );
+        assert_eq!(
+            ensure_envelope_sender_header("lock_method flock", h).as_deref(),
+            Some("lock_method flock\nenvelope_sender_header X-acme-MailScanner-From\n")
+        );
+        let ok = "envelope_sender_header X-acme-MailScanner-From\n";
+        assert_eq!(
+            ensure_envelope_sender_header(ok, h),
+            None,
+            "already right: no rewrite"
+        );
+    }
+
+    #[test]
     fn sa_network_block_points_razor_and_pyzor_at_shared_homes() {
         let site = Path::new("/etc/mail/spamassassin");
         let text = "bayes_ignore_header X-Foo\n";
@@ -1836,6 +1919,10 @@ if [ $CURLORWGET = 'curl' ]; then\n  curl -S -A \"msv5 Update Script v0.3.1\" -z
         assert!(site.join(".pyzor").is_dir(), "shared pyzor home created");
         let sa_text = std::fs::read_to_string(&sa_conf).unwrap();
         assert!(sa_text.starts_with("lock_method flock\n"));
+        assert!(
+            sa_text.contains("\nenvelope_sender_header X-yoursite-MailScanner-From\n"),
+            "{sa_text}"
+        );
         assert!(sa_text.contains(&format!(
             "pyzor_options --homedir {}/.pyzor\n",
             site.display()

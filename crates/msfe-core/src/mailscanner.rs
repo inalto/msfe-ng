@@ -119,7 +119,7 @@ pub fn variable(text: &str, name: &str) -> Option<String> {
 
 /// Substitute every `%name%` in `value` with its `%name% = …` definition from
 /// the conf; unknown variables are left as-is.
-fn expand_variables(text: &str, value: &str) -> String {
+pub fn expand_variables(text: &str, value: &str) -> String {
     let mut out = value.to_string();
     // Definitions may reference earlier ones (`%rules-dir% = %etc-dir%/rules`),
     // so pass again while something still expands (bounded: no cycles matter).

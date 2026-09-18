@@ -54,7 +54,7 @@ fn rejected_flag<'a>(cmd: &str, sub: Option<&str>, rest: &'a [String]) -> Option
 
 fn usage_of(cmd: &str) -> &'static str {
     match cmd {
-        "exim" => "msfe-ng exim <status|enable-scanning|disable-scanning>",
+        "exim" => "msfe-ng exim <status|enable-scanning|disable-scanning|enable-cpanel-spamassassin|disable-cpanel-spamassassin>",
         "engine" => {
             "msfe-ng engine <status|install|configure|enable|disable|lint|wire|unwire> [--dry-run]"
         }
@@ -1029,7 +1029,25 @@ fn cmd_exim(sub: Option<&str>) -> ExitCode {
                     "disabled"
                 }
             );
+            if Config::load(&config_path()).panel == "cpanel" {
+                let (_, detail) = mailflow::cpanel_sa_verdict(&mailflow::cpanel_sa_state());
+                println!("cPanel SpamAssassin: {detail}");
+            }
             ExitCode::SUCCESS
+        }
+        Some(a @ ("enable-cpanel-spamassassin" | "disable-cpanel-spamassassin")) => {
+            let enable = a.starts_with("enable");
+            match mailflow::set_cpanel_sa(enable) {
+                Ok(()) => {
+                    let (_, detail) = mailflow::cpanel_sa_verdict(&mailflow::cpanel_sa_state());
+                    println!("cPanel SpamAssassin: {detail}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("msfe-ng exim: {e}");
+                    ExitCode::from(1)
+                }
+            }
         }
         Some("enable-scanning") => match mailflow::set_scanning(true) {
             Ok(()) => {
@@ -1055,7 +1073,7 @@ fn cmd_exim(sub: Option<&str>) -> ExitCode {
             }
         },
         _ => {
-            eprintln!("usage: msfe-ng exim <status|enable-scanning|disable-scanning>");
+            eprintln!("usage: msfe-ng exim <status|enable-scanning|disable-scanning|enable-cpanel-spamassassin|disable-cpanel-spamassassin>");
             ExitCode::from(2)
         }
     }
@@ -1220,6 +1238,7 @@ COMMANDS:
     housekeeping        Prune old mail-log rows (cleanmysql retention)
     monitor [--dry-run] Auto-clean the delivery queue, fix misfiled spool files, send Telegram alerts (cron)
     exim <status|enable-scanning|disable-scanning>   Toggle MailScanner scanning
+    exim <enable|disable>-cpanel-spamassassin        cPanel's own SpamAssassin (double scan)
     service <status|start|stop|reload|restart|queue-fix|spool-repair>   MailScanner service & queues
     doctor              Check every link of the scanning chain; names each fix
     rules lint          Check managed ruleset files for unparsable lines

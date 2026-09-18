@@ -302,6 +302,20 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
             "msfe-ng engine configure (creates the shared pyzor home)",
         ));
     }
+    // MailScanner's own lint: SpamAssassin must read the envelope sender from
+    // the header MailScanner writes it into, or SPF/whitelist_from misfire.
+    {
+        let sa_conf = Path::new(&cfg.mailscanner_conf).with_file_name("spamassassin.conf");
+        let sa_text = std::fs::read_to_string(&sa_conf).unwrap_or_default();
+        let (ok, detail) = envelope_header_verdict(&conf, &sa_text);
+        out.push(check(
+            "SpamAssassin envelope-sender header",
+            ok,
+            Level::Warn,
+            detail,
+            "msfe-ng engine configure (sets envelope_sender_header in spamassassin.conf)",
+        ));
+    }
     out.push(dnsbl_check(&conf, Path::new(&cfg.mailscanner_conf)));
     // Mail over `Max Spam Check Size` bypasses every spam check; the DB
     // records those as "too large" reports.
@@ -351,6 +365,16 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
         },
         "msfe-ng exim enable-scanning (or the mailflow toggle on the Service tab)",
     ));
+    if cfg.panel == "cpanel" {
+        let (ok, detail) = mailflow::cpanel_sa_verdict(&mailflow::cpanel_sa_state());
+        out.push(check(
+            "cPanel SpamAssassin double scan",
+            ok,
+            Level::Warn,
+            detail,
+            "msfe-ng exim disable-cpanel-spamassassin (or the cPanel SpamAssassin toggle on the Service tab; WHM: Exim Configuration Manager → Apache SpamAssassin: Forced Global OFF)",
+        ));
+    }
 
     // ---- scanners --------------------------------------------------------
     // Probe with the perl the engine runs under (cPanel's perl for
@@ -1181,6 +1205,29 @@ pub fn queue_dirs_verdict(method: engine::EximMethod, inc: &Path) -> (bool, &'st
     }
 }
 
+/// Does spamassassin.conf's `envelope_sender_header` name the header
+/// MailScanner stamps the envelope sender into (its `Envelope From Header`)?
+pub fn envelope_header_verdict(ms_conf: &str, sa_conf: &str) -> (bool, String) {
+    let want = engine::envelope_from_header(ms_conf);
+    let have = sa_conf
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find_map(|l| l.strip_prefix("envelope_sender_header"))
+        .map(str::trim);
+    match have {
+        Some(h) if h == want => (true, format!("envelope_sender_header {want}")),
+        Some(h) => (
+            false,
+            format!("spamassassin.conf has envelope_sender_header {h}, MailScanner writes {want} — SPF and whitelist_from see the wrong sender"),
+        ),
+        None => (
+            false,
+            format!("envelope_sender_header not set in spamassassin.conf (MailScanner writes {want})"),
+        ),
+    }
+}
+
 /// Does `sync` write where this engine reads? Compares `mailscanner_rules_dir`
 /// with the conf's `%rules-dir%`; a conf that defines none cannot disagree.
 pub fn rules_dir_verdict(conf: &str, configured: &str) -> (bool, String) {
@@ -1522,6 +1569,30 @@ mod tests {
         assert!(ok);
         assert!(fix.contains("engine configure"));
         assert!(!queue_dirs_verdict(TwoConfig, Path::new("/var/spool/exim/mailscanner/input")).0);
+    }
+
+    #[test]
+    fn envelope_header_verdict_matches_mailscanners_header() {
+        let ms = "%org-name% = acme\n";
+        assert!(envelope_header_verdict(ms, "envelope_sender_header X-acme-MailScanner-From\n").0);
+        let (ok, d) =
+            envelope_header_verdict(ms, "envelope_sender_header X-YourOrg-MailScanner-From\n");
+        assert!(!ok);
+        assert!(
+            d.contains("X-YourOrg-MailScanner-From") && d.contains("X-acme-MailScanner-From"),
+            "{d}"
+        );
+        let (ok, d) = envelope_header_verdict(ms, "lock_method flock\n");
+        assert!(!ok);
+        assert!(d.starts_with("envelope_sender_header not set"), "{d}");
+        // the last live line wins, like SpamAssassin's parser
+        assert!(
+            envelope_header_verdict(
+                ms,
+                "envelope_sender_header X-old\nenvelope_sender_header X-acme-MailScanner-From\n"
+            )
+            .0
+        );
     }
 
     #[test]

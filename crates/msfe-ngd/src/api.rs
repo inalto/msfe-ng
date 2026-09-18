@@ -563,6 +563,7 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
         ("GET", "/api/service/status") => service_status(cfg),
         ("POST", "/api/service/control") => service_control(req),
         ("POST", "/api/service/mailflow") => service_mailflow(req),
+        ("POST", "/api/service/cpanel-spamassassin") => service_cpanel_sa(req),
         ("POST", "/api/service/engine-latch") => {
             let v = Json::parse(&req.body).unwrap_or(Json::Null);
             let enabled = matches!(v.get("enabled"), Some(Json::Bool(true)));
@@ -1484,6 +1485,20 @@ fn service_status(cfg: &Config) -> Response {
             ("procs".into(), Json::Int(st.procs as i64)),
             ("scanning".into(), Json::Bool(mailflow::scanning_enabled())),
             (
+                "cpanel_sa".into(),
+                if cfg.panel == "cpanel" {
+                    let s = mailflow::cpanel_sa_state();
+                    Json::Object(vec![
+                        ("forced_on".into(), Json::Bool(s.forced_on)),
+                        ("forced_off".into(), Json::Bool(s.forced_off)),
+                        ("accounts_on".into(), Json::Int(s.accounts_on as i64)),
+                        ("would_scan".into(), Json::Bool(s.would_scan())),
+                    ])
+                } else {
+                    Json::Null
+                },
+            ),
+            (
                 "queues".into(),
                 Json::Object(vec![
                     (
@@ -1521,6 +1536,23 @@ fn service_control(req: &Request) -> Response {
         ])
         .to_string(),
     )
+}
+
+/// cPanel's Apache SpamAssassin: Forced Global OFF (`enabled:false`) or back
+/// to the per-account setting (`enabled:true`).
+fn service_cpanel_sa(req: &Request) -> Response {
+    let v = Json::parse(&req.body).unwrap_or(Json::Null);
+    let enabled = matches!(v.get("enabled"), Some(Json::Bool(true)));
+    match mailflow::set_cpanel_sa(enabled) {
+        Ok(()) => Response::json(
+            200,
+            &format!(
+                "{{\"ok\":true,\"would_scan\":{}}}",
+                mailflow::cpanel_sa_state().would_scan()
+            ),
+        ),
+        Err(e) => Response::json(500, &format!("{{\"error\":\"cPanel SpamAssassin: {e}\"}}")),
+    }
 }
 
 /// Enable/disable scanning via the exiscandisable mailflow flag.
