@@ -34,5 +34,16 @@ case "$out" in
     *) echo "FAIL: expected the engine's perl to be reported, got:"; echo "$out"; fails=1 ;;
 esac
 
+# cPanel's own ClamAV is kept; EPEL's is never installed beside it
+printf '#!/bin/sh\n' > "$TMP/cpanel-clamd"; chmod 0755 "$TMP/cpanel-clamd"
+out="$(MSFE_NG_ENGINE_DRYRUN=1 MSFE_NG_ENGINE_FORCE=1 MSFE_NG_MS_BIN="$ENGINE" MSFE_NG_CPANEL_CLAMD="$TMP/cpanel-clamd" HOME="$TMP" sh "$SCRIPT" 2>&1)" || true
+case "$out" in
+    *"using cPanel's ClamAV"*) ;;
+    *) echo "FAIL: expected cPanel's ClamAV to be kept, got:"; echo "$out"; fails=1 ;;
+esac
+case "$out" in
+    *"would ensure ClamAV"*) echo "FAIL: must not install EPEL ClamAV beside cPanel's"; fails=1 ;;
+esac
+
 [ "$fails" = 0 ] && echo "OK: engine-install.sh adapts to the installed engine"
 exit "$fails"

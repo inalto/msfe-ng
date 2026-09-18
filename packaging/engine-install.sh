@@ -157,8 +157,15 @@ fi
 
 # ClamAV: install clamd + signatures unless opted out (MSFE_NG_NO_CLAMAV=1).
 # `engine configure` points MailScanner at the clamd socket once it exists.
+# cPanel ships its own (cpanel-clamav: clamd under 3rdparty, signatures kept
+# fresh by cPanel, socket /run/clamav/clamd.sock) which conflicts with EPEL's
+# packages — keep it and never install a second one beside it.
+CPANEL_CLAMD="${MSFE_NG_CPANEL_CLAMD:-/usr/local/cpanel/3rdparty/bin/clamd}"
 if [ "${MSFE_NG_NO_CLAMAV:-0}" != 1 ]; then
-    if [ "$DRY" = 1 ]; then
+    if [ -x "$CPANEL_CLAMD" ]; then
+        info "using cPanel's ClamAV ($CPANEL_CLAMD) — engine configure picks up its socket"
+        [ "$DRY" = 1 ] || run systemctl enable --now clamd 2>/dev/null || true
+    elif [ "$DRY" = 1 ]; then
         info "would ensure ClamAV (clamd + freshclam) is installed and running"
     else
         if ! command -v clamd >/dev/null 2>&1; then

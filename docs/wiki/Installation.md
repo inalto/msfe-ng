@@ -13,6 +13,13 @@ curl -fsSL https://raw.githubusercontent.com/inalto/msfe-ng/main/packaging/get.s
 curl -fsSL https://raw.githubusercontent.com/inalto/msfe-ng/main/packaging/get.sh | MSFE_NG_WITH_ENGINE=1 sh
 ```
 
+The engine installer (also `msfe-ng engine install`) fetches the MailScanner
+v5 RPM from the project's GitHub release, verifies it, runs `ms-configure`
+unattended and fills in perl modules EL does not package. ClamAV: cPanel's
+own (`cpanel-clamav`) is kept when present — EPEL's packages conflict with
+it; otherwise EPEL's clamd + freshclam are installed. `engine configure`
+points MailScanner at whichever clamd socket exists.
+
 What it does: preflight check, installs the daemon + CLI under `/opt/msfe-ng`,
 seeds `/etc/msfe-ng/config.toml` (pointing `mailscanner_conf` at the engine it
 finds: the MailScanner RPM's `/etc/MailScanner`, or ConfigServer's
