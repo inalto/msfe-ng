@@ -27,10 +27,6 @@ run()  {
 
 [ "$(id -u)" = 0 ] || [ "$DRY" = 1 ] || die "run as root"
 command -v curl >/dev/null 2>&1 || die "curl is required"
-if command -v dnf >/dev/null 2>&1; then PKG=dnf
-elif command -v yum >/dev/null 2>&1; then PKG=yum
-else die "dnf/yum not found — this installer supports RHEL-family systems only"
-fi
 
 # ---- which engine, if any, is already here ----------------------------------
 # Two layouts exist: the RPM (/usr/sbin/MailScanner, system perl) and
@@ -68,6 +64,13 @@ if [ -n "$MS_BIN" ]; then
         exit 0
     fi
 fi
+# Only an actual install needs the package manager; recognising an engine
+# that is already there must work anywhere.
+if command -v dnf >/dev/null 2>&1; then PKG=dnf
+elif command -v yum >/dev/null 2>&1; then PKG=yum
+else die "dnf/yum not found — this installer supports RHEL-family systems only"
+fi
+
 # perl_has <module>: does the engine's perl load it?
 # shellcheck disable=SC2086  # MS_PERL is a command line, split on purpose
 perl_has() { $MS_PERL "-M$1" -e1 >/dev/null 2>&1; }
