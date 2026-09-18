@@ -5,10 +5,22 @@ on:
     branches: [ main ]
   pull_request:
 
+# Every job runs inside an AlmaLinux container: the shipped Perl (cPanel hooks,
+# logging plugin, CGIs), the shell scripts and the daemon are exercised with the
+# EL toolchain they are deployed on (EL8 = perl 5.26, glibc 2.28; EL9 = 5.32),
+# not Ubuntu's. GitHub has no EL runners, so the Ubuntu host only hosts the
+# container. `git` is installed before checkout so actions/checkout clones a
+# real repository (its no-git fallback downloads a tarball with no history).
 jobs:
   rust:
+    strategy:
+      matrix:
+        el: [8, 9]
     runs-on: ubuntu-latest
+    container: almalinux:${{ matrix.el }}
     steps:
+      - name: EL build tools
+        run: dnf -q -y install git gcc
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -22,11 +34,11 @@ jobs:
 
   web:
     runs-on: ubuntu-latest
+    container: almalinux:9
     steps:
+      - name: EL git + Node 20
+        run: dnf -q -y install git && dnf -q -y module install nodejs:20/common
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
       - name: Install web deps
         working-directory: web
         run: npm ci
@@ -44,13 +56,20 @@ jobs:
           done
 
   scripts:
+    strategy:
+      matrix:
+        el: [8, 9]
     runs-on: ubuntu-latest
+    container: almalinux:${{ matrix.el }}
     steps:
+      - name: EL perl + shellcheck
+        # ShellCheck comes from EPEL on both releases.
+        run: dnf -q -y install epel-release && dnf -q -y install git perl perl-DBI perl-DBD-SQLite ShellCheck
       - uses: actions/checkout@v4
       - name: shellcheck
         # -S warning: info-level notes (SC2015 with an intentional `|| true`,
         # SC1091 dynamic source) are fine; warnings and errors still fail.
-        run: sudo apt-get update && sudo apt-get install -y shellcheck && shellcheck -S warning packaging/*.sh packaging/tests/*.sh
+        run: shellcheck -S warning packaging/*.sh packaging/tests/*.sh
       - name: exim-shim contract test
         run: sh packaging/tests/exim-shim.sh
       - name: engine-install contract test
@@ -64,6 +83,6 @@ jobs:
             echo "== $f"; perl -c "$f" || exit 1
           done
       - name: logging plugin test
-        run: sudo apt-get install -y libdbd-sqlite3-perl && perl panel/mailscanner/t/msfeng.t
+        run: perl panel/mailscanner/t/msfeng.t
       - name: cPanel live.cgi contract test
         run: perl panel/cpanel/jupiter/t/live-cgi.t

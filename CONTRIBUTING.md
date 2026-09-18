@@ -55,6 +55,15 @@ cargo fmt --all
 Shell scripts should pass `shellcheck packaging/*.sh`; Perl shims should pass
 `perl -c`.
 
+CI (`.github/workflows/ci.yml`) runs all of this inside AlmaLinux 8 and 9
+containers — the Perl, shell and glibc the plugin is deployed on (cPanel
+servers are EL8/EL9), not Ubuntu's. To reproduce a CI failure locally:
+
+```sh
+podman run --rm -it -v "$PWD:/src:ro,Z" almalinux:8 bash
+# then follow the job's steps from ci.yml (dnf install …, cp -r /src /work, …)
+```
+
 ## Licensing of contributions
 
 By contributing you agree your work is licensed under **GPL-3.0-or-later**, the
