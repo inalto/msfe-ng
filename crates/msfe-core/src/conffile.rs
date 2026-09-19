@@ -58,7 +58,7 @@ fn unquote(s: &str) -> String {
 }
 
 /// How values are written back.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Style {
     /// MailScanner.conf: `Key With Spaces = raw value`
     Plain,

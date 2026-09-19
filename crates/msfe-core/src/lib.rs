@@ -9,6 +9,7 @@
 //! but no original code is copied. See CONTRIBUTING.md.
 
 pub mod civil;
+pub mod confcatalog;
 pub mod conffile;
 pub mod config;
 pub mod csf;
@@ -30,6 +31,7 @@ pub mod mailscanner;
 pub mod migrate;
 pub mod mime;
 pub mod monitor;
+pub mod msgrammar;
 pub mod panel;
 pub mod quarantine;
 pub mod queueview;
