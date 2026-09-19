@@ -14,6 +14,7 @@ Admin tabs
 - [Service](Service)
 - [Logs](Logs)
 - [Queues](Queues)
+- [Delivery test](Delivery-test)
 - [Quarantine](Quarantine)
 - [Config](Config)
 

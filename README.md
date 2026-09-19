@@ -68,6 +68,11 @@ per tab of the admin UI, plus the end-user panel, CLI and troubleshooting.
 - **Monitoring & alerts** — a 5-minute monitor cron applies the auto-clean
   rules and sends **Telegram alerts**: queue growth, stuck scanning queue, and
   per-account outbound sending bursts (compromised-account detection).
+- **Delivery test** — a deliverability diagnostic for any address: DNS,
+  DNSSEC and name-server agreement, SPF/DKIM/DMARC, the MX hosts and their
+  TLS, MTA-STS/TLS-RPT/DANE/BIMI, blocklists — pass/warning/fail/unknown
+  with evidence and the exact record, WHM location or command that fixes it
+  (`msfe-ng delivery test user@example.com`).
 - **Doctor** — `msfe-ng doctor` checks every link of the scanning chain (engine,
   wiring, queue flow, spool placement, quarantine writability, DB, logging,
   Telegram) and pairs each finding with the exact command that fixes it.

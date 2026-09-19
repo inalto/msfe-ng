@@ -52,6 +52,16 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
         ("conf", Some("test")) => Some(&["--no-lint", "--json", "--with"]),
         ("conf", Some("test-message")) => Some(&["--offline", "--json"]),
         ("conf", _) => Some(NONE),
+        ("delivery", Some("test")) => Some(&[
+            "--ip",
+            "--selector",
+            "--audit",
+            "--days",
+            "--json",
+            "--html",
+            "--force",
+        ]),
+        ("delivery", _) => Some(NONE),
         _ => None,
     }
 }
@@ -81,6 +91,7 @@ fn usage_of(cmd: &str) -> &'static str {
         "backup" => "msfe-ng backup <file.tar.gz>   (alias: snapshot export --only msfe)",
         "restore" => "msfe-ng restore <file.tar.gz> [--yes]   (alias: snapshot import --only msfe)",
         "conf" => "msfe-ng conf <test [--no-lint] [--json] [--with <id>=<file>]... | test-message <clean|gtube|eicar|file.eml> [--offline] [--json]>",
+        "delivery" => "msfe-ng delivery test <address> [--ip <sending ip>] [--selector <dkim selector>] [--audit] [--days <1-7>] [--json | --html] [--force]",
         _ => "msfe-ng help",
     }
 }
@@ -139,6 +150,7 @@ fn main() -> ExitCode {
         "backup" => cmd_backup(sub),
         "restore" => cmd_restore(sub, rest),
         "snapshot" => cmd_snapshot(sub, rest),
+        "delivery" => cmd_delivery(sub, rest),
         "help" | "--help" | "-h" => {
             print_help();
             ExitCode::SUCCESS
@@ -1806,6 +1818,152 @@ fn cmd_snapshot(sub: Option<&str>, rest: &[String]) -> ExitCode {
     }
 }
 
+/// `msfe-ng delivery test <address> …`: the same run the panel makes,
+/// streamed as it happens. Exit 0 = no failure, 1 = at least one failed
+/// check, 2 = usage, 3 = the address was refused.
+fn cmd_delivery(sub: Option<&str>, rest: &[String]) -> ExitCode {
+    use msfe_core::delivery::Verdict;
+    use msfe_core::deliveryrun;
+    if sub != Some("test") {
+        eprintln!("usage: {}", usage_of("delivery"));
+        return ExitCode::from(2);
+    }
+    let cfg = Config::load(&config_path());
+    let (mut ip, mut selector, mut days) = (None, None, None);
+    let (mut audit, mut json, mut html, mut force) = (false, false, false, false);
+    let mut positional: Vec<&String> = Vec::new();
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--ip" => ip = it.next().map(String::as_str),
+            "--selector" => selector = it.next().map(String::as_str),
+            "--days" => days = it.next().and_then(|d| d.parse::<i64>().ok()),
+            "--audit" => audit = true,
+            "--json" => json = true,
+            "--html" => html = true,
+            "--force" => force = true,
+            x if !x.starts_with('-') => positional.push(a),
+            _ => {}
+        }
+    }
+    let Some(address) = positional.first() else {
+        eprintln!("usage: {}", usage_of("delivery"));
+        return ExitCode::from(2);
+    };
+    let inputs = match deliveryrun::parse_inputs(address, ip, selector, days, audit, force, None) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("msfe-ng delivery test: {e}");
+            return ExitCode::from(3);
+        }
+    };
+    let quiet = json || html;
+    let report = match (!force)
+        .then(|| deliveryrun::cached_report(&inputs, cfg.delivery_cache_secs))
+        .flatten()
+    {
+        Some(r) => {
+            if !quiet {
+                println!(
+                    "(cached report from {} — use --force for a fresh run)",
+                    fmt_when(r.started)
+                );
+            }
+            r
+        }
+        None => {
+            if !quiet {
+                println!("testing {} …", inputs.address);
+            }
+            deliveryrun::run_blocking(&cfg, inputs, deliveryrun::plan, &mut |c| {
+                if !quiet {
+                    let tgt = c
+                        .target
+                        .as_deref()
+                        .map(|t| format!(" [{t}]"))
+                        .unwrap_or_default();
+                    println!(
+                        "[{:<7}] {:<22} {}{}",
+                        c.verdict.as_str().to_uppercase(),
+                        c.id,
+                        c.title,
+                        tgt
+                    );
+                }
+            })
+        }
+    };
+    if json {
+        println!("{}", report.to_json());
+    } else if html {
+        println!("{}", msfe_core::deliveryhtml::render(&report));
+    } else {
+        println!();
+        for (scope, n) in report.summary() {
+            println!(
+                "{:<10} {} fail, {} warning, {} unknown, {} pass, {} n/a",
+                scope.as_str(),
+                n[0],
+                n[1],
+                n[2],
+                n[3],
+                n[4]
+            );
+        }
+        let problems: Vec<_> = report
+            .sorted()
+            .into_iter()
+            .filter(|c| matches!(c.verdict, Verdict::Fail | Verdict::Warn))
+            .collect();
+        if !problems.is_empty() {
+            println!("\nWhat to fix, most important first:");
+            for c in problems {
+                let tgt = c
+                    .target
+                    .as_deref()
+                    .map(|t| format!(" [{t}]"))
+                    .unwrap_or_default();
+                println!(
+                    "  {} {} — {}{}",
+                    if c.verdict == Verdict::Fail {
+                        "✗"
+                    } else {
+                        "!"
+                    },
+                    c.severity.as_str(),
+                    c.title,
+                    tgt
+                );
+                println!("      {}", c.explanation);
+                if let Some(f) = &c.fix {
+                    println!("      fix: {}", f.summary);
+                    if let Some(r) = &f.dns_record {
+                        println!("      DNS: {r}");
+                    }
+                    if let Some(l) = &f.location {
+                        println!("      where: {l}");
+                    }
+                    if let Some(cmd) = &f.command {
+                        println!("      run: {cmd}");
+                    }
+                    if let Some(u) = &f.url {
+                        println!("      see: {u}");
+                    }
+                }
+            }
+        }
+        for n in &report.tool_notes {
+            println!("note: {n}");
+        }
+        println!("report id {}", report.id);
+    }
+    if report.checks.iter().any(|c| c.verdict == Verdict::Fail) {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
 fn fmt_size(n: u64) -> String {
     if n >= 1_048_576 {
         format!("{:.1} MB", n as f64 / 1_048_576.0)
@@ -1855,6 +2013,8 @@ COMMANDS:
     snapshot export     Snapshot MailScanner's etc tree + /etc/msfe-ng into one tar.gz
     snapshot import     Compare a snapshot with this host and import chosen files (--dry-run first)
     snapshot list       Snapshots kept in backup_dir/snapshots
+    delivery test <address>   Deliverability diagnostic: DNS, SPF/DKIM/DMARC, MX and TLS, MTA-STS/DANE,
+                        blocklists (--ip, --selector, --audit, --json, --html)
     digest [--dry-run]  Email quarantine digests to digest-enabled domains
     housekeeping        Prune old mail-log rows (cleanmysql retention)
     monitor [--dry-run] Auto-clean the delivery queue, fix misfiled spool files, send Telegram alerts (cron)

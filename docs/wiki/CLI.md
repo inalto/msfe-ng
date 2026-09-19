@@ -40,6 +40,7 @@ msfe-ng snapshot export [file] [--only mailscanner|msfe]   MailScanner etc tree 
 msfe-ng snapshot import <file> [--dry-run] [--only …] [--yes]   compare with this host, import chosen files
 msfe-ng snapshot list
 msfe-ng backup <file.tgz> | restore <file.tgz>      aliases: snapshot export/import --only msfe
+msfe-ng delivery test <address> [--ip <ip>] [--selector <s>] [--json | --html] [--force]   deliverability diagnostic (exit 1 on a failure, 3 on a bad address)
 ```
 
 Environment: `MSFE_NG_SOCKET` (daemon socket), `MSFE_NG_CONFIG` (config file),
@@ -56,6 +57,7 @@ Seeded by the installer with comments; editable from the [Config](Config) tab.
 | Interface & release | `refresh_secs`, `rows_per_page`, `view_new_window`, `learn_updates_db`, `forward_subject`, `forward_body`, `release_from`, `spamcop_address`, `dovecot_lda`, `csf_comment_default`, `geoip_url` |
 | Queue auto-clean | `queue_clean_frozen_hours`, `queue_clean_bounce_hours`, `queue_clean_spam_score` |
 | Telegram | `telegram_bot_token`, `telegram_chat_id`, `alert_queue_size`, `alert_scan_stuck_mins`, `alert_burst_per_hour`, `alert_cooldown_mins` |
+| Delivery test | `delivery_runs_per_min`, `delivery_cache_secs`, `delivery_log_days`, `delivery_max_monitors`, `delivery_helo` |
 
 `mailscanner_conf` is seeded with the engine's conf found at install time
 (`/etc/MailScanner/MailScanner.conf`, or ConfigServer's

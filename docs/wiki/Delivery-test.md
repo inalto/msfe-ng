@@ -1,0 +1,134 @@
+# Delivery test
+
+A deliverability diagnostic for one email address: what receivers see when
+that address **sends** mail, and what a sender sees when trying to **deliver**
+to it. Type the address, press *Run test*, and the report fills in as the
+checks finish (a run takes a few seconds; up to a minute when a mail server
+delays its greeting).
+
+Every check ends in one of five verdicts:
+
+| Verdict | Meaning |
+|---|---|
+| **fail** | something is broken or will get mail rejected |
+| **warning** | works, but weaker than it should be, or worth a look |
+| **unknown** | the check could not be made — a lookup failed, a tool is missing, a list refused the resolver. Never treated as a finding |
+| **pass** | as it should be (info rows explain what was seen) |
+| **n/a** | does not apply here (no IPv6 on this host, no DANE published, …) |
+
+Rows are sorted fail → warning → unknown → pass; *n/a* rows are collapsed.
+Each row opens to the **evidence** (the DNS records, the SMTP transcript, the
+certificate) and a **fix**: the DNS record to publish (with a copy button),
+where to click in WHM/cPanel, or the command to run.
+
+Nothing is guessed. An address alone cannot prove that the mailbox exists,
+that its mail authenticates, or that it lands in the inbox — the report says
+so in its last row. An MX host is never assumed to be a sender: a blocklist
+entry for an inbound address is a low warning with that note, not a failure.
+
+## What is checked
+
+**Sending — mail from this address**
+
+- **DNS** — the domain exists, has ≥2 resolving name servers and a sane SOA,
+  no CNAME at the apex, DNSSEC (validated with `delv`/`unbound-host`, or the
+  resolver's AD flag; a broken chain is a critical failure because validating
+  resolvers answer SERVFAIL), and whether every authoritative server agrees
+  on the SOA serial, MX and SPF (a serial-only difference is a low warning —
+  large providers generate serials per server).
+- **SPF** — exactly one record, syntax, the 10-lookup and void-lookup limits,
+  missing includes and loops, the `all` qualifier, `ptr`, macros, record
+  length, address scope; with a sending IP under *Advanced*, the record is
+  evaluated for that IP and a fix record proposed.
+- **DKIM** — the selector you give, `default`, and ~60 common selectors are
+  tried; key type and size (RSA ≥2048 passes, 1024 warns, <1024 fails),
+  testing flag, SHA-1-only keys, revoked keys. When nothing is found the
+  verdict is *unknown* with the hint to take `s=` from a sent message's
+  `DKIM-Signature`.
+- **DMARC** — record at the domain or inherited from the organizational
+  domain, syntax, policy (`reject` passes, `quarantine` passes with a note,
+  `none` warns), `pct`, `sp`, report addresses and the external-report
+  authorization record at the receiving domain, alignment notes.
+- **Reputation** — the domain against Spamhaus DBL, SURBL and URIBL; the
+  sending IP (when given) against Spamhaus ZEN, SpamCop, Barracuda,
+  UCEPROTECT 1–3, PSBL, Mailspike, s5h and the DNSWL allowlist. Each listing
+  carries its meaning and the removal page; a PBL listing gets smarthost
+  advice. Lists that refuse the resolver or time out are folded into one
+  summary row as *unknown*.
+- **BIMI** — record present, and whether DMARC is strong enough for it.
+
+**Receiving — mail to this address**
+
+- **DNS** — MX records (null MX is respected; no MX falls back to A/AAAA with
+  a warning), priorities, TTLs, each MX resolves and is not a CNAME, public
+  addresses only, reverse DNS confirms forward (FCrDNS), generic PTR names,
+  IPv6 presence.
+- **Mail servers** — one courtesy call per MX and address family: connect,
+  greeting (a delayed greeting is a low warning, not a failure), EHLO name
+  (the MX name, its reverse name, or the same organisation), extensions
+  (SIZE, 8BITMIME, PIPELINING; AUTH offered on port 25 before TLS is a
+  warning), STARTTLS.
+- **Transport security** — the TLS handshake through the system `openssl`
+  (protocol, cipher), certificate chain trust, missing intermediates, names
+  covering the MX, expiry; **MTA-STS** (record, policy fetched over HTTPS
+  pinned to the resolved address with no redirects, mode, MX coverage,
+  `max_age`, and whether each MX certificate satisfies the policy);
+  **TLS-RPT**; **DANE** (TLSA records, their DNSSEC state, and an `openssl`
+  match against the live certificate).
+- **Reputation** — the MX addresses against the same IP lists, as low
+  warnings.
+
+## Advanced inputs
+
+- **sending IP** — the address the domain sends from (this server's IP, a
+  smarthost). Enables SPF evaluation and the sending-side blocklist rows.
+- **DKIM selector** — when discovery does not find the key.
+- **log days** and **include server audit** — for addresses hosted on this
+  server (see below).
+- **fresh run** — ignore a report cached in the last 10 minutes
+  (`delivery_cache_secs`).
+
+## Server audit, diagnostic inbox, monitoring
+
+For an address hosted on this cPanel server the audit adds a **This server**
+section (account, routing, outbound identity, services, limits, logs and
+queues, abuse signals); a **diagnostic inbox** gives a one-time address to
+send a message to for an inbound analysis; a **test mail** sends a real
+message out and follows it through the logs; **monitors** re-run a test on a
+schedule and alert on regressions. These arrive in later releases and are
+listed here so the section names match.
+
+## Safety
+
+Probes are read-only and polite: one SMTP connection per MX and family
+(EHLO/QUIT only, never MAIL FROM to a third party), one TLS handshake, the
+MTA-STS policy fetched once. Targets that resolve to private, loopback,
+link-local or this server's own addresses are not probed (they show as
+*unknown* with the reason); the MTA-STS fetch is https-only, size-capped and
+follows no redirects. Runs are rate-limited (`delivery_runs_per_min`, default
+6), one per address at a time, and their reports are kept 24 h under
+`/var/cache/msfe-ng/delivery` readable by root only.
+
+## Requirements
+
+The test uses system tools and says so when one is missing: `openssl`
+(TLS and DANE), `curl` (MTA-STS), `delv` from bind-utils or `unbound-host`
+(DNSSEC). Spamhaus, URIBL and DNSWL refuse shared resolvers — install the
+private resolver (Service → *Private DNS resolver*) so their rows answer.
+
+## Export and CLI
+
+*JSON* and *HTML* download the report; *Open* shows the standalone HTML page.
+*Recent tests* lists the last runs. The same run from the shell:
+
+```
+msfe-ng delivery test user@example.com [--ip 203.0.113.5] [--selector s1] [--json | --html] [--force]
+```
+
+Checks stream as `[VERDICT] id  title` lines, followed by a per-scope summary
+and the problems to fix, most important first. Exit 0 = no failure, 1 = at
+least one failed check, 2 = usage, 3 = the address was refused.
+
+Config keys: `delivery_runs_per_min` (6), `delivery_cache_secs` (600),
+`delivery_log_days` (2), `delivery_max_monitors` (20), `delivery_helo` (the
+EHLO name used by the probes; empty = this host's name).

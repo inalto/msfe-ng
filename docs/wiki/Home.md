@@ -23,6 +23,7 @@ alerts. It is a clean-room replacement for the discontinued ConfigServer MSFE.
 - [Service](Service) — MailScanner control, Exim wiring, health check, mail queues
 - [Logs](Logs) — tail the mail log / Exim mainlog, search the whole log file
 - [Queues](Queues) — Exim spool browser, bulk delete/deliver, spool repair
+- [Delivery test](Delivery-test) — deliverability diagnostic for an address: DNS, SPF/DKIM/DMARC, MX and TLS, MTA-STS/DANE, blocklists
 - [Quarantine](Quarantine) — what is on disk, purge
 - [Config](Config) — config file editor, rulesets, DB & Bayes maintenance, queue auto-clean, Telegram alerts
 

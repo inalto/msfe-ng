@@ -7,8 +7,8 @@ every tab is described on its own wiki page.
 
 ## The rail
 
-- **Tabs** — Dashboard, Settings, Lists, Messages, Rules, Service, Logs, Queues,
-  Quarantine, Config.
+- **Tabs** — Dashboard, Service, Messages, Lists, Rules, Queues, Delivery test,
+  Quarantine, Logs, Settings, Config.
 - **Health dot** (bottom) — mirrors `msfe-ng doctor`, refreshed every minute:
   green *all systems ok*, amber *N notices*, red *N problems*.
 - **Theme** — cycles Auto → Light → Dark; remembered in the browser.
