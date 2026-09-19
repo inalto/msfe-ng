@@ -169,13 +169,38 @@ Non-standard bounces (plain text) are searched for SMTP replies.
 From the shell: `msfe-ng delivery eml <file.eml> [--bounce] [--address a]
 [--json | --html]`.
 
-## Diagnostic inbox, test mail, monitoring
+## Diagnostic inbox
 
-A **diagnostic inbox** gives a one-time address to send a message to for an
-inbound analysis; a **test mail** sends a real message out and follows it
-through the logs; **monitors** re-run a test on a schedule and alert on
-regressions. These arrive in later releases and are listed here so the
-section names match.
+*Diagnostic inbox — receive a test message* hands out a one-time address
+`dt-<token>@<this server's hostname>`. Send a message to it from the account
+you are diagnosing — Gmail, Outlook, a web form, a printer — and the tab
+polls until it arrives (the address accepts mail for 30 minutes). The
+message is analysed on the next poll and deleted; the rows show how it came
+in: the SMTP client and its **SPF** result for the sender domain, whether
+the **DKIM** key the signature names is published (the cryptography itself
+is not verified), **TLS** on the way in (from Exim's log line; a local
+submission is marked as such), the **spam verdict** MailScanner or cPanel's
+SpamAssassin added, an authenticated local submitter, and the message's own
+shape (the *Message* checks above).
+
+It needs two Exim fragments: a router that accepts `dt-<token>` at the
+hostname while `/var/spool/msfe-ng/diag/active/dt-<token>` exists, and an
+`appendfile` transport into `/var/spool/msfe-ng/diag/box/dt-<token>` (owned
+by Exim's delivery user, 10 MB quota). They live in `/etc/msfe-ng/` and are
+pulled in by two `.include_if_exists` lines under `@PREROUTERS@` and
+`@TRANSPORTSTART@` in `/etc/exim.conf.local` — cPanel's supported
+customisation file — followed by `buildeximconf` and an Exim restart.
+Install from the card (*Install the inbox*, with a dry run) or with
+`msfe-ng delivery inbox install`; `uninstall` removes the lines and files
+and rebuilds. Deleting the fragment files alone also switches it off. From
+the shell, `msfe-ng delivery inbox new` prints an address and `poll <token>`
+analyses what arrived.
+
+## Test mail, monitoring
+
+A **test mail** sends a real message out and follows it through the logs;
+**monitors** re-run a test on a schedule and alert on regressions. These
+arrive in later releases and are listed here so the section names match.
 
 ## Safety
 

@@ -54,6 +54,13 @@ PREV_VER=""
 # ---- core install ------------------------------------------------------------
 info "installing core files"
 mkdir -p "$BINDIR" "$WEBROOT" "$CONFDIR" "$SOCKET_DIR" "$PREFIX/db/migrations" "$PREFIX/mailscanner" /var/log/msfe-ng/jobs
+# delivery-test reports and uploads (root only); the diagnostic inbox spool
+# (tokens readable by Exim's router, boxes written by its delivery user)
+mkdir -p /var/cache/msfe-ng/delivery /var/spool/msfe-ng/diag/active /var/spool/msfe-ng/diag/box
+chmod 0700 /var/cache/msfe-ng/delivery
+chmod 0755 /var/spool/msfe-ng/diag /var/spool/msfe-ng/diag/active
+if id mailnull >/dev/null 2>&1; then chown mailnull:mail /var/spool/msfe-ng/diag/box 2>/dev/null || true; fi
+chmod 0770 /var/spool/msfe-ng/diag/box
 install -m 0755 "$BINSRC/msfe-ngd" "$BINDIR/msfe-ngd"
 install -m 0755 "$BINSRC/msfe-ng"  "$BINDIR/msfe-ng"
 # convenience symlink so admins can just run `msfe-ng`

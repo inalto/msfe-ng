@@ -30,6 +30,13 @@ pub fn handle(
         ("GET", "/api/delivery/recent") => recent(),
         ("GET", "/api/delivery/local") => local(req, cfg, config_file),
         ("GET", "/api/delivery/tools") => tools(),
+        ("POST", "/api/delivery/inbox") => inbox_create(cfg),
+        ("GET", "/api/delivery/inbox") => inbox_poll(req, cfg),
+        ("DELETE", "/api/delivery/inbox") | ("POST", "/api/delivery/inbox/remove") => {
+            inbox_remove(req)
+        }
+        ("POST", "/api/delivery/inbox/install") => inbox_install(req, cfg, true),
+        ("POST", "/api/delivery/inbox/uninstall") => inbox_install(req, cfg, false),
         _ => Response::json(404, r#"{"error":"not found"}"#),
     }
 }
@@ -388,6 +395,10 @@ fn tools() -> Response {
             ("uapi".into(), present("uapi")),
             ("whmapi1".into(), present("whmapi1")),
             (
+                "diag_inbox".into(),
+                Json::Bool(msfe_core::diaginbox::installed()),
+            ),
+            (
                 "resolver".into(),
                 Json::Object(vec![
                     (
@@ -402,4 +413,86 @@ fn tools() -> Response {
         ])
         .to_string(),
     )
+}
+
+// ---- the diagnostic inbox ------------------------------------------------------
+
+fn inbox_create(cfg: &Config) -> Response {
+    use msfe_core::diaginbox;
+    if !diaginbox::installed() {
+        return Response::json(
+            503,
+            &Json::Object(vec![
+                ("error".into(), Json::str("the diagnostic inbox is not installed on this server")),
+                ("fix".into(), Json::str("Install it below (or `msfe-ng delivery inbox install`): two Exim fragments included from /etc/exim.conf.local, then buildeximconf + restart")),
+            ])
+            .to_string(),
+        );
+    }
+    match diaginbox::create(cfg) {
+        Ok(i) => Response::json(
+            201,
+            &Json::Object(vec![
+                ("token".into(), Json::str(&i.token)),
+                ("address".into(), Json::str(&i.address)),
+                ("expires".into(), Json::Int(i.expires as i64)),
+                ("ttl_secs".into(), Json::Int(diaginbox::TTL_SECS as i64)),
+            ])
+            .to_string(),
+        ),
+        Err(e) => err(500, &format!("cannot create the inbox: {e}")),
+    }
+}
+
+fn inbox_poll(req: &Request, cfg: &Config) -> Response {
+    let token = req.query_param("token").unwrap_or_default();
+    if !msfe_core::diaginbox::valid_token(&token) {
+        return err(400, "token required");
+    }
+    match msfe_core::diaginbox::poll(cfg, &token) {
+        Some(st) => Response::json(200, &st.to_json().to_string()),
+        None => err(404, "no such inbox (expired or removed)"),
+    }
+}
+
+fn inbox_remove(req: &Request) -> Response {
+    let token = req
+        .query_param("token")
+        .or_else(|| Json::parse(&req.body).ok().map(|v| v.str_field("token")))
+        .unwrap_or_default();
+    if !msfe_core::diaginbox::valid_token(&token) {
+        return err(400, "token required");
+    }
+    msfe_core::diaginbox::remove(&token);
+    Response::json(200, r#"{"ok":true}"#)
+}
+
+fn inbox_install(req: &Request, cfg: &Config, install: bool) -> Response {
+    let dry = Json::parse(&req.body)
+        .ok()
+        .is_some_and(|v| matches!(v.get("dry_run"), Some(Json::Bool(true))));
+    let r = if install {
+        msfe_core::diaginbox::wire(cfg, dry)
+    } else {
+        msfe_core::diaginbox::unwire(dry)
+    };
+    match r {
+        Ok(w) => Response::json(
+            200,
+            &Json::Object(vec![
+                ("ok".into(), Json::Bool(true)),
+                ("dry_run".into(), Json::Bool(w.dry_run)),
+                (
+                    "installed".into(),
+                    Json::Bool(msfe_core::diaginbox::installed()),
+                ),
+                (
+                    "actions".into(),
+                    Json::Array(w.actions.iter().map(Json::str).collect()),
+                ),
+            ])
+            .to_string(),
+        ),
+        Err(e) => err(500, &e.to_string()),
+    }
 }

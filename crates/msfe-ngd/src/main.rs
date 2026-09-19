@@ -70,6 +70,7 @@ fn main() -> io::Result<()> {
         msfe_core::confstage::sweep(&cfg);
         msfe_core::snapshot::sweep(&cfg);
         msfe_core::deliveryrun::sweep();
+        msfe_core::diaginbox::sweep();
     }
 
     let listener = UnixListener::bind(&path)?;

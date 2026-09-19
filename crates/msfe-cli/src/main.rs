@@ -61,6 +61,7 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
             "--html",
             "--force",
         ]),
+        ("delivery", Some("inbox")) => Some(&["--dry-run", "--json"]),
         ("delivery", Some("eml")) => Some(&[
             "--bounce",
             "--address",
@@ -101,7 +102,7 @@ fn usage_of(cmd: &str) -> &'static str {
         "backup" => "msfe-ng backup <file.tar.gz>   (alias: snapshot export --only msfe)",
         "restore" => "msfe-ng restore <file.tar.gz> [--yes]   (alias: snapshot import --only msfe)",
         "conf" => "msfe-ng conf <test [--no-lint] [--json] [--with <id>=<file>]... | test-message <clean|gtube|eicar|file.eml> [--offline] [--json]>",
-        "delivery" => "msfe-ng delivery <test <address> [--ip <sending ip>] [--selector <dkim selector>] [--audit] [--days <1-7>] [--json | --html] [--force] | eml <file.eml> [--bounce] [--address <a>] [--ip <ip>] [--selector <s>] [--audit] [--json | --html]>",
+        "delivery" => "msfe-ng delivery <test <address> [--ip <sending ip>] [--selector <dkim selector>] [--audit] [--days <1-7>] [--json | --html] [--force] | eml <file.eml> [--bounce] [--address <a>] [--ip <ip>] [--selector <s>] [--audit] [--json | --html] | inbox <install [--dry-run] | uninstall [--dry-run] | status | new | poll <token> [--json] | remove <token> | sweep>>",
         _ => "msfe-ng help",
     }
 }
@@ -741,6 +742,8 @@ fn cmd_housekeeping() -> ExitCode {
     let (settings, _, _) = sync::load_policy(&sync::policy_dir(&config_path()));
     let days = msfe_core::housekeeping::retention_days(&settings);
     let body_days = msfe_core::housekeeping::body_retention_days(&settings);
+    msfe_core::deliveryrun::sweep();
+    msfe_core::diaginbox::sweep();
     match msfe_core::housekeeping::prune(&cfg, days) {
         Ok(()) => {
             println!("housekeeping: pruned maillog/quarantine rows older than {days} days");
@@ -1834,6 +1837,9 @@ fn cmd_snapshot(sub: Option<&str>, rest: &[String]) -> ExitCode {
 fn cmd_delivery(sub: Option<&str>, rest: &[String]) -> ExitCode {
     use msfe_core::delivery::Verdict;
     use msfe_core::deliveryrun;
+    if sub == Some("inbox") {
+        return cmd_delivery_inbox(rest);
+    }
     let eml_mode = match sub {
         Some("test") => false,
         Some("eml") => true,
@@ -2036,6 +2042,137 @@ fn cmd_delivery(sub: Option<&str>, rest: &[String]) -> ExitCode {
     }
 }
 
+fn cmd_delivery_inbox(rest: &[String]) -> ExitCode {
+    use msfe_core::diaginbox;
+    let cfg = Config::load(&config_path());
+    let dry = rest.iter().any(|a| a == "--dry-run");
+    let what = rest
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(String::as_str);
+    let report = |r: std::io::Result<diaginbox::WireReport>| -> ExitCode {
+        match r {
+            Ok(w) => {
+                for a in &w.actions {
+                    println!("{}{a}", if w.dry_run { "[dry-run] " } else { "" });
+                }
+                println!(
+                    "diagnostic inbox: {}",
+                    if diaginbox::installed() {
+                        "installed"
+                    } else {
+                        "not installed"
+                    }
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("msfe-ng delivery inbox: {e}");
+                ExitCode::from(1)
+            }
+        }
+    };
+    match what {
+        Some("install") => report(diaginbox::wire(&cfg, dry)),
+        Some("uninstall") => report(diaginbox::unwire(dry)),
+        Some("status") => {
+            let c = diaginbox::status_check();
+            println!("{}: {} — {}", c.verdict.as_str(), c.title, c.explanation);
+            if let Some(f) = c.fix {
+                println!("fix: {}", f.summary);
+            }
+            println!("addresses: dt-<token>@{}", diaginbox::hostname(&cfg));
+            ExitCode::SUCCESS
+        }
+        Some("sweep") => {
+            diaginbox::sweep();
+            println!("swept expired tokens and old boxes");
+            ExitCode::SUCCESS
+        }
+        Some("new") => {
+            if !diaginbox::installed() {
+                eprintln!("msfe-ng delivery inbox: not installed — run `msfe-ng delivery inbox install` first");
+                return ExitCode::from(1);
+            }
+            match diaginbox::create(&cfg) {
+                Ok(i) => {
+                    println!("{}", i.address);
+                    println!("token {} · accepts mail for {} minutes · poll with: msfe-ng delivery inbox poll {}", i.token, diaginbox::TTL_SECS / 60, i.token);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("msfe-ng delivery inbox: {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        Some("poll") | Some("remove") => {
+            let json = rest.iter().any(|a| a == "--json");
+            let Some(token) = rest.iter().filter(|a| !a.starts_with('-')).nth(1) else {
+                eprintln!("usage: {}", usage_of("delivery"));
+                return ExitCode::from(2);
+            };
+            if what == Some("remove") {
+                diaginbox::remove(token);
+                println!("removed");
+                return ExitCode::SUCCESS;
+            }
+            match diaginbox::poll(&cfg, token) {
+                None => {
+                    eprintln!("msfe-ng delivery inbox: no such inbox (expired or removed)");
+                    ExitCode::from(1)
+                }
+                Some(st) => {
+                    if json {
+                        println!("{}", st.to_json());
+                        return ExitCode::SUCCESS;
+                    }
+                    println!(
+                        "{} · {}",
+                        st.address,
+                        if st.expired {
+                            "expired"
+                        } else if st.waiting {
+                            "waiting for a message"
+                        } else {
+                            "message(s) received"
+                        }
+                    );
+                    for m in &st.messages {
+                        println!("\nmessage from {} at {}", m.from, fmt_when(m.received_at));
+                        for c in &m.checks {
+                            let tgt = c
+                                .target
+                                .as_deref()
+                                .map(|t| format!(" [{t}]"))
+                                .unwrap_or_default();
+                            println!(
+                                "[{:<7}] {:<22} {}{}",
+                                c.verdict.as_str().to_uppercase(),
+                                c.id,
+                                c.title,
+                                tgt
+                            );
+                            if matches!(
+                                c.verdict,
+                                msfe_core::delivery::Verdict::Fail
+                                    | msfe_core::delivery::Verdict::Warn
+                            ) {
+                                println!("          {}", c.explanation);
+                            }
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+            }
+        }
+        _ => {
+            eprintln!("usage: {}", usage_of("delivery"));
+            ExitCode::from(2)
+        }
+    }
+}
+
 fn fmt_size(n: u64) -> String {
     if n >= 1_048_576 {
         format!("{:.1} MB", n as f64 / 1_048_576.0)
@@ -2089,6 +2226,9 @@ COMMANDS:
                         blocklists (--ip, --selector, --audit, --json, --html)
     delivery eml <file>  The same for a saved message (headers, authentication results, links,
                         attachments) or, with --bounce, a bounce taken apart
+    delivery inbox <install|uninstall|status|new|poll <token>|remove <token>|sweep>
+                        The diagnostic inbox: one-time dt-<token>@<host> addresses wired into
+                        Exim via /etc/exim.conf.local; `new` prints one, `poll` analyses what arrived
     digest [--dry-run]  Email quarantine digests to digest-enabled domains
     housekeeping        Prune old mail-log rows (cleanmysql retention)
     monitor [--dry-run] Auto-clean the delivery queue, fix misfiled spool files, send Telegram alerts (cron)

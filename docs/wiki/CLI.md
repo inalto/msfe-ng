@@ -42,6 +42,7 @@ msfe-ng snapshot list
 msfe-ng backup <file.tgz> | restore <file.tgz>      aliases: snapshot export/import --only msfe
 msfe-ng delivery test <address> [--ip <ip>] [--selector <s>] [--audit] [--days <n>] [--json | --html] [--force]   deliverability diagnostic (+ cPanel audit; exit 1 on a failure, 3 on a bad address)
 msfe-ng delivery eml <file.eml> [--bounce] [--address <a>] [--ip <ip>] [--selector <s>] [--audit] [--json | --html]   the same for a saved message, or a bounce taken apart
+msfe-ng delivery inbox <install [--dry-run] | uninstall [--dry-run] | status | new | poll <token> [--json] | remove <token> | sweep>   the diagnostic inbox (dt-<token>@<host> addresses via exim.conf.local)
 ```
 
 Environment: `MSFE_NG_SOCKET` (daemon socket), `MSFE_NG_CONFIG` (config file),

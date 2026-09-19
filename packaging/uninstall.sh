@@ -75,7 +75,10 @@ esac
 if [ -x "$BINDIR/msfe-ng" ]; then
     info "disabling MailScanner logging (if enabled)"
     "$BINDIR/msfe-ng" mailscanner disable-logging >/dev/null 2>&1 || true
+    # the diagnostic inbox's Exim fragments (exim.conf.local include lines)
+    "$BINDIR/msfe-ng" delivery inbox uninstall >/dev/null 2>&1 || true
 fi
+rm -rf /var/spool/msfe-ng/diag /var/cache/msfe-ng/delivery
 # MailScanner's `Exim Command` must not point at the shim we are removing
 # (MailScanner would then silently assume short message ids).
 MS_CONF="$(grep -oP '(?<=^mailscanner_conf = ")[^"]*' "$CONFDIR/config.toml" 2>/dev/null)"

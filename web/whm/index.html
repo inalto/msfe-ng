@@ -344,10 +344,11 @@ let logTimer=null; // maillog auto-refresh; cleared on every tab switch
 let jrnTimer=null;
 let cfgJobTimer=null; // Config-tab job poller (test message / selftest); cleared on every tab switch
 let dlvTimer=null; // Delivery-test run poller; cleared on every tab switch
+let dlvInboxTimer=null; // diagnostic inbox poller
 $('#tabs').addEventListener('click',e=>{
   const b=e.target.closest('button');if(!b)return;
   clearInterval(logTimer);logTimer=null;
-  clearInterval(cfgJobTimer);clearInterval(dlvTimer);dlvTimer=null;clearInterval(jrnTimer);jrnTimer=null;
+  clearInterval(cfgJobTimer);clearInterval(dlvTimer);dlvTimer=null;clearInterval(dlvInboxTimer);dlvInboxTimer=null;clearInterval(jrnTimer);jrnTimer=null;
   clearInterval(msgTimer);msgTimer=null;
   clearInterval(dashTimer);dashTimer=null;
   document.querySelectorAll('#tabs button').forEach(x=>x.setAttribute('aria-selected',x===b));
@@ -2018,6 +2019,58 @@ async function renderDelivery(){
   const openHtml=el('button',{class:'act plain'},'Open report');
   openHtml.onclick=async()=>{const t=await apiRaw('/api/delivery/report?id='+encodeURIComponent(runId)+'&format=html');if(!t.ok)return;const w=window.open('','_blank');if(w){w.document.open();w.document.write(t.text);w.document.close();}};
   exportBtns.append(dlJson,dlHtml,openHtml);
+
+  // ---- diagnostic inbox ----------------------------------------------------
+  // A one-time address; whatever arrives is analysed on the next poll and
+  // rendered with the same rows (category "Diagnostic inbox", receiving side).
+  const ib=el('details',{class:'card'},el('summary',{},'Diagnostic inbox — receive a test message'));v.append(ib);
+  const ibBody=el('div');ib.append(ibBody);
+  const ibInstalled=!!(tools&&tools.diag_inbox);
+  const ibNote=el('div',{class:'muted',style:'font-size:.8rem;margin:.4rem 0'},'Get a one-time address on this server, send a message to it from the account you are diagnosing (Gmail, Outlook, a web form, a printer…), and see how it arrives here: SPF for the sending server, the DKIM key, TLS on the way in, the spam verdict, and the message\'s own shape. The address works for 30 minutes; the message is deleted once analysed.');
+  ibBody.append(ibNote);
+  const ibCtl=el('div',{class:'ctl'});ibBody.append(ibCtl);
+  const ibHdrs=el('div');const ibOut=el('div');ibBody.append(ibHdrs,ibOut);
+  const ibRenderer=deliveryRenderer(ibOut);
+  let ibToken=null;
+  if(!ibInstalled){
+    const inst=el('button',{class:'act'},'Install the inbox');
+    const dry=el('button',{class:'act plain'},'Dry run');
+    ibCtl.append(el('span',{class:'muted',style:'font-size:.8rem'},'Not installed: Exim needs a router and a transport (two fragment files included from /etc/exim.conf.local; buildeximconf + restart).'),dry,inst);
+    const doInstall=async d=>{inst.disabled=dry.disabled=true;const r=await api('/api/delivery/inbox/install',{method:'POST',body:{dry_run:d}});inst.disabled=dry.disabled=false;
+      if(!r||r.error){toast((r&&r.error)||'failed');return;}
+      const m=modal(d?'Diagnostic inbox — dry run':'Diagnostic inbox installed');m.body.append(el('pre',{class:'log'},(r.actions||[]).join('\n')));
+      if(!d&&r.installed){toast('Installed — reopen the tab to use it');}};
+    inst.onclick=()=>doInstall(false);dry.onclick=()=>doInstall(true);
+  } else {
+    const newBtn=el('button',{class:'act'},'Get an address');
+    const addrOut=el('code',{class:'mono',style:'font-size:.95rem'});
+    const copy=el('span');const cd=el('span',{class:'muted',style:'font-size:.8rem'});
+    const stopBtn=el('button',{class:'act plain',style:'display:none'},'Stop');
+    ibCtl.append(newBtn,addrOut,copy,cd,stopBtn);
+    let expires=0;
+    function tick(){if(!ibToken)return;const left=Math.max(0,expires-Math.floor(Date.now()/1000));cd.textContent=left?`waiting for a message… ${Math.floor(left/60)}:${String(left%60).padStart(2,'0')} left`:'expired';}
+    async function ibPoll(){
+      if(!ibToken)return;
+      const r=await api('/api/delivery/inbox?token='+encodeURIComponent(ibToken));
+      if(!r||r.error){clearInterval(dlvInboxTimer);dlvInboxTimer=null;cd.textContent=(r&&r.error)||'gone';stopBtn.style.display='none';return;}
+      (r.messages||[]).forEach(m=>{
+        ibHdrs.append(el('div',{class:'dlv-group'},el('h3',{},`Message from ${m.from||'(no From)'} · ${fmtTime(m.received_at)}`)));
+        ibRenderer.add(m.checks||[]);
+        toast('A message arrived — analysed below');
+      });
+      tick();
+      if(r.expired){clearInterval(dlvInboxTimer);dlvInboxTimer=null;stopBtn.style.display='none';}
+    }
+    newBtn.onclick=async()=>{
+      newBtn.disabled=true;ibRenderer.reset();ibHdrs.innerHTML='';
+      const r=await api('/api/delivery/inbox',{method:'POST',body:{}});
+      newBtn.disabled=false;
+      if(!r||r.error){toast((r&&r.error)||'cannot create');if(r&&r.fix)ibNote.textContent=r.fix;return;}
+      ibToken=r.token;expires=r.expires;addrOut.textContent=r.address;copy.innerHTML='';copy.append(copyBtn(r.address));stopBtn.style.display='';
+      clearInterval(dlvInboxTimer);ibPoll();dlvInboxTimer=setInterval(ibPoll,3000);
+    };
+    stopBtn.onclick=async()=>{if(!ibToken)return;await api('/api/delivery/inbox/remove',{method:'POST',body:{token:ibToken}});clearInterval(dlvInboxTimer);dlvInboxTimer=null;ibToken=null;cd.textContent='stopped';stopBtn.style.display='none';};
+  }
 
   // ---- recent runs ------------------------------------------------------------
   const rc=el('details',{class:'card'},el('summary',{},'Recent tests'));v.append(rc);

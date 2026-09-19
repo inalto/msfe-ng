@@ -26,6 +26,7 @@ pub mod delivery;
 pub mod deliveryhtml;
 pub mod deliverylog;
 pub mod deliveryrun;
+pub mod diaginbox;
 pub mod digest;
 pub mod dkim;
 pub mod dmarc;
