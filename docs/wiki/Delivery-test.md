@@ -1,5 +1,7 @@
 # Delivery test
 
+![Delivery test](https://raw.githubusercontent.com/inalto/msfe-ng/main/docs/img/delivery-test.png)
+
 A deliverability diagnostic for one email address: what receivers see when
 that address **sends** mail, and what a sender sees when trying to **deliver**
 to it. Type the address, press *Run test*, and the report fills in as the

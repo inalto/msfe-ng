@@ -72,7 +72,12 @@ per tab of the admin UI, plus the end-user panel, CLI and troubleshooting.
   DNSSEC and name-server agreement, SPF/DKIM/DMARC, the MX hosts and their
   TLS, MTA-STS/TLS-RPT/DANE/BIMI, blocklists — pass/warning/fail/unknown
   with evidence and the exact record, WHM location or command that fixes it
-  (`msfe-ng delivery test user@example.com`).
+  (`msfe-ng delivery test user@example.com`). For addresses hosted here a
+  read-only **cPanel audit** (account, routing, outbound identity, services,
+  limits, logs, queues, abuse signals); plus a saved message or bounce taken
+  apart, a **diagnostic inbox** (one-time addresses that report how a message
+  arrives), a real **test message** followed through Exim's log, and
+  **monitors** that re-test on a schedule and alert on regressions.
 - **Doctor** — `msfe-ng doctor` checks every link of the scanning chain (engine,
   wiring, queue flow, spool placement, quarantine writability, DB, logging,
   Telegram) and pairs each finding with the exact command that fixes it.
