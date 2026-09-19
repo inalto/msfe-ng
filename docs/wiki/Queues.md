@@ -2,9 +2,11 @@
 
 ![Queues](https://raw.githubusercontent.com/inalto/msfe-ng/main/docs/img/queues.png)
 
-Both Exim queues, parsed directly from the spool: the **MailScanner queue**
-(mail waiting for a scan — normally empty or seconds old) and the **main
-queue** (delivery). Each row shows age, size, id, spam score (badged *spam* ≥5,
+Both Exim queues, parsed directly from the spool and shown one below the
+other: the **MailScanner queue** (mail waiting for a scan — normally empty or
+seconds old) and the **main queue** (delivery), each with its own filters,
+selection and actions; *Refresh both* and *follow (5s)* at the top refresh
+the two together. Each row shows age, size, id, spam score (badged *spam* ≥5,
 *high spam* ≥10), sender, recipients and subject. A sender of **∅** is a null
 sender — a bounce, or spam sent so it can never be bounced back; **frozen**
 messages are stuck (Exim can't deliver or bounce them). A **?** badge means the

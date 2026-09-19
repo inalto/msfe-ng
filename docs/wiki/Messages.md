@@ -59,6 +59,13 @@ be trusted) and the full **headers**.
   account's mailbox via Dovecot LDA.
 - **Report to SpamCop** — appears when a SpamCop address is configured.
 
+## Delivery test from a row
+
+The small **test** link next to the recipient runs a [Delivery test](Delivery-test)
+for that address: it opens the tab with the address filled in and starts the
+run at once, with the server audit included when the domain is hosted here —
+the quickest way from "this message did not arrive" to the report.
+
 ## Sender modal
 
 Click any **From** address: 30-day history for that address and its whole

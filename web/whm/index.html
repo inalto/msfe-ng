@@ -156,6 +156,12 @@ async function showSaLint(){
 }
 
 // ---- sender: history and white/black listing --------------------------------
+// "test" link on a recipient: the Delivery test tab, run for that address
+function deliveryTestLink(addr){
+  const a=String(addr||'').split(',')[0].trim();
+  if(!a.includes('@'))return el('span',{});
+  return Object.assign(el('a',{class:'iplink',title:'Run a delivery test for '+a+' (DNS, authentication, mail servers; the server audit when hosted here)'},'test'),{onclick:e=>{e.stopPropagation();deliveryTestFor(a);}});
+}
 function senderLink(addr){
   const a=String(addr||'').trim();
   if(!a||!a.includes('@'))return el('span',{},a);
@@ -346,6 +352,14 @@ let cfgJobTimer=null; // Config-tab job poller (test message / selftest); cleare
 let dlvTimer=null; // Delivery-test run poller; cleared on every tab switch
 let dlvInboxTimer=null; // diagnostic inbox poller
 let dlvMailTimer=null; // outbound test-message job poller
+let DLV_PREFILL=null; // {address, run} set by other tabs before opening the Delivery test tab
+// Open the Delivery test tab for an address and start the run at once.
+function deliveryTestFor(address){
+  const a=String(address||'').split(',')[0].trim();
+  if(!a||!a.includes('@')){toast('No address to test');return;}
+  DLV_PREFILL={address:a,run:true};
+  document.querySelector('#tabs button[data-tab="delivery"]').click();
+}
 $('#tabs').addEventListener('click',e=>{
   const b=e.target.closest('button');if(!b)return;
   clearInterval(logTimer);logTimer=null;
@@ -705,7 +719,7 @@ async function renderMessages(){
         el('td',{},pick),
         el('td',{class:'muted',style:'white-space:nowrap'},m.ts),
         el('td',{class:'num'},m.score||'0'),
-        el('td',{},el('div',{},senderLink(m.from)),el('div',{class:'muted'},m.to)),
+        el('td',{},el('div',{},senderLink(m.from)),el('div',{class:'muted'},m.to,' ',deliveryTestLink(m.to))),
         el('td',{style:'white-space:nowrap'},m.clientip?ipLink(m.clientip):''),
         el('td',{},m.subject),
         el('td',{class:'num'},fmtSize(m.size)),
@@ -1625,12 +1639,41 @@ async function renderQuarantine(){
 // ---- Queues (contents + per-message management) ------------------------------
 async function renderQueues(){
   const v=$('#view');v.innerHTML='';
-  const qc=el('div',{class:'card'},el('h2',{},'Queue contents'),
+  // Both Exim queues, one card each: the MailScanner queue (mail waiting
+  // for a scan — normally empty or seconds old) above the main queue (delivery).
+  const top=el('div',{class:'card'},el('h2',{},'Queues'),
     el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},
       'Parsed from the Exim spool: sender, recipients, subject, spam score and frozen state per message. A sender of ∅ (null sender) is a bounce — or spam sent so it can never be bounced back; frozen messages are stuck (Exim can’t deliver or bounce them). Messages sit in the MailScanner queue only for the seconds between arrival and scanning.'));
+  v.append(top);
+  const topctl=el('div',{class:'ctl'});top.append(topctl);
+  const topdetail=el('pre',{class:'log',style:'display:none;max-height:20rem'});
+  const cards=[];
+  async function repairSpool(dry){
+    if(!dry&&!confirm('Move misplaced spool files into the subdirectories Exim expects, then force a delivery run?\n\nNothing is deleted. Messages Exim could not find become deliverable again.'))return;
+    topdetail.style.display='';topdetail.textContent='▶ '+(dry?'checking':'repairing')+' spool placement…';
+    const r=await api('/api/service/queue/repair-spool',{method:'POST',body:{dry_run:dry}});
+    topdetail.textContent=(r.actions||[r.error||'no response']).join('\n')+
+      (r.ok?`\n→ ${r.moved} file(s) moved${r.dry_run?' (dry-run)':(r.flush_started?', delivery run started':'')}`:'');
+    if(!dry)cards.forEach(c=>c.refresh());
+  }
+  const qauto=el('input',{type:'checkbox',id:'qauto'});
+  qauto.onchange=()=>{clearInterval(jrnTimer);jrnTimer=qauto.checked?setInterval(()=>cards.forEach(c=>c.refresh()),5000):null;};
+  topctl.append(
+    Object.assign(el('button',{class:'act plain'},'Refresh both'),{onclick:()=>cards.forEach(c=>c.refresh())}),
+    qauto,el('label',{for:'qauto',class:'muted'},'follow (5s)'),
+    Object.assign(el('button',{class:'act plain',title:'Check whether queued files sit in the split-spool subdirectory Exim expects'},'Check spool placement'),{onclick:()=>repairSpool(true)}),
+    Object.assign(el('button',{class:'act'},'Fix misplaced spool files'),{onclick:()=>repairSpool(false)}));
+  top.append(topdetail);
+  cards.push(queueCard(v,'mailscanner','MailScanner queue — waiting for scan'));
+  cards.push(queueCard(v,'main','Main queue — delivery'));
+}
+
+// One queue's card: listing, filters, selection, bulk actions, per-message
+// headers/body/log and deliver/delete. `which` names the queue for the API.
+function queueCard(v,which,title){
+  const qc=el('div',{class:'card'},el('h2',{},title));
   v.append(qc);
   const qctl=el('div',{class:'ctl'});qc.append(qctl);
-  const qsrc=el('select');[['mailscanner','MailScanner queue (waiting for scan)'],['main','Main queue (delivery)']].forEach(([val,lbl])=>qsrc.append(el('option',{value:val},lbl)));
   const qtable=el('table');
   const qpre=el('pre',{class:'log',style:'display:none'},'');
   const qdetail=el('pre',{class:'log',style:'display:none;max-height:20rem'});
@@ -1662,17 +1705,17 @@ async function renderQueues(){
   async function msgView(id,what){
     qdetail.style.display='';
     qdetail.textContent='Loading '+what+'…';
-    qdetail.textContent=await api(`/api/service/queue/msg?which=${qsrc.value}&id=${encodeURIComponent(id)}&what=${what}`,{raw:true});
+    qdetail.textContent=await api(`/api/service/queue/msg?which=${which}&id=${encodeURIComponent(id)}&what=${what}`,{raw:true});
   }
   async function msgAction(id,action){
     const warn=action==='delete'
       ?`Delete ${id} from the queue?\n\nThe message is removed permanently.`
-      :(qsrc.value==='mailscanner'
+      :(which==='mailscanner'
         ?`Deliver ${id} NOW from the scanning queue?\n\nThis BYPASSES MailScanner scanning for this message.`
         :`Force delivery of ${id} now (works for frozen messages too)?\n\nThis can take a while if the remote server is slow.`);
     if(!confirm(warn))return;
     qdetail.style.display='';qdetail.textContent=`▶ ${action} ${id}…`;
-    const r=await api('/api/service/queue/action',{method:'POST',body:{which:qsrc.value,id,action}});
+    const r=await api('/api/service/queue/action',{method:'POST',body:{which:which,id,action}});
     qdetail.textContent=(r.transcript||[r.error||'no response']).join('\n');
     toast(r&&r.ok?`${action}: ok`:`${action} failed — see output`);
     refreshQ();
@@ -1682,10 +1725,10 @@ async function renderQueues(){
     if(!ids.length)return;
     const warn=action==='delete'
       ?`Delete ${ids.length} selected message(s) from the queue?\n\nThey are removed permanently.`
-      :`Force delivery of ${ids.length} selected message(s)?`+(qsrc.value==='mailscanner'?'\n\nThis BYPASSES MailScanner scanning for them.':'');
+      :`Force delivery of ${ids.length} selected message(s)?`+(which==='mailscanner'?'\n\nThis BYPASSES MailScanner scanning for them.':'');
     if(!confirm(warn))return;
     qdetail.style.display='';qdetail.textContent=`▶ ${action} ${ids.length} message(s)…`;
-    const r=await api('/api/service/queue/bulk',{method:'POST',body:{which:qsrc.value,ids,action}});
+    const r=await api('/api/service/queue/bulk',{method:'POST',body:{which:which,ids,action}});
     qdetail.textContent=(r.transcript||[r.error||'no response']).join('\n');
     toast(r&&r.ok?`${action}: ${ids.length} done`:`${action} failed — see output`);
     QSEL.clear();refreshQ();
@@ -1701,11 +1744,11 @@ async function renderQueues(){
     let done=0,out=[];
     for(let round=0;round<20&&ids.length;round++){
       qdetail.textContent=`▶ deleting ${what}… ${done} done, ${ids.length} in this round`;
-      const r=await api('/api/service/queue/bulk',{method:'POST',body:{which:qsrc.value,ids,action:'delete'}});
+      const r=await api('/api/service/queue/bulk',{method:'POST',body:{which:which,ids,action:'delete'}});
       out=r&&r.transcript||[r&&r.error||'no response'];
       if(!r||!r.ok)break;
       done+=ids.length;
-      const d=await api('/api/service/queue/detail?which='+qsrc.value+'&limit=2000');
+      const d=await api('/api/service/queue/detail?which='+which+'&limit=2000');
       ids=d&&Array.isArray(d.msgs)?d.msgs.filter(match).map(m=>m.id):[];
     }
     qdetail.textContent=out.join('\n')+(done?`\n→ ${done} message(s) deleted`:'');
@@ -1766,7 +1809,7 @@ async function renderQueues(){
     syncBulk();
   }
   async function refreshQ(){
-    const d=await api('/api/service/queue/detail?which='+qsrc.value+'&limit=500');
+    const d=await api('/api/service/queue/detail?which='+which+'&limit=500');
     if(d&&Array.isArray(d.msgs)){
       QMSGS=d.msgs;
       // drop selections for messages no longer in the queue
@@ -1775,27 +1818,13 @@ async function renderQueues(){
       qcount.textContent=d.truncated?`showing oldest ${QMSGS.length} of ${d.total}`:`${d.total} message(s)`;
     }else{QMSGS=[];QTRUNC=false;qcount.textContent='';}
     drawTable();
-    if(qraw.checked)qpre.textContent=await api('/api/service/queue/listing?which='+qsrc.value,{raw:true});
+    if(qraw.checked)qpre.textContent=await api('/api/service/queue/listing?which='+which,{raw:true});
   }
-  qsrc.onchange=()=>{qdetail.style.display='none';QSEL.clear();refreshQ();};
-  const qauto=el('input',{type:'checkbox',id:'qauto'});
-  qauto.onchange=()=>{clearInterval(jrnTimer);jrnTimer=qauto.checked?setInterval(refreshQ,5000):null;};
-  const qraw=el('input',{type:'checkbox',id:'qraw'});
+  const qraw=el('input',{type:'checkbox',id:'qraw-'+which});
   qraw.onchange=()=>{qpre.style.display=qraw.checked?'':'none';qtable.style.display=qraw.checked?'none':'';refreshQ();};
-  async function repairSpool(dry){
-    if(!dry&&!confirm('Move misplaced spool files into the subdirectories Exim expects, then force a delivery run?\n\nNothing is deleted. Messages Exim could not find become deliverable again.'))return;
-    qdetail.style.display='';qdetail.textContent='▶ '+(dry?'checking':'repairing')+' spool placement…';
-    const r=await api('/api/service/queue/repair-spool',{method:'POST',body:{dry_run:dry}});
-    qdetail.textContent=(r.actions||[r.error||'no response']).join('\n')+
-      (r.ok?`\n→ ${r.moved} file(s) moved${r.dry_run?' (dry-run)':(r.flush_started?', delivery run started':'')}`:'');
-    if(!dry)refreshQ();
-  }
-  qctl.append(qsrc,
+  qctl.append(
     Object.assign(el('button',{class:'act plain'},'Refresh'),{onclick:refreshQ}),
-    qauto,el('label',{for:'qauto',class:'muted'},'follow (5s)'),
-    qraw,el('label',{for:'qraw',class:'muted'},'raw'),
-    Object.assign(el('button',{class:'act plain',title:'Check whether queued files sit in the split-spool subdirectory Exim expects'},'Check spool placement'),{onclick:()=>repairSpool(true)}),
-    Object.assign(el('button',{class:'act'},'Fix misplaced spool files'),{onclick:()=>repairSpool(false)}),
+    qraw,el('label',{for:'qraw-'+which,class:'muted'},'raw'),
     qcount);
   // quick filters + search over the loaded rows
   const filtbar=el('div',{class:'ctl'});
@@ -1810,6 +1839,7 @@ async function renderQueues(){
   filtbar.append(qsearch,bSpamAll,bBncAll);
   qc.append(filtbar,bulkbar,qtable,qpre,qdetail);
   refreshQ();
+  return {refresh:refreshQ};
 }
 
 // ---- Delivery test ------------------------------------------------------------
@@ -1996,6 +2026,12 @@ async function renderDelivery(){
   }
   runBtn.onclick=startRun;
   addr.onkeydown=e=>{if(e.key==='Enter')startRun();};
+  if(DLV_PREFILL){
+    const pf=DLV_PREFILL;DLV_PREFILL=null;
+    addr.value=pf.address;
+    // the audit checkbox follows the hosted lookup; run once it has answered
+    Promise.resolve(addr.onchange()).then(()=>{if(pf.run)startRun();});
+  }
   emlBtn.onclick=async()=>{
     const f=fileIn.files&&fileIn.files[0];if(!f){toast('Choose a file first');fileIn.focus();return;}
     if(f.size>2900000){toast('The file is larger than 2.9 MB — save the message without attachments');return;}
