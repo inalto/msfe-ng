@@ -23,6 +23,7 @@ pub fn handle(
 ) -> Response {
     match (method, path) {
         ("POST", "/api/delivery/run") => start(req, cfg),
+        ("POST", "/api/delivery/eml") => start_eml(req, cfg),
         ("GET", "/api/delivery/run") => poll(req),
         ("POST", "/api/delivery/run/cancel") => cancel(req),
         ("GET", "/api/delivery/report") => report(req),
@@ -51,6 +52,122 @@ fn report_json(r: &Report) -> Json {
         .saturating_sub(r.started);
     f.push(("elapsed_ms".into(), Json::Int(elapsed as i64 * 1000)));
     Json::Object(f)
+}
+
+/// `{b64, kind: message|bounce, address?, ip?, selector?, name?}`: store the
+/// upload, derive what the message itself says (From, DKIM selector, the
+/// sending IP) for anything not given, and start the usual run plus the
+/// message/bounce checks.
+fn start_eml(req: &Request, cfg: &Config) -> Response {
+    use msfe_core::delivery::EmlKind;
+    let v = match Json::parse(&req.body) {
+        Ok(v) => v,
+        Err(e) => return err(400, &format!("bad json: {e}")),
+    };
+    let kind = match EmlKind::parse(&v.str_field("kind")) {
+        Some(k) => k,
+        None => return err(400, "kind must be message or bounce"),
+    };
+    let raw = match msfe_core::b64::decode(&v.str_field("b64")) {
+        Some(r) => r,
+        None => return err(400, "b64 is not valid base64"),
+    };
+    let derived = msfe_core::emlcheck::derive_inputs(&raw, kind);
+    let address = match v
+        .get("address")
+        .and_then(Json::as_str)
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+    {
+        Some(a) => a.to_string(),
+        None => match derived.address {
+            Some(a) => a,
+            None => {
+                return err(
+                    400,
+                    "the message has no usable From address — give the address to test",
+                )
+            }
+        },
+    };
+    let ip = v
+        .get("ip")
+        .and_then(Json::as_str)
+        .map(str::to_string)
+        .or_else(|| derived.ip.map(|i| i.to_string()));
+    let selector = v
+        .get("selector")
+        .and_then(Json::as_str)
+        .map(str::to_string)
+        .or(derived.selector);
+    let mut inputs = match deliveryrun::parse_inputs(
+        &address,
+        ip.as_deref(),
+        selector.as_deref(),
+        v.get("days").and_then(Json::as_i64),
+        matches!(v.get("audit"), Some(Json::Bool(true))),
+        true,
+        None,
+    ) {
+        Ok(i) => i,
+        Err(e) => return err(400, &e),
+    };
+    inputs.eml = match deliveryrun::store_eml(kind, &v.str_field("name"), &raw) {
+        Ok(e) => Some(e),
+        Err(e) => return err(400, &e),
+    };
+    match deliveryrun::start(cfg, inputs.clone(), deliveryrun::plan) {
+        Ok(id) => Response::json(
+            201,
+            &Json::Object(vec![
+                ("run_id".into(), Json::str(id)),
+                ("cached".into(), Json::Bool(false)),
+                ("address".into(), Json::str(&inputs.address)),
+                (
+                    "ip".into(),
+                    inputs
+                        .ip
+                        .map(|i| Json::str(i.to_string()))
+                        .unwrap_or(Json::Null),
+                ),
+                (
+                    "selector".into(),
+                    inputs.selector.clone().map(Json::Str).unwrap_or(Json::Null),
+                ),
+            ])
+            .to_string(),
+        ),
+        Err(e) => {
+            if let Some(x) = &inputs.eml {
+                let _ = std::fs::remove_file(&x.path);
+            }
+            match e {
+                StartError::Invalid(e) => err(400, &e),
+                StartError::Busy(id) => Response::json(
+                    409,
+                    &Json::Object(vec![
+                        (
+                            "error".into(),
+                            Json::str("a test of this address is already running"),
+                        ),
+                        ("run_id".into(), Json::str(id)),
+                    ])
+                    .to_string(),
+                ),
+                StartError::RateLimited(secs) => Response::json(
+                    429,
+                    &Json::Object(vec![
+                        (
+                            "error".into(),
+                            Json::str(format!("too many tests started — try again in {secs} s")),
+                        ),
+                        ("retry_secs".into(), Json::Int(secs as i64)),
+                    ])
+                    .to_string(),
+                ),
+            }
+        }
+    }
 }
 
 fn start(req: &Request, cfg: &Config) -> Response {

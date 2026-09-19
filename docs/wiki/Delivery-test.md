@@ -136,6 +136,39 @@ A probe of the server's own MX address is marked as such: Exim treats its
 own host as trusted (it advertises AUTH to itself, for instance), so what
 remote senders see is best checked from another host.
 
+## A saved message or a bounce
+
+*Analyse a saved message or a bounce* takes an `.eml` file (Gmail: ⋮ →
+Download message; Outlook: drag the message to the desktop; Thunderbird: Save
+as) of at most 2.9 MB. The address to test, the DKIM selector and the sending
+IP are taken from the file unless entered above; the file is kept, readable
+by root only, just for the run.
+
+A **received message** adds a *Message* group on the sending side: the
+receiving hop's `Authentication-Results` (SPF, DKIM, DMARC, ARC as the
+receiver saw them — a failure here is what the recipient's filter acted on),
+the `DKIM-Signature` (domain alignment with From, headers covered, `l=`,
+SHA-1), Return-Path/From alignment, the `Received` chain with per-hop delays
+and the first public hop (which then gets the blocklist rows), required
+headers (Message-ID, Date, From, a Date more than a day off), raw 8-bit
+headers, line length (998), bulk-mail one-click unsubscribe (Gmail/Yahoo
+2024), links (raw IPs, shorteners, text/target mismatch, domains on the
+domain blocklists), attachments (executables, scripts and double extensions
+fail; macro-enabled Office and very large ones warn), and the body shape
+(scripts/forms, image-only, HTML without a text part), plus display-name and
+Reply-To oddities.
+
+A **bounce** is taken apart into a *Bounce* group: the delivery-status part
+with, per recipient, the action, the enhanced status code and its meaning,
+the remote MTA and its exact words — classified into who said it (Gmail,
+Microsoft, Yahoo, iCloud, Proofpoint, Mimecast, a blocklist, cPanel's own
+limits), what it means and what to do, with the delisting page. The
+original message's headers, when returned, get the header checks above.
+Non-standard bounces (plain text) are searched for SMTP replies.
+
+From the shell: `msfe-ng delivery eml <file.eml> [--bounce] [--address a]
+[--json | --html]`.
+
 ## Diagnostic inbox, test mail, monitoring
 
 A **diagnostic inbox** gives a one-time address to send a message to for an

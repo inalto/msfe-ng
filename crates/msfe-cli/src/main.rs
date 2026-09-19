@@ -61,6 +61,16 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
             "--html",
             "--force",
         ]),
+        ("delivery", Some("eml")) => Some(&[
+            "--bounce",
+            "--address",
+            "--ip",
+            "--selector",
+            "--audit",
+            "--days",
+            "--json",
+            "--html",
+        ]),
         ("delivery", _) => Some(NONE),
         _ => None,
     }
@@ -91,7 +101,7 @@ fn usage_of(cmd: &str) -> &'static str {
         "backup" => "msfe-ng backup <file.tar.gz>   (alias: snapshot export --only msfe)",
         "restore" => "msfe-ng restore <file.tar.gz> [--yes]   (alias: snapshot import --only msfe)",
         "conf" => "msfe-ng conf <test [--no-lint] [--json] [--with <id>=<file>]... | test-message <clean|gtube|eicar|file.eml> [--offline] [--json]>",
-        "delivery" => "msfe-ng delivery test <address> [--ip <sending ip>] [--selector <dkim selector>] [--audit] [--days <1-7>] [--json | --html] [--force]",
+        "delivery" => "msfe-ng delivery <test <address> [--ip <sending ip>] [--selector <dkim selector>] [--audit] [--days <1-7>] [--json | --html] [--force] | eml <file.eml> [--bounce] [--address <a>] [--ip <ip>] [--selector <s>] [--audit] [--json | --html]>",
         _ => "msfe-ng help",
     }
 }
@@ -1824,39 +1834,101 @@ fn cmd_snapshot(sub: Option<&str>, rest: &[String]) -> ExitCode {
 fn cmd_delivery(sub: Option<&str>, rest: &[String]) -> ExitCode {
     use msfe_core::delivery::Verdict;
     use msfe_core::deliveryrun;
-    if sub != Some("test") {
-        eprintln!("usage: {}", usage_of("delivery"));
-        return ExitCode::from(2);
-    }
+    let eml_mode = match sub {
+        Some("test") => false,
+        Some("eml") => true,
+        _ => {
+            eprintln!("usage: {}", usage_of("delivery"));
+            return ExitCode::from(2);
+        }
+    };
     let cfg = Config::load(&config_path());
-    let (mut ip, mut selector, mut days) = (None, None, None);
-    let (mut audit, mut json, mut html, mut force) = (false, false, false, false);
+    let (mut ip, mut selector, mut days, mut address_opt) = (None, None, None, None);
+    let (mut audit, mut json, mut html, mut force, mut bounce) =
+        (false, false, false, false, false);
     let mut positional: Vec<&String> = Vec::new();
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--ip" => ip = it.next().map(String::as_str),
             "--selector" => selector = it.next().map(String::as_str),
+            "--address" => address_opt = it.next().map(String::as_str),
             "--days" => days = it.next().and_then(|d| d.parse::<i64>().ok()),
             "--audit" => audit = true,
             "--json" => json = true,
             "--html" => html = true,
             "--force" => force = true,
+            "--bounce" => bounce = true,
             x if !x.starts_with('-') => positional.push(a),
             _ => {}
         }
     }
-    let Some(address) = positional.first() else {
+    let Some(first) = positional.first() else {
         eprintln!("usage: {}", usage_of("delivery"));
         return ExitCode::from(2);
     };
-    let inputs = match deliveryrun::parse_inputs(address, ip, selector, days, audit, force, None) {
+    // an upload: what the file says fills in whatever was not given
+    let mut eml = None;
+    let (address, ip, selector): (String, Option<String>, Option<String>) = if eml_mode {
+        use msfe_core::delivery::EmlKind;
+        let raw = match std::fs::read(first) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("msfe-ng delivery eml: cannot read {first}: {e}");
+                return ExitCode::from(3);
+            }
+        };
+        let kind = if bounce {
+            EmlKind::Bounce
+        } else {
+            EmlKind::Message
+        };
+        let d = msfe_core::emlcheck::derive_inputs(&raw, kind);
+        let Some(address) = address_opt.map(str::to_string).or(d.address) else {
+            eprintln!(
+                "msfe-ng delivery eml: the message has no usable From address — give --address"
+            );
+            return ExitCode::from(3);
+        };
+        match deliveryrun::store_eml(kind, first.rsplit('/').next().unwrap_or("upload.eml"), &raw) {
+            Ok(e) => eml = Some(e),
+            Err(e) => {
+                eprintln!("msfe-ng delivery eml: {e}");
+                return ExitCode::from(3);
+            }
+        }
+        force = true;
+        (
+            address,
+            ip.map(str::to_string).or(d.ip.map(|i| i.to_string())),
+            selector.map(str::to_string).or(d.selector),
+        )
+    } else {
+        (
+            first.to_string(),
+            ip.map(str::to_string),
+            selector.map(str::to_string),
+        )
+    };
+    let mut inputs = match deliveryrun::parse_inputs(
+        &address,
+        ip.as_deref(),
+        selector.as_deref(),
+        days,
+        audit,
+        force,
+        None,
+    ) {
         Ok(i) => i,
         Err(e) => {
-            eprintln!("msfe-ng delivery test: {e}");
+            eprintln!(
+                "msfe-ng delivery {}: {e}",
+                if eml_mode { "eml" } else { "test" }
+            );
             return ExitCode::from(3);
         }
     };
+    inputs.eml = eml;
     let quiet = json || html;
     let report = match (!force)
         .then(|| deliveryrun::cached_report(&inputs, cfg.delivery_cache_secs))
@@ -2015,6 +2087,8 @@ COMMANDS:
     snapshot list       Snapshots kept in backup_dir/snapshots
     delivery test <address>   Deliverability diagnostic: DNS, SPF/DKIM/DMARC, MX and TLS, MTA-STS/DANE,
                         blocklists (--ip, --selector, --audit, --json, --html)
+    delivery eml <file>  The same for a saved message (headers, authentication results, links,
+                        attachments) or, with --bounce, a bounce taken apart
     digest [--dry-run]  Email quarantine digests to digest-enabled domains
     housekeeping        Prune old mail-log rows (cleanmysql retention)
     monitor [--dry-run] Auto-clean the delivery queue, fix misfiled spool files, send Telegram alerts (cron)

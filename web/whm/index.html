@@ -1926,7 +1926,15 @@ async function renderDelivery(){
   const adv=el('details',{class:'dlv-adv'},el('summary',{class:'muted'},'Advanced'),
     el('div',{class:'ctl',style:'margin-top:.5rem'},ipIn,selIn,el('label',{class:'muted',style:'font-size:.8rem;display:flex;gap:.3rem;align-items:center'},'log days',daysIn),auditLbl,
       el('label',{class:'muted',style:'font-size:.8rem;display:flex;gap:.3rem;align-items:center',title:'Ignore a report cached in the last minutes'},forceBox,' fresh run')));
-  ic.append(el('div',{class:'ctl'},addr,runBtn,cancelBtn),adv);
+  // ---- a saved message or bounce --------------------------------------------
+  const fileIn=el('input',{type:'file',accept:'.eml,.msg,.txt,message/rfc822,text/plain',style:'max-width:20rem'});
+  const kindMsg=el('input',{type:'radio',name:'dlv-kind',value:'message',checked:true});
+  const kindBounce=el('input',{type:'radio',name:'dlv-kind',value:'bounce'});
+  const emlBtn=el('button',{class:'act plain'},'Analyse file');
+  const emlCard=el('details',{class:'dlv-adv'},el('summary',{class:'muted'},'Analyse a saved message or a bounce'),
+    el('div',{class:'muted',style:'font-size:.78rem;margin:.4rem 0'},'Export the message from the mail client as .eml (Gmail: ⋮ → Download message; Outlook: drag to the desktop; Thunderbird: Save as) and upload it. A received message shows what the receiver concluded (Authentication-Results), the DKIM signature, the hops and delays, links and attachments; a bounce is taken apart into recipient, status and the remote server\'s words. The address, DKIM selector and sending IP are taken from the file unless given above. The file is kept only for the run.'),
+    el('div',{class:'ctl'},fileIn,el('label',{class:'muted',style:'font-size:.8rem;display:flex;gap:.3rem;align-items:center'},kindMsg,' received message'),el('label',{class:'muted',style:'font-size:.8rem;display:flex;gap:.3rem;align-items:center'},kindBounce,' bounce / delivery failure'),emlBtn));
+  ic.append(el('div',{class:'ctl'},addr,runBtn,cancelBtn),adv,emlCard);
   const toolNote=[];
   if(tools&&!tools.error){
     if(!tools.openssl||!tools.openssl.present)toolNote.push('openssl missing: TLS checks will be unknown');
@@ -1986,6 +1994,22 @@ async function renderDelivery(){
   }
   runBtn.onclick=startRun;
   addr.onkeydown=e=>{if(e.key==='Enter')startRun();};
+  emlBtn.onclick=async()=>{
+    const f=fileIn.files&&fileIn.files[0];if(!f){toast('Choose a file first');fileIn.focus();return;}
+    if(f.size>2900000){toast('The file is larger than 2.9 MB — save the message without attachments');return;}
+    runBtn.disabled=true;emlBtn.disabled=true;renderer.reset();prog.style.display='';chips.innerHTML='';ptext.textContent='uploading…';bar.querySelector('.bar').style.width='2%';exportBtns.style.display='none';
+    const b64=await new Promise((res,rej)=>{const rd=new FileReader();rd.onload=()=>res(String(rd.result).split(',').pop());rd.onerror=rej;rd.readAsDataURL(f);});
+    const body={b64,kind:kindBounce.checked?'bounce':'message',name:f.name,days:+daysIn.value||2,audit:auditBox.checked&&!auditBox.disabled};
+    if(addr.value.trim())body.address=addr.value.trim();if(ipIn.value.trim())body.ip=ipIn.value.trim();if(selIn.value.trim())body.selector=selIn.value.trim();
+    const r=await api('/api/delivery/eml',{method:'POST',body});
+    emlBtn.disabled=false;
+    if(!r||r.error&&!r.run_id){runBtn.disabled=false;prog.style.display='none';toast((r&&r.error)||'cannot start');return;}
+    runId=r.run_id;
+    if(r.address&&!addr.value.trim()){addr.value=r.address;addr.onchange();}
+    if(r.ip&&!ipIn.value.trim())ipIn.value=r.ip;if(r.selector&&!selIn.value.trim())selIn.value=r.selector;
+    cancelBtn.style.display='';
+    clearInterval(dlvTimer);poll();dlvTimer=setInterval(poll,1500);
+  };
   cancelBtn.onclick=async()=>{if(runId){await api('/api/delivery/run/cancel',{method:'POST',body:{id:runId}});toast('Cancelling…');}};
   const dlJson=el('button',{class:'act plain'},'Download JSON');
   dlJson.onclick=async()=>{const t=await apiRaw('/api/delivery/report?id='+encodeURIComponent(runId)+'&format=json');if(t.ok)downloadBlob(`delivery-${addr.value.trim()}-${runId}.json`,textBlob(t.text,'application/json'));};

@@ -11,7 +11,7 @@ use crate::dns::Client;
 use crate::json::Json;
 use crate::{netguard, Config};
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -320,6 +320,7 @@ pub fn parse_inputs(
         audit,
         force,
         user_scope,
+        eml: None,
     })
 }
 
@@ -332,6 +333,7 @@ pub fn plan(inputs: &Inputs) -> Vec<Task> {
     tasks.extend(crate::repchecks::tasks());
     tasks.extend(crate::cpaudit::tasks(inputs));
     tasks.extend(crate::deliverylog::tasks(inputs));
+    tasks.extend(crate::emlcheck::tasks(inputs));
     tasks.push(crate::dnschecks::meta_task());
     tasks
 }
@@ -473,6 +475,7 @@ pub fn start(
                 persist(&s.report);
             }
         });
+        discard_eml(&inputs);
     });
     Ok(id)
 }
@@ -522,6 +525,7 @@ pub fn run_blocking(
     report.done = true;
     report.finished = Some(now_secs());
     persist(&report);
+    discard_eml(&inputs);
     report
 }
 
@@ -590,14 +594,74 @@ fn sweep_memory() {
 pub fn sweep() {
     sweep_memory();
     let now = now_secs();
-    if let Ok(rd) = std::fs::read_dir(report_dir()) {
-        for e in rd.filter_map(Result::ok) {
-            use std::os::unix::fs::MetadataExt;
-            if e.metadata()
-                .is_ok_and(|m| now.saturating_sub(m.mtime().max(0) as u64) > KEEP_FILES_SECS)
-            {
-                let _ = std::fs::remove_file(e.path());
+    for dir in [report_dir(), eml_dir()] {
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.filter_map(Result::ok) {
+                use std::os::unix::fs::MetadataExt;
+                if e.path().is_file()
+                    && e.metadata().is_ok_and(|m| {
+                        now.saturating_sub(m.mtime().max(0) as u64) > KEEP_FILES_SECS
+                    })
+                {
+                    let _ = std::fs::remove_file(e.path());
+                }
             }
+        }
+    }
+}
+
+/// Where uploaded messages wait for their run (0600, deleted when done).
+pub fn eml_dir() -> PathBuf {
+    report_dir().join("eml")
+}
+
+/// Largest upload analysed.
+pub const EML_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// Store an uploaded message for a run.
+pub fn store_eml(
+    kind: crate::delivery::EmlKind,
+    name: &str,
+    raw: &[u8],
+) -> Result<crate::delivery::Eml, String> {
+    if raw.is_empty() {
+        return Err("the file is empty".into());
+    }
+    if raw.len() > EML_MAX_BYTES {
+        return Err(format!(
+            "the file is larger than {} MB",
+            EML_MAX_BYTES / 1_048_576
+        ));
+    }
+    let dir = eml_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    let path = dir.join(format!("{}.eml", new_id()));
+    std::fs::write(&path, raw).map_err(|e| format!("cannot store the upload: {e}"))?;
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    let safe_name: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' '))
+        .take(80)
+        .collect();
+    Ok(crate::delivery::Eml {
+        kind,
+        path: path.display().to_string(),
+        name: if safe_name.trim().is_empty() {
+            "upload.eml".into()
+        } else {
+            safe_name
+        },
+    })
+}
+
+/// The upload is read once; when the run is over it goes.
+fn discard_eml(inputs: &Inputs) {
+    if let Some(e) = &inputs.eml {
+        let p = Path::new(&e.path);
+        if p.starts_with(eml_dir()) {
+            let _ = std::fs::remove_file(p);
         }
     }
 }

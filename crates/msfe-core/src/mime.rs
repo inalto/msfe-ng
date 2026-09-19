@@ -10,12 +10,12 @@
 use std::collections::HashMap;
 
 /// One MIME entity: decoded body plus children for `multipart/*`.
-struct Entity {
-    ctype: String, // lowercased media type, e.g. "text/html"
-    params: HashMap<String, String>,
-    headers: Vec<String>, // unfolded header lines
-    body: Vec<u8>,        // transfer-decoded; for multiparts, the raw body
-    children: Vec<Entity>,
+pub(crate) struct Entity {
+    pub(crate) ctype: String, // lowercased media type, e.g. "text/html"
+    pub(crate) params: HashMap<String, String>,
+    pub(crate) headers: Vec<String>, // unfolded header lines
+    pub(crate) body: Vec<u8>,        // transfer-decoded; for multiparts, the raw body
+    pub(crate) children: Vec<Entity>,
 }
 
 /// Decoded representation of a message ready for display.
@@ -62,7 +62,7 @@ pub fn preview(raw: &[u8]) -> Preview {
 }
 
 /// Parse a (sub)message into an entity tree.
-fn parse_entity(raw: &[u8], depth: usize) -> Entity {
+pub(crate) fn parse_entity(raw: &[u8], depth: usize) -> Entity {
     let (headers, body) = split_headers(raw);
     let ct = header(&headers, "content-type").unwrap_or_else(|| "text/plain".to_string());
     let (ctype, params) = parse_content_type(&ct);
@@ -271,7 +271,7 @@ fn human_size(n: usize) -> String {
 }
 
 /// Split at the first blank line into (unfolded header lines, body).
-fn split_headers(raw: &[u8]) -> (Vec<String>, &[u8]) {
+pub(crate) fn split_headers(raw: &[u8]) -> (Vec<String>, &[u8]) {
     let mut i = 0;
     let mut end = raw.len();
     let mut body_start = raw.len();
@@ -302,7 +302,7 @@ fn split_headers(raw: &[u8]) -> (Vec<String>, &[u8]) {
     (lines, &raw[body_start..])
 }
 
-fn header(lines: &[String], name: &str) -> Option<String> {
+pub(crate) fn header(lines: &[String], name: &str) -> Option<String> {
     lines.iter().find_map(|l| {
         let (k, v) = l.split_once(':')?;
         if k.trim().eq_ignore_ascii_case(name) {
@@ -314,7 +314,7 @@ fn header(lines: &[String], name: &str) -> Option<String> {
 }
 
 /// `text/html; charset="utf-8"; name=x` → ("text/html", {charset: utf-8, name: x})
-fn parse_content_type(v: &str) -> (String, HashMap<String, String>) {
+pub(crate) fn parse_content_type(v: &str) -> (String, HashMap<String, String>) {
     let mut it = v.split(';');
     let ctype = it.next().unwrap_or("").trim().to_ascii_lowercase();
     let mut params = HashMap::new();

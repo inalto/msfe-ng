@@ -191,6 +191,7 @@ mod tests {
                 audit: false,
                 force: false,
                 user_scope: None,
+                eml: None,
             },
             started: 1_700_000_000,
             finished: Some(1_700_000_010),

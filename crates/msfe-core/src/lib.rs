@@ -34,6 +34,7 @@ pub mod dnsbl;
 pub mod dnschecks;
 pub mod dnsx;
 pub mod doctor;
+pub mod emlcheck;
 pub mod engine;
 pub mod engine_migration;
 pub mod geoip;

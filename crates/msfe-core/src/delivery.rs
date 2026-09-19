@@ -379,19 +379,55 @@ pub struct Inputs {
     pub force: bool,
     /// The end-user variant: the account the caller is limited to.
     pub user_scope: Option<String>,
+    /// An uploaded message or bounce to analyse alongside.
+    pub eml: Option<Eml>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmlKind {
+    Message,
+    Bounce,
+}
+
+impl EmlKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EmlKind::Message => "message",
+            EmlKind::Bounce => "bounce",
+        }
+    }
+    pub fn parse(s: &str) -> Option<EmlKind> {
+        match s {
+            "message" => Some(EmlKind::Message),
+            "bounce" => Some(EmlKind::Bounce),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Eml {
+    pub kind: EmlKind,
+    /// Where the upload was stored (0600, deleted after the run).
+    pub path: String,
+    pub name: String,
 }
 
 impl Inputs {
     /// The key a cached report is looked up by (everything but `force`).
     pub fn cache_key(&self) -> String {
         format!(
-            "{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}",
             self.address.to_ascii_lowercase(),
             self.ip.map(|i| i.to_string()).unwrap_or_default(),
             self.selector.clone().unwrap_or_default(),
             self.days,
             self.audit,
-            self.user_scope.clone().unwrap_or_default()
+            self.user_scope.clone().unwrap_or_default(),
+            self.eml
+                .as_ref()
+                .map(|e| e.path.clone())
+                .unwrap_or_default()
         )
     }
     pub fn to_json(&self) -> Json {
@@ -414,6 +450,19 @@ impl Inputs {
             (
                 "user_scope".into(),
                 self.user_scope.clone().map(Json::Str).unwrap_or(Json::Null),
+            ),
+            (
+                "eml".into(),
+                self.eml
+                    .as_ref()
+                    .map(|e| {
+                        Json::Object(vec![
+                            ("kind".into(), Json::str(e.kind.as_str())),
+                            ("path".into(), Json::str(&e.path)),
+                            ("name".into(), Json::str(&e.name)),
+                        ])
+                    })
+                    .unwrap_or(Json::Null),
             ),
         ])
     }
@@ -444,6 +493,17 @@ impl Inputs {
                 .get("user_scope")
                 .and_then(Json::as_str)
                 .map(str::to_string),
+            eml: v.get("eml").and_then(|e| {
+                Some(Eml {
+                    kind: EmlKind::parse(e.get("kind")?.as_str()?)?,
+                    path: e.get("path")?.as_str()?.to_string(),
+                    name: e
+                        .get("name")
+                        .and_then(Json::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                })
+            }),
         })
     }
 }
@@ -596,6 +656,7 @@ mod tests {
                 audit: false,
                 force: true,
                 user_scope: None,
+                eml: None,
             },
             started: 10,
             finished: Some(20),
