@@ -39,6 +39,15 @@ pub fn handle(
         ("POST", "/api/delivery/inbox/uninstall") => inbox_install(req, cfg, false),
         ("POST", "/api/delivery/testmail") => testmail_start(req),
         ("GET", "/api/delivery/testmail/last") => testmail_last(),
+        ("GET", "/api/delivery/monitors") => monitors_list(cfg),
+        ("POST", "/api/delivery/monitors") => monitors_add(req, cfg),
+        ("DELETE", "/api/delivery/monitors") | ("POST", "/api/delivery/monitors/remove") => {
+            monitors_remove(req, cfg)
+        }
+        ("POST", "/api/delivery/monitors/enable") => monitors_enable(req, cfg),
+        ("POST", "/api/delivery/monitors/run") => monitors_run(req, cfg),
+        ("GET", "/api/delivery/monitors/runs") => monitors_runs(req, cfg),
+        ("GET", "/api/delivery/monitors/report") => monitors_report(req, cfg),
         _ => Response::json(404, r#"{"error":"not found"}"#),
     }
 }
@@ -541,5 +550,184 @@ fn testmail_last() -> Response {
     match msfe_core::testmail::last() {
         Some(v) => Response::json(200, &v.to_string()),
         None => err(404, "no test message sent yet"),
+    }
+}
+
+// ---- monitors --------------------------------------------------------------
+
+fn db_error(e: std::io::Error) -> Response {
+    let msg = e.to_string();
+    if msg.contains("doesn't exist") {
+        return err(503, "the delivery monitors table is missing — apply the pending migration: msfe-ng db-migrate");
+    }
+    err(
+        503,
+        &format!("database: {}", msg.lines().last().unwrap_or("error")),
+    )
+}
+
+fn monitors_list(cfg: &Config) -> Response {
+    match msfe_core::deliverymon::list(cfg, None) {
+        Ok(ms) => Response::json(
+            200,
+            &Json::Object(vec![
+                (
+                    "monitors".into(),
+                    Json::Array(ms.iter().map(|m| m.to_json()).collect()),
+                ),
+                ("max".into(), Json::Int(cfg.delivery_max_monitors as i64)),
+                (
+                    "telegram".into(),
+                    Json::Bool(msfe_core::telegram::configured(cfg)),
+                ),
+            ])
+            .to_string(),
+        ),
+        Err(e) => db_error(e),
+    }
+}
+
+fn body_json(req: &Request) -> Result<Json, Response> {
+    Json::parse(&req.body).map_err(|e| err(400, &format!("bad json: {e}")))
+}
+
+fn monitors_add(req: &Request, cfg: &Config) -> Response {
+    let v = match body_json(req) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let inputs = match deliveryrun::parse_inputs(
+        &v.str_field("address"),
+        v.get("ip").and_then(Json::as_str),
+        v.get("selector").and_then(Json::as_str),
+        v.get("days").and_then(Json::as_i64),
+        matches!(v.get("audit"), Some(Json::Bool(true))),
+        true,
+        None,
+    ) {
+        Ok(i) => i,
+        Err(e) => return err(400, &e),
+    };
+    let interval = v
+        .get("interval_mins")
+        .and_then(Json::as_i64)
+        .unwrap_or(msfe_core::deliverymon::DEFAULT_INTERVAL_MINS as i64)
+        .clamp(1, 100_000) as u32;
+    match msfe_core::deliverymon::add(cfg, &inputs, interval, "") {
+        Ok(m) => Response::json(201, &m.to_json().to_string()),
+        Err(e) if e.contains("doesn't exist") => err(503, "the delivery monitors table is missing — apply the pending migration: msfe-ng db-migrate"),
+        Err(e) => err(400, &e),
+    }
+}
+
+fn id_of(req: &Request) -> Option<u32> {
+    req.query_param("id")
+        .or_else(|| {
+            Json::parse(&req.body)
+                .ok()
+                .and_then(|v| v.get("id").and_then(Json::as_i64).map(|i| i.to_string()))
+        })
+        .and_then(|s| s.parse().ok())
+}
+
+fn monitors_remove(req: &Request, cfg: &Config) -> Response {
+    let Some(id) = id_of(req) else {
+        return err(400, "id required");
+    };
+    match msfe_core::deliverymon::remove(cfg, id, None) {
+        Ok(true) => Response::json(200, r#"{"ok":true}"#),
+        Ok(false) => err(404, "no such monitor"),
+        Err(e) => db_error(e),
+    }
+}
+
+fn monitors_enable(req: &Request, cfg: &Config) -> Response {
+    let Some(id) = id_of(req) else {
+        return err(400, "id required");
+    };
+    let on = Json::parse(&req.body)
+        .ok()
+        .is_some_and(|v| matches!(v.get("enabled"), Some(Json::Bool(true))));
+    match msfe_core::deliverymon::set_enabled(cfg, id, on) {
+        Ok(()) => Response::json(200, r#"{"ok":true}"#),
+        Err(e) => db_error(e),
+    }
+}
+
+/// Run one monitor now: the same as a scheduled pass, on a thread; the
+/// caller polls the runs list.
+fn monitors_run(req: &Request, cfg: &Config) -> Response {
+    let Some(id) = id_of(req) else {
+        return err(400, "id required");
+    };
+    let m = match msfe_core::deliverymon::get(cfg, id) {
+        Ok(Some(m)) => m,
+        Ok(None) => return err(404, "no such monitor"),
+        Err(e) => return db_error(e),
+    };
+    if let Err(e) = msfe_core::db::exec_stdin(
+        cfg,
+        &format!(
+            "UPDATE delivery_monitors SET last_run_at = 0 WHERE id = {};\n",
+            m.id
+        ),
+    ) {
+        return db_error(e);
+    }
+    let cfg2 = cfg.clone();
+    std::thread::spawn(move || {
+        let _ = msfe_core::deliverymon::run_due(&cfg2, false);
+    });
+    Response::json(
+        202,
+        &Json::Object(vec![
+            ("ok".into(), Json::Bool(true)),
+            ("id".into(), Json::Int(m.id as i64)),
+        ])
+        .to_string(),
+    )
+}
+
+fn monitors_runs(req: &Request, cfg: &Config) -> Response {
+    let Some(id) = id_of(req) else {
+        return err(400, "id required");
+    };
+    let limit = req
+        .query_param("limit")
+        .and_then(|l| l.parse().ok())
+        .unwrap_or(50);
+    match msfe_core::deliverymon::runs(cfg, id, limit) {
+        Ok(rows) => {
+            if req.query_param("format").as_deref() == Some("csv") {
+                Response::text(200, &msfe_core::deliverymon::history_csv(&rows))
+            } else {
+                Response::json(
+                    200,
+                    &Json::Object(vec![(
+                        "runs".into(),
+                        Json::Array(rows.iter().map(|r| r.to_json()).collect()),
+                    )])
+                    .to_string(),
+                )
+            }
+        }
+        Err(e) => db_error(e),
+    }
+}
+
+fn monitors_report(req: &Request, cfg: &Config) -> Response {
+    let Some(run) = req.query_param("run").and_then(|s| s.parse::<u32>().ok()) else {
+        return err(400, "run required");
+    };
+    match msfe_core::deliverymon::run_report(cfg, run) {
+        Ok(Some(r)) => {
+            if req.query_param("format").as_deref() == Some("html") {
+                Response::html(200, &msfe_core::deliveryhtml::render(&r))
+            } else {
+                Response::json(200, &report_json(&r).to_string())
+            }
+        }
+        Ok(None) => err(404, "no such run"),
+        Err(e) => db_error(e),
     }
 }

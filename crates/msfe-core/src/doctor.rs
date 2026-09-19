@@ -743,6 +743,19 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
         snap_detail,
         "msfe-ng snapshot export  (or Config → Export snapshot)",
     ));
+    // the diagnostic inbox is optional: a note, never a failure
+    let inbox = crate::diaginbox::installed();
+    out.push(check(
+        "diagnostic inbox",
+        true,
+        Level::Ok,
+        if inbox {
+            "installed: the Delivery test tab can hand out one-time dt-<token> addresses".into()
+        } else {
+            "not installed (optional): the Delivery test tab can receive test messages once `msfe-ng delivery inbox install` has wired Exim".into()
+        },
+        "msfe-ng delivery inbox install",
+    ));
 
     out
 }

@@ -44,6 +44,7 @@ msfe-ng delivery test <address> [--ip <ip>] [--selector <s>] [--audit] [--days <
 msfe-ng delivery eml <file.eml> [--bounce] [--address <a>] [--ip <ip>] [--selector <s>] [--audit] [--json | --html]   the same for a saved message, or a bounce taken apart
 msfe-ng delivery inbox <install [--dry-run] | uninstall [--dry-run] | status | new | poll <token> [--json] | remove <token> | sweep>   the diagnostic inbox (dt-<token>@<host> addresses via exim.conf.local)
 msfe-ng delivery testmail --from <hosted address> --to <address> [--tag <t>] [--follow <secs>] [--json]   send a real test message and follow it through the Exim log
+msfe-ng delivery monitor <list [--json] | add <address> [--interval-mins n] [--audit] [--ip ..] [--selector ..] | remove <id|address> | run [--dry-run] [--id n]>   scheduled re-tests (history in MySQL, regressions to Telegram)
 ```
 
 Environment: `MSFE_NG_SOCKET` (daemon socket), `MSFE_NG_CONFIG` (config file),

@@ -63,6 +63,16 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
         ]),
         ("delivery", Some("inbox")) => Some(&["--dry-run", "--json"]),
         ("delivery", Some("testmail")) => Some(&["--from", "--to", "--tag", "--json", "--follow"]),
+        ("delivery", Some("monitor")) => Some(&[
+            "--interval-mins",
+            "--audit",
+            "--ip",
+            "--selector",
+            "--days",
+            "--dry-run",
+            "--id",
+            "--json",
+        ]),
         ("delivery", Some("eml")) => Some(&[
             "--bounce",
             "--address",
@@ -103,7 +113,7 @@ fn usage_of(cmd: &str) -> &'static str {
         "backup" => "msfe-ng backup <file.tar.gz>   (alias: snapshot export --only msfe)",
         "restore" => "msfe-ng restore <file.tar.gz> [--yes]   (alias: snapshot import --only msfe)",
         "conf" => "msfe-ng conf <test [--no-lint] [--json] [--with <id>=<file>]... | test-message <clean|gtube|eicar|file.eml> [--offline] [--json]>",
-        "delivery" => "msfe-ng delivery <test <address> [--ip <sending ip>] [--selector <dkim selector>] [--audit] [--days <1-7>] [--json | --html] [--force] | eml <file.eml> [--bounce] [--address <a>] [--ip <ip>] [--selector <s>] [--audit] [--json | --html] | inbox <install [--dry-run] | uninstall [--dry-run] | status | new | poll <token> [--json] | remove <token> | sweep> | testmail --from <local address> --to <address> [--tag <t>] [--follow <secs>] [--json]>",
+        "delivery" => "msfe-ng delivery <test <address> [--ip <sending ip>] [--selector <dkim selector>] [--audit] [--days <1-7>] [--json | --html] [--force] | eml <file.eml> [--bounce] [--address <a>] [--ip <ip>] [--selector <s>] [--audit] [--json | --html] | inbox <install [--dry-run] | uninstall [--dry-run] | status | new | poll <token> [--json] | remove <token> | sweep> | testmail --from <local address> --to <address> [--tag <t>] [--follow <secs>] [--json] | monitor <list [--json] | add <address> [--interval-mins n] [--audit] [--ip ..] [--selector ..] [--days n] | remove <id|address> | run [--dry-run] [--id n]>>",
         _ => "msfe-ng help",
     }
 }
@@ -713,6 +723,7 @@ fn cmd_housekeeping() -> ExitCode {
     let body_days = msfe_core::housekeeping::body_retention_days(&settings);
     msfe_core::deliveryrun::sweep();
     msfe_core::diaginbox::sweep();
+    let _ = msfe_core::deliverymon::prune(&cfg, 90);
     match msfe_core::housekeeping::prune(&cfg, days) {
         Ok(()) => {
             println!("housekeeping: pruned maillog/quarantine rows older than {days} days");
@@ -1812,6 +1823,9 @@ fn cmd_delivery(sub: Option<&str>, rest: &[String]) -> ExitCode {
     if sub == Some("testmail") {
         return cmd_delivery_testmail(rest);
     }
+    if sub == Some("monitor") {
+        return cmd_delivery_monitor(rest);
+    }
     let eml_mode = match sub {
         Some("test") => false,
         Some("eml") => true,
@@ -2011,6 +2025,140 @@ fn cmd_delivery(sub: Option<&str>, rest: &[String]) -> ExitCode {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+fn cmd_delivery_monitor(rest: &[String]) -> ExitCode {
+    use msfe_core::deliverymon;
+    let cfg = Config::load(&config_path());
+    let json = rest.iter().any(|a| a == "--json");
+    let dry = rest.iter().any(|a| a == "--dry-run");
+    let positional: Vec<&String> = rest.iter().filter(|a| !a.starts_with('-')).collect();
+    let opt = |name: &str| {
+        rest.iter()
+            .position(|a| a == name)
+            .and_then(|i| rest.get(i + 1))
+            .cloned()
+    };
+    let db_err = |e: std::io::Error| -> ExitCode {
+        eprintln!("msfe-ng delivery monitor: {e}\n(the monitors live in MySQL: is the database configured and migration 0003 applied? `msfe-ng db-migrate`)");
+        ExitCode::from(1)
+    };
+    match positional.first().map(|s| s.as_str()) {
+        Some("list") => {
+            match deliverymon::list(&cfg, None) {
+                Ok(ms) => {
+                    if json {
+                        println!(
+                            "{}",
+                            msfe_core::json::Json::Array(ms.iter().map(|m| m.to_json()).collect())
+                        );
+                    } else if ms.is_empty() {
+                        println!("no delivery monitors (add one: msfe-ng delivery monitor add <address>)");
+                    } else {
+                        for m in ms {
+                            println!(
+                                "{:<5} {:<40} every {:>4} min  {}  last {}  {}",
+                                m.id,
+                                m.address,
+                                m.interval_mins,
+                                if m.enabled { "on " } else { "off" },
+                                if m.last_run_at == 0 {
+                                    "never".to_string()
+                                } else {
+                                    fmt_when(m.last_run_at)
+                                },
+                                m.last_summary
+                            );
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => db_err(e),
+            }
+        }
+        Some("add") => {
+            let Some(address) = positional.get(1) else {
+                eprintln!("usage: {}", usage_of("delivery"));
+                return ExitCode::from(2);
+            };
+            let inputs = match msfe_core::deliveryrun::parse_inputs(
+                address,
+                opt("--ip").as_deref(),
+                opt("--selector").as_deref(),
+                opt("--days").and_then(|d| d.parse().ok()),
+                rest.iter().any(|a| a == "--audit"),
+                true,
+                None,
+            ) {
+                Ok(i) => i,
+                Err(e) => {
+                    eprintln!("msfe-ng delivery monitor: {e}");
+                    return ExitCode::from(3);
+                }
+            };
+            let interval = opt("--interval-mins")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(deliverymon::DEFAULT_INTERVAL_MINS);
+            match deliverymon::add(&cfg, &inputs, interval, "") {
+                Ok(m) => {
+                    println!("monitor {} for {} every {} min (first run at the next `msfe-ng monitor` pass)", m.id, m.address, m.interval_mins);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("msfe-ng delivery monitor: {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        Some("remove") => {
+            let Some(what) = positional.get(1) else {
+                eprintln!("usage: {}", usage_of("delivery"));
+                return ExitCode::from(2);
+            };
+            let id = match what.parse::<u32>() {
+                Ok(id) => Some(id),
+                Err(_) => deliverymon::list(&cfg, None).ok().and_then(|ms| {
+                    ms.into_iter()
+                        .find(|m| m.address.eq_ignore_ascii_case(what))
+                        .map(|m| m.id)
+                }),
+            };
+            match id {
+                Some(id) => match deliverymon::remove(&cfg, id, None) {
+                    Ok(true) => {
+                        println!("removed monitor {id}");
+                        ExitCode::SUCCESS
+                    }
+                    Ok(false) => {
+                        eprintln!("no monitor {id}");
+                        ExitCode::from(1)
+                    }
+                    Err(e) => db_err(e),
+                },
+                None => {
+                    eprintln!("no monitor for {what}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        Some("run") => {
+            if let Some(id) = opt("--id").and_then(|v| v.parse::<u32>().ok()) {
+                // force one monitor now, regardless of its schedule
+                let _ = msfe_core::db::exec_stdin(
+                    &cfg,
+                    &format!("UPDATE delivery_monitors SET last_run_at = 0 WHERE id = {id};\n"),
+                );
+            }
+            for n in deliverymon::run_due(&cfg, dry) {
+                println!("{n}");
+            }
+            ExitCode::SUCCESS
+        }
+        _ => {
+            eprintln!("usage: {}", usage_of("delivery"));
+            ExitCode::from(2)
+        }
     }
 }
 
@@ -2268,6 +2416,8 @@ COMMANDS:
                         attachments) or, with --bounce, a bounce taken apart
     delivery testmail --from <a> --to <b>   Send a real test message from a hosted address and follow it
                         through the Exim log until the remote accepts or refuses it
+    delivery monitor <list|add <address>|remove <id>|run>   Scheduled re-tests (msfe-ng monitor runs the due
+                        ones; regressions go to Telegram); history in MySQL
     delivery inbox <install|uninstall|status|new|poll <token>|remove <token>|sweep>
                         The diagnostic inbox: one-time dt-<token>@<host> addresses wired into
                         Exim via /etc/exim.conf.local; `new` prints one, `poll` analyses what arrived

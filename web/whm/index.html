@@ -2119,6 +2119,66 @@ async function renderDelivery(){
   };
   api('/api/jobs/delivery-testmail').then(s=>{if(s&&s.running){tmBtn.disabled=true;tm.open=true;tmFollow();}else if(s&&s.known)tmShowLast();}).catch(()=>{});
 
+  // ---- monitors -----------------------------------------------------------------
+  // Scheduled re-tests: the 5-minute monitor cron runs the due ones, keeps
+  // the history in MySQL and sends Telegram alerts on regressions.
+  const mo=el('details',{class:'card'},el('summary',{},'Monitors — re-test on a schedule'));v.append(mo);
+  const moBody=el('div');mo.append(moBody);
+  async function renderMonitors(){
+    moBody.innerHTML='';
+    const d=await api('/api/delivery/monitors');
+    if(!d||d.error){moBody.append(el('div',{class:'note warn',style:'font-size:.8rem'},(d&&d.error)||'cannot load the monitors'));return;}
+    moBody.append(el('div',{class:'muted',style:'font-size:.8rem;margin:.4rem 0'},`Each monitor re-runs the test every so often (${d.max} at most); a check that gets worse — pass to warning or fail, warning to fail — or recovers is reported${d.telegram?' on Telegram':' (Telegram is not configured: Settings → Telegram alerts)'}, under the usual alert cooldown. History is kept for 90 days.`));
+    const addAddr=el('input',{type:'email',placeholder:'address',style:'max-width:18rem',value:addr.value.trim()});
+    const addInt=el('select',{},...[[60,'every hour'],[180,'every 3 hours'],[360,'every 6 hours'],[720,'every 12 hours'],[1440,'daily']].map(([v,l])=>el('option',{value:String(v)},l)));
+    addInt.value='360';
+    const addAudit=el('input',{type:'checkbox'});
+    const addBtn=el('button',{class:'act'},'Add monitor');
+    moBody.append(el('div',{class:'ctl'},addAddr,addInt,el('label',{class:'muted',style:'font-size:.8rem;display:flex;gap:.3rem;align-items:center'},addAudit,' with server audit'),addBtn));
+    addBtn.onclick=async()=>{
+      const a=addAddr.value.trim();if(!a){addAddr.focus();return;}
+      const body={address:a,interval_mins:+addInt.value,audit:addAudit.checked};
+      if(ipIn.value.trim())body.ip=ipIn.value.trim();if(selIn.value.trim())body.selector=selIn.value.trim();
+      const r=await api('/api/delivery/monitors',{method:'POST',body});
+      if(!r||r.error){toast((r&&r.error)||'cannot add');return;}
+      toast('Monitor added — the first run happens at the next monitor pass (within 5 minutes)');renderMonitors();
+    };
+    const t=el('table');moBody.append(t);
+    t.append(el('tr',{},...['Address','Interval','Last run','Result','',''].map(h=>el('th',{},h))));
+    (d.monitors||[]).forEach(m=>{
+      const runNow=el('button',{class:'linkbtn'},'run now');
+      runNow.onclick=async()=>{const r=await api('/api/delivery/monitors/run',{method:'POST',body:{id:m.id}});if(r&&!r.error){toast('Running — refresh in a minute');setTimeout(renderMonitors,20000);}else toast((r&&r.error)||'failed');};
+      const hist=el('button',{class:'linkbtn'},'history');
+      hist.onclick=()=>showHistory(m);
+      const tog=el('button',{class:'linkbtn'},m.enabled?'pause':'resume');
+      tog.onclick=async()=>{await api('/api/delivery/monitors/enable',{method:'POST',body:{id:m.id,enabled:!m.enabled}});renderMonitors();};
+      const rm=el('button',{class:'linkbtn'},'remove');
+      rm.onclick=async()=>{if(!confirm(`Remove the monitor for ${m.address} and its history?`))return;await api('/api/delivery/monitors/remove',{method:'POST',body:{id:m.id}});renderMonitors();};
+      const sum=m.last_summary?el('span',{class:'dlv-mini'},m.last_summary):el('span',{class:'muted'},'—');
+      t.append(el('tr',{},el('td',{class:'mono'},m.address+(m.options&&m.options.audit?' (audit)':'')+(m.enabled?'':' · paused')),el('td',{},`${m.interval_mins>=60?m.interval_mins/60+' h':m.interval_mins+' min'}`),el('td',{},m.last_run_at?fmtTime(m.last_run_at):'never'),el('td',{},sum),el('td',{},runNow,' ',hist),el('td',{},tog,' ',rm)));
+    });
+    if(!(d.monitors||[]).length)t.append(el('tr',{},el('td',{colspan:'6',class:'muted'},'No monitors yet.')));
+  }
+  async function showHistory(m){
+    const md=modal(`History — ${m.address}`);
+    const d=await api('/api/delivery/monitors/runs?id='+m.id+'&limit=100');
+    if(!d||d.error){md.body.append(el('div',{class:'muted'},(d&&d.error)||'cannot load'));return;}
+    const csv=el('button',{class:'act plain'},'Download CSV');
+    csv.onclick=async()=>{const t=await apiRaw('/api/delivery/monitors/runs?id='+m.id+'&limit=1000&format=csv');if(t.ok)downloadBlob(`delivery-monitor-${m.address}.csv`,textBlob(t.text,'text/csv'));};
+    md.body.append(el('div',{class:'ctl',style:'margin-bottom:.4rem'},csv));
+    const t=el('table');md.body.append(t);
+    t.append(el('tr',{},...['When','Duration','Fail','Warn','Unknown','Pass',''].map(h=>el('th',{},h))));
+    (d.runs||[]).forEach(r=>{
+      const open=el('button',{class:'linkbtn'},'open');
+      open.onclick=async()=>{const rep=await api('/api/delivery/monitors/report?run='+r.id);if(!rep||rep.error){toast('cannot load');return;}md.close();runId=null;renderer.reset();prog.style.display='';addr.value=rep.inputs.address;renderer.add(rep.checks||[]);showProgress(rep);exportBtns.style.display='none';window.scrollTo({top:0,behavior:'smooth'});};
+      const html=el('button',{class:'linkbtn'},'html');
+      html.onclick=async()=>{const t=await apiRaw('/api/delivery/monitors/report?run='+r.id+'&format=html');if(!t.ok)return;const w=window.open('','_blank');if(w){w.document.open();w.document.write(t.text);w.document.close();}};
+      t.append(el('tr',{},el('td',{},fmtTime(r.started_at)),el('td',{},Math.round(r.duration_ms/1000)+' s'),el('td',{class:r.fail?'chip fail':''},String(r.fail)),el('td',{},String(r.warn)),el('td',{},String(r.unknown)),el('td',{},String(r.pass)),el('td',{},open,' ',html)));
+    });
+    if(!(d.runs||[]).length)t.append(el('tr',{},el('td',{colspan:'7',class:'muted'},'No runs yet.')));
+  }
+  mo.addEventListener('toggle',()=>{if(mo.open)renderMonitors();});
+
   // ---- recent runs ------------------------------------------------------------
   const rc=el('details',{class:'card'},el('summary',{},'Recent tests'));v.append(rc);
   const rt=el('table');rc.append(rt);

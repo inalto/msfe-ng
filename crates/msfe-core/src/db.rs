@@ -103,6 +103,11 @@ fn unescape_batch(cell: &str) -> String {
     s
 }
 
+/// SQL single-quote a string literal (quotes doubled, backslashes escaped).
+pub fn quote(s: &str) -> String {
+    format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''"))
+}
+
 /// Read a global key from the `msfe_config` kv table (daemon-writable state:
 /// alert cooldowns, last-run summaries). `None` when unset or the DB is down.
 pub fn kv_get(cfg: &Config, ckey: &str) -> Option<String> {

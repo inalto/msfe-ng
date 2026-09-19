@@ -213,10 +213,33 @@ authentication results — the *Analyse a saved message* upload reads them).
 From the shell: `msfe-ng delivery testmail --from <hosted address> --to
 <address> [--follow <secs>] [--json]`.
 
-## Monitoring
+## Monitors
 
-**Monitors** re-run a test on a schedule and alert on regressions. They
-arrive in a later release and are listed here so the section names match.
+*Monitors — re-test on a schedule* keeps a list of addresses (with their
+test options: sending IP, selector, server audit) re-tested every 1–24 hours
+(default 6) by the 5-minute `msfe-ng monitor` cron, at most
+`delivery_max_monitors` (20). Each run's full report is stored in MySQL
+(`delivery_monitors`, `delivery_runs` — migration 0003, applied by
+`msfe-ng db-migrate` on upgrade) and compared with the previous one: a check
+that got worse (pass → warning or fail, warning → fail) or recovered is sent
+to Telegram, one message per monitor per alert cooldown
+(`alert_cooldown_mins`); a lookup that merely failed (*unknown*) never
+alerts. *History* opens the runs with fail/warn/unknown/pass counts, each
+one openable in the tab or as the standalone HTML page, and downloads a CSV;
+*run now* forces a run; *pause*/*resume* and *remove* do what they say.
+Runs are kept 200 per monitor and 90 days.
+
+From the shell: `msfe-ng delivery monitor list | add <address>
+[--interval-mins n] [--audit] [--ip ..] [--selector ..] | remove <id|address>
+| run [--dry-run] [--id n]`.
+
+## The end-user variant (planned)
+
+The same checks can be offered in the cPanel user panel, limited to the
+account's own domains: the audit forced to that account, evidence masked, no
+test mail, monitors filtered by owner, a lower run rate. The API is designed
+for it (`user_scope` in the inputs, `owner` on monitors) and it will arrive in
+a later release.
 
 ## Safety
 

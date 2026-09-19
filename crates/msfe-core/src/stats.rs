@@ -495,7 +495,7 @@ pub fn message_detail(cfg: &Config, message_id: &str) -> io::Result<Json> {
 
 /// SQL single-quote a string literal safely.
 fn sql_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
+    db::quote(s)
 }
 
 /// Quarantined messages addressed to any of `domains` (the user's own domains).

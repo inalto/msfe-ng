@@ -25,6 +25,7 @@ pub mod dbtools;
 pub mod delivery;
 pub mod deliveryhtml;
 pub mod deliverylog;
+pub mod deliverymon;
 pub mod deliveryrun;
 pub mod diaginbox;
 pub mod digest;
