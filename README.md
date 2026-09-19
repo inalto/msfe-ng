@@ -171,7 +171,9 @@ msfe-ng exim <status|enable-scanning|disable-scanning|enable-cpanel-spamassassin
 msfe-ng upgrade [--check]
 msfe-ng doctor [--fix]
 msfe-ng resolver <status|install>
-msfe-ng backup <file.tgz> | restore <file.tgz>
+msfe-ng conf <test [--with <id>=<file>] | test-message <sample|file.eml>>
+msfe-ng snapshot <export [file] | import <file> [--dry-run] | list>
+msfe-ng backup <file.tgz> | restore <file.tgz>   # aliases of snapshot export/import --only msfe
 ```
 
 ## Testing status

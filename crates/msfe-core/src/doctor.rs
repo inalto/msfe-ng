@@ -708,7 +708,69 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
         ));
     }
 
+    // ---- configuration files vs the running service, snapshots -----------
+    // MailScanner reads MailScanner.conf, spamassassin.conf, spam.lists.conf
+    // and virus.scanners.conf only at start: an edit saved "without restart"
+    // (or by hand) is not in effect until the next one.
+    let cat = crate::confcatalog::scan(cfg, config_file);
+    let pending = crate::confcatalog::pending_restart(&cat.entries, service::active_since());
+    out.push(check(
+        "MailScanner config newer than the running service",
+        pending.is_empty(),
+        Level::Warn,
+        if pending.is_empty() {
+            "the running MailScanner has read every start-time config file as it is on disk".into()
+        } else {
+            format!(
+                "changed since MailScanner last started: {} — the running engine still uses the old values",
+                pending
+                    .iter()
+                    .map(|i| i.trim_start_matches("ms:"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        },
+        "msfe-ng service restart  (or Config → Restart MailScanner now)",
+    ));
+    let (snap_ok, snap_detail) = snapshot_verdict(
+        crate::snapshot::list(cfg).first().map(|(_, _, m)| *m),
+        crate::dbtools::now_secs(),
+    );
+    out.push(check(
+        "configuration snapshot",
+        snap_ok,
+        Level::Warn,
+        snap_detail,
+        "msfe-ng snapshot export  (or Config → Export snapshot)",
+    ));
+
     out
+}
+
+/// A snapshot from the last 30 days is what a restore or a move to another
+/// host can start from.
+pub fn snapshot_verdict(latest_mtime: Option<u64>, now: u64) -> (bool, String) {
+    const MAX_AGE: u64 = 30 * 86_400;
+    match latest_mtime {
+        None => (
+            false,
+            "no configuration snapshot has been taken yet — nothing to restore or move from".into(),
+        ),
+        Some(m) if now.saturating_sub(m) > MAX_AGE => (
+            false,
+            format!(
+                "the newest snapshot is {} days old",
+                now.saturating_sub(m) / 86_400
+            ),
+        ),
+        Some(m) => (
+            true,
+            format!(
+                "newest snapshot taken {} day(s) ago",
+                now.saturating_sub(m) / 86_400
+            ),
+        ),
+    }
 }
 
 /// True when nothing failed (warnings allowed).
@@ -1576,6 +1638,19 @@ pub fn exim_probe_verdict(real_bv: &str, probe_bv: &str) -> (bool, String) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn snapshot_verdict_wants_one_from_the_last_month() {
+        let now = 100 * 86_400;
+        assert!(!snapshot_verdict(None, now).0);
+        assert!(snapshot_verdict(Some(now - 5 * 86_400), now).0);
+        assert!(snapshot_verdict(Some(now - 5 * 86_400), now)
+            .1
+            .contains("5 day"));
+        let (ok, d) = snapshot_verdict(Some(now - 40 * 86_400), now);
+        assert!(!ok);
+        assert!(d.contains("40 days old"));
+    }
+
     // Spamhaus and DNSWL refuse queries relayed through shared/public
     // resolvers and say so in the answer; URIBL uses 127.0.0.1; a list that
     // answers nothing for its own test record is dead or unreachable.
@@ -1808,6 +1883,7 @@ mod tests {
             chk("Razor reporting identity", Level::Warn),
             chk("Pyzor shared home", Level::Warn),
             chk("phishing site lists updating", Level::Warn),
+            chk("configuration snapshot", Level::Warn),
             chk("message archive configured", Level::Warn),
             chk("spool files correctly placed", Level::Fail),
             chk("scanning kill switch", Level::Warn),

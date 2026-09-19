@@ -34,7 +34,12 @@ msfe-ng spambox <enable|disable|status>
 
 msfe-ng db-migrate [--status]       apply / list SQL migrations
 msfe-ng db <backup|fix|bayes-repair|bayes-recreate>
-msfe-ng backup <file.tgz> | restore <file.tgz>      config + policy
+msfe-ng conf test [--no-lint] [--json] [--with <id>=<file>]   lint + cross-file checks as findings (exit 1 on a failure)
+msfe-ng conf test-message <clean|gtube|eicar|file.eml> [--offline] [--json]   what the chain would do with a message
+msfe-ng snapshot export [file] [--only mailscanner|msfe]   MailScanner etc tree + /etc/msfe-ng as one tar.gz
+msfe-ng snapshot import <file> [--dry-run] [--only …] [--yes]   compare with this host, import chosen files
+msfe-ng snapshot list
+msfe-ng backup <file.tgz> | restore <file.tgz>      aliases: snapshot export/import --only msfe
 ```
 
 Environment: `MSFE_NG_SOCKET` (daemon socket), `MSFE_NG_CONFIG` (config file),

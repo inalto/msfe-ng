@@ -68,10 +68,15 @@ front-end (its uninstaller removes the engine too).
 ## Backup, uninstall
 
 ```sh
-msfe-ng backup /root/msfe-ng-backup.tar.gz     # config + policy
+msfe-ng snapshot export /root/msfe-ng-snapshot.tar.gz   # MailScanner etc tree + /etc/msfe-ng, with a manifest
+msfe-ng snapshot import /root/msfe-ng-snapshot.tar.gz --dry-run   # compare first, then without --dry-run
+msfe-ng backup /root/msfe-ng-backup.tar.gz     # /etc/msfe-ng only (alias of snapshot export --only msfe)
 msfe-ng restore /root/msfe-ng-backup.tar.gz
 /opt/msfe-ng/packaging/uninstall.sh            # add --purge to remove config too
 ```
+
+A snapshot is also what moves a setup to another server: export here, import
+there (the [Config](Config) tab does both with a per-file diff).
 
 Uninstall unhooks the logging plugin, deregisters the plugin and removes all
 MSFE-NG files. It never drops the database — it prints the `DROP DATABASE`

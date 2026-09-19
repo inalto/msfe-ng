@@ -31,6 +31,9 @@ listed only to name the *behavior* being matched — no code is reused.
 | Conf file editing UI | Config tab visual editor: comment-preserving parser (`msfe-core::conffile`), per-key apply, filter; raw mode retained | M9 |
 | ConfigServer OutGoing Spam Monitor (osm) integration | **out of scope — separate proprietary ConfigServer product** | — |
 | Phone-home licensing (`servers`, base64 blobs) | **dropped — intentionally not reimplemented** | — |
+| Editing every MailScanner configuration file (WHM *Configuration* section: MailScanner.conf, spamassassin.conf, spam lists, virus scanners, filename/filetype rules, phishing lists, rulesets, conf.d, reports) | Config tab: file tree + typed/table/raw editors, every save validated on a staged copy with history and rollback (`confcatalog`, `confsave`, `confstage`, `msdefs`) | M11 |
+| Configuration tester (MSFE's *lint* page) | `msfe-ng conf test` / Config → Test configuration: parsed lint findings + cross-file checks (`conftest`, `confcheck`); test-message simulation (`msgtest`) | M11 |
+| Config export/import between servers | `msfe-ng snapshot export|import|list` and the Config tab's Export/Import wizard (`snapshot`) | M11 |
 
 ## Config formats to import (facts, safe to reuse)
 The M1 importer reads legacy MSFE flat files so existing installs can migrate:

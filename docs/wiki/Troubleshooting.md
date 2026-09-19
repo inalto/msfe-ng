@@ -27,6 +27,27 @@ database creation, enabling message logging and config paths stay listed with
 their fix. The installer runs `doctor --fix` at the end of every install and
 upgrade, and the guided migration runs it as its last step.
 
+## A configuration change did not take effect
+
+MailScanner reads `MailScanner.conf`, `spamassassin.conf`, `spam.lists.conf`,
+`virus.scanners.conf`, `conf.d/` and `mcp/` only at start. A save from the
+[Config](Config) tab restarts it unless *apply without restart* was ticked; a
+hand edit does not. The doctor's *MailScanner config newer than the running
+service* names the files the running engine has not read — `msfe-ng service
+restart` (or the tab's **Restart MailScanner now** banner) applies them.
+Rulesets, filename rules and phishing lists are re-read per batch and only
+need a reload.
+
+## A save was refused or rolled back
+
+Every save is linted on a staged copy first; the report under the editor shows
+the exact `MailScanner --lint` / `spamassassin --lint` lines. **Test
+configuration** on the Config tab lists the same findings for the files on disk
+with links to the file and setting; `msfe-ng conf test` prints them. A `conf.d`
+fragment is the one kind validated after apply — if that lint fails the
+previous file is written back and the report says *rolled back*. Every replaced
+version is in the file's **History**.
+
 ## Mail stops flowing
 
 1. **Service tab** — is MailScanner *running*, *wired*, *scanning enabled*, and
