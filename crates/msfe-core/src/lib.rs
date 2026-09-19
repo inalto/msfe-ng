@@ -33,6 +33,7 @@ pub mod mailscanner;
 pub mod migrate;
 pub mod mime;
 pub mod monitor;
+pub mod msdefs;
 pub mod msgrammar;
 pub mod panel;
 pub mod quarantine;

@@ -626,6 +626,42 @@
   .kv input.flash {
     box-shadow: 0 0 0 2px var(--warning);
   }
+  .kv .ktags {
+    display: flex;
+    gap: 0.3rem;
+    flex: none;
+    min-width: 5rem;
+  }
+  .ktag {
+    font-size: 0.66rem;
+    line-height: 1.5;
+    padding: 0 0.4rem;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: var(--surface-2);
+    color: var(--muted);
+    white-space: nowrap;
+    cursor: default;
+  }
+  button.ktag {
+    cursor: pointer;
+  }
+  button.ktag:hover {
+    color: var(--ink);
+    border-color: var(--accent);
+  }
+  .ktag.dot {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+  .ktag.warn {
+    color: var(--warning);
+    border-color: var(--warning);
+  }
+  .kv .kvrows.onlydiff > .cmt,
+  .kv .kvrows.onlydiff > .kvrow[data-differs="0"] {
+    display: none;
+  }
   .tbl input,
   .tbl select {
     width: 100%;

@@ -211,6 +211,59 @@ fn parsed_json(kind: Kind, text: &str) -> Json {
     }
 }
 
+/// Per-key typing from the engine's ConfigDefs.pl for the keys present in
+/// `text`: `{key: {type, default, ruleset, options}}`; `Null` without a
+/// readable schema (the editor then stays untyped).
+fn schema_json(cfg: &Config, text: &str) -> Json {
+    let lay = msfe_core::layout::resolve(cfg);
+    let Some(schema) = msfe_core::msdefs::load(&lay) else {
+        return Json::Null;
+    };
+    let mut out = Vec::new();
+    for l in conffile::parse(text) {
+        if let conffile::ConfLine::Entry { key, .. } = l {
+            if out.iter().any(|(k, _)| *k == key) {
+                continue;
+            }
+            let v = match schema.lookup(&key) {
+                // `%org-name% = …` lines define variables, not directives
+                _ if key.starts_with('%') => Json::Object(vec![s("type", "variable")]),
+                Some(d) => Json::Object(vec![
+                    s("type", d.ty.as_str()),
+                    s("default", &d.default),
+                    ("ruleset".into(), Json::Bool(d.ruleset_ok())),
+                    ("options".into(), strs(&d.words)),
+                ]),
+                None => Json::Null, // unknown to the engine: a typo, or a newer directive
+            };
+            out.push((key, v));
+        }
+    }
+    Json::Object(out)
+}
+
+/// Keys that a `conf.d` fragment sets again: `{key: "conf.d/x.conf"}` — the
+/// fragment wins, since the engine reads them after the main file.
+fn overrides_json(cat: &confcatalog::Catalog) -> Json {
+    let mut out: Vec<(String, Json)> = Vec::new();
+    for e in cat
+        .entries
+        .iter()
+        .filter(|e| e.rel.starts_with("conf.d/") && e.rel.ends_with(".conf"))
+    {
+        let Ok(t) = std::fs::read_to_string(&e.path) else {
+            continue;
+        };
+        for l in conffile::parse(&t) {
+            if let conffile::ConfLine::Entry { key, .. } = l {
+                out.retain(|(k, _)| *k != key);
+                out.push((key, Json::str(&e.rel)));
+            }
+        }
+    }
+    Json::Object(out)
+}
+
 fn resolve(req_id: &str, cfg: &Config, config_file: &Path) -> Result<Entry, Response> {
     confcatalog::resolve(cfg, config_file, req_id).ok_or_else(|| err(404, "no such file"))
 }
@@ -228,6 +281,23 @@ fn file(req: &Request, cfg: &Config, config_file: &Path) -> Response {
     let mut obj = entry_json(&e);
     obj.push(("content".into(), Json::str(&text)));
     obj.push(("parsed".into(), parsed_json(e.kind, &text)));
+    if e.root == Root::Ms && matches!(e.kind, Kind::KeyValue(conffile::Style::Plain)) {
+        let cat = confcatalog::scan(cfg, config_file);
+        obj.push(("schema".into(), schema_json(cfg, &text)));
+        obj.push((
+            "rulesets".into(),
+            Json::Array(
+                cat.entries
+                    .iter()
+                    .filter(|x| x.rel.starts_with("rules/") && x.rel.ends_with(".rules"))
+                    .map(|x| Json::str(x.rel.trim_start_matches("rules/")))
+                    .collect(),
+            ),
+        ));
+        if e.rel == "MailScanner.conf" {
+            obj.push(("overrides".into(), overrides_json(&cat)));
+        }
+    }
     obj.push((
         "history".into(),
         Json::Int(confsave::history(cfg, &e).len() as i64),

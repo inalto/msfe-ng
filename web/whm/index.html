@@ -1862,17 +1862,59 @@ function renderDiff(ops,ctx=3){
 function kvEditor(d){
   const root=el('div',{class:'kv'});
   const filter=el('input',{placeholder:'filter settings…',style:'max-width:20rem;margin-bottom:.5rem'});
+  const showChanged=el('label',{class:'muted',style:'font-size:.78rem;margin-left:.8rem'},el('input',{type:'checkbox'}),' only settings that differ from the engine default');
   const rows=el('div',{class:'kvrows'});
   const ORIG={};
+  const schema=d.schema||null,rulesets=d.rulesets||[],overrides=d.overrides||{};
+  const isRulesetPath=v=>/\.rules$|%rules-dir%|\//.test(v)&&!/^\d/.test(v)&&v.includes('/');
+  function pickRuleset(inp){
+    const m=modal('Choose a ruleset');
+    if(!rulesets.length){m.body.append(el('div',{class:'muted'},'No rulesets under rules/ yet — create one with "+ New" in the file tree.'));return;}
+    m.body.append(el('div',{class:'muted',style:'font-size:.8rem;margin-bottom:.5rem'},'The directive then takes its value per sender/recipient from the ruleset (first match wins). The file is referenced through %rules-dir%.'));
+    rulesets.forEach(r=>m.body.append(Object.assign(el('button',{class:'act plain',style:'display:block;width:100%;text-align:left;margin:.15rem 0'},el('span',{class:'mono'},r)),{onclick:()=>{setVal(inp,'%rules-dir%/'+r);m.close();}})));
+  }
+  function setVal(inp,v){inp.value=v;inp.dispatchEvent(new Event('input'));}
   (d.parsed||[]).forEach(l=>{
     if(l.t==='comment'||l.t==='other')rows.append(el('div',{class:'muted cmt'},l.text));
     else if(l.t==='entry'){
       ORIG[l.key]=l.value;
-      const inp=el('input',{value:l.value,'data-k':l.key});
-      inp.oninput=()=>{inp.classList.toggle('changed',inp.value!==ORIG[l.key]);};
-      rows.append(el('div',{class:'kvrow'},el('div',{class:'k',title:l.key},l.key),inp));
+      const def=schema?schema[l.key]:undefined;
+      let inp;
+      if(def&&def.type==='yesno'&&def.options.length&&(def.options.includes(l.value.toLowerCase())||l.value==='')){
+        inp=el('select',{'data-k':l.key});
+        def.options.forEach(o=>inp.append(el('option',{value:o,...(o===l.value.toLowerCase()?{selected:'selected'}:{})},o)));
+        if(l.value==='')inp.prepend(el('option',{value:'',selected:'selected'},'(empty)'));
+      } else if(def&&def.type==='number'&&/^-?\d*$/.test(l.value)){
+        inp=el('input',{type:'number',value:l.value,'data-k':l.key});
+      } else {
+        inp=el('input',{value:l.value,'data-k':l.key});
+        if(def&&['file','dir','command'].includes(def.type)||isRulesetPath(l.value))inp.classList.add('mono');
+      }
+      const row=el('div',{class:'kvrow'},el('div',{class:'k',title:l.key},l.key),inp);
+      const tags=el('span',{class:'ktags'});
+      const upd=()=>{
+        inp.classList.toggle('changed',inp.value!==ORIG[l.key]);
+        tags.innerHTML='';
+        if(def&&def.type==='variable'){
+          tags.append(el('span',{class:'ktag',title:'A %variable% other settings in this file refer to'},'variable'));
+        } else if(def){
+          // %etc-dir%/x and /etc/MailScanner/x are the same path: expand before comparing
+          const expand=v=>{let s=String(v);for(let i=0;i<4&&/%[a-z-]+%/.test(s);i++)s=s.replace(/%[a-z-]+%/g,m=>ORIG[m]!==undefined?ORIG[m]:m);return s.trim().toLowerCase();};
+          const differs=expand(inp.value)!==expand(def.default);
+          row.dataset.differs=differs?'1':'0';
+          if(differs)tags.append(Object.assign(el('button',{class:'ktag dot',title:'Engine default: '+(def.default===''?'(empty)':def.default)+' — click to reset'},'≠ default'),{onclick:()=>setVal(inp,def.default)}));
+          if(def.ruleset)tags.append(Object.assign(el('button',{class:'ktag',title:'This directive may take its value from a ruleset (per sender/recipient)'},'ruleset…'),{onclick:()=>pickRuleset(inp)}));
+        } else if(schema){
+          tags.append(el('span',{class:'ktag warn',title:'The engine\'s ConfigDefs.pl does not list this directive: a typo, or one newer than the engine. MailScanner ignores unknown directives silently.'},'unknown'));
+        }
+        if(overrides[l.key])tags.append(el('span',{class:'ktag warn',title:'Set again in '+overrides[l.key]+', which the engine reads after this file — that value wins.'},'overridden in '+overrides[l.key].replace(/^conf\.d\//,'')));
+      };
+      inp.oninput=upd;inp.onchange=upd;upd();
+      row.append(tags);
+      rows.append(row);
     }
   });
+  showChanged.querySelector('input').onchange=()=>rows.classList.toggle('onlydiff',showChanged.querySelector('input').checked);
   filter.oninput=()=>{
     const q=filter.value.toLowerCase();
     [...rows.children].forEach(r=>{
@@ -1881,7 +1923,7 @@ function kvEditor(d){
       r.style.display=(inp&&(inp.dataset.k.toLowerCase().includes(q)||inp.value.toLowerCase().includes(q)))?'':'none';
     });
   };
-  root.append(filter,rows);
+  root.append(el('div',{class:'ctl',style:'margin-bottom:.4rem'},filter,schema?showChanged:''),rows);
   return {root,body(){
     const changes={};rows.querySelectorAll('[data-k]').forEach(i=>{if(i.value!==ORIG[i.dataset.k])changes[i.dataset.k]=i.value;});
     return Object.keys(changes).length?{changes}:null;

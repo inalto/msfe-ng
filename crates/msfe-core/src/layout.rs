@@ -149,18 +149,24 @@ pub fn version_of(conf_text: &str) -> Option<(u32, u32, u32)> {
 /// without a readable file, 5.5 is where the directive appeared. An unknown
 /// engine is assumed current.
 pub fn supports_exim_command(perl: &[String], version: Option<(u32, u32, u32)>) -> bool {
+    if let Some(defs) = configdefs_path(perl).and_then(|p| std::fs::read_to_string(p).ok()) {
+        return defs.contains("eximcommand");
+    }
+    version.map_or(true, |v| v >= (5, 5, 0))
+}
+
+/// The engine's `MailScanner/ConfigDefs.pl` — the table of every directive it
+/// knows — found through the perl `-I` paths, else the RPM's lib dir.
+pub fn configdefs_path(perl: &[String]) -> Option<PathBuf> {
     let mut libs: Vec<PathBuf> = perl
         .windows(2)
         .filter(|w| w[0] == "-I")
         .map(|w| PathBuf::from(&w[1]))
         .collect();
     libs.push("/usr/share/MailScanner/perl".into());
-    for lib in libs {
-        if let Ok(defs) = std::fs::read_to_string(lib.join("MailScanner/ConfigDefs.pl")) {
-            return defs.contains("eximcommand");
-        }
-    }
-    version.map_or(true, |v| v >= (5, 5, 0))
+    libs.into_iter()
+        .map(|l| l.join("MailScanner/ConfigDefs.pl"))
+        .find(|p| p.is_file())
 }
 
 /// `path=` of the first ExecStart entry as `systemctl show -p ExecStart` prints it.
