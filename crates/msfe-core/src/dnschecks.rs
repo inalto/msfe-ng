@@ -616,6 +616,7 @@ fn mx_host_task(domain: String, pref: u16, host: String) -> Task {
                         .fix_summary(format!("Ask the IP owner (hosting provider) to set the PTR of {ip} to {host}")),
                 ),
                 Ok(names) => {
+                    res.set_fact(&format!("ptr.{ip}"), Json::Array(names.iter().map(Json::str).collect()));
                     let confirmed = names.iter().any(|n| {
                         ctx.dns.addrs(n).map(|(v4, v6)| v4.iter().any(|a| IpAddr::V4(*a) == *ip) || v6.iter().any(|a| IpAddr::V6(*a) == *ip)).unwrap_or(false)
                     });

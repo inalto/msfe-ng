@@ -43,6 +43,24 @@ pub struct CmdOutput {
 /// entering a scanner retry loop — takes the whole UI down with it. Every
 /// spawn on the request path goes through here.
 pub fn run_with_timeout(cmd: &mut Command, timeout: std::time::Duration) -> io::Result<CmdOutput> {
+    run_with_input(cmd, None, timeout)
+}
+
+/// `run_with_timeout` with `input` written to the command's stdin (then
+/// closed) — for tools that read their data from a pipe.
+pub fn run_with_stdin(
+    cmd: &mut Command,
+    input: &[u8],
+    timeout: std::time::Duration,
+) -> io::Result<CmdOutput> {
+    run_with_input(cmd, Some(input), timeout)
+}
+
+fn run_with_input(
+    cmd: &mut Command,
+    input: Option<&[u8]>,
+    timeout: std::time::Duration,
+) -> io::Result<CmdOutput> {
     use std::os::unix::process::CommandExt;
     use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
@@ -52,11 +70,23 @@ pub fn run_with_timeout(cmd: &mut Command, timeout: std::time::Duration) -> io::
     // killing only the direct child leaves grandchildren (a shell's fork, a
     // scanner's workers) alive AND holding the output pipes open.
     let mut child = cmd
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0)
         .spawn()?;
+    if let (Some(data), Some(mut stdin)) = (input, child.stdin.take()) {
+        // written on a thread: a command that never reads must not block us
+        let data = data.to_vec();
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let _ = stdin.write_all(&data);
+        });
+    }
 
     // Drain each pipe on a thread into a shared buffer. The threads are never
     // joined: a detached descendant (e.g. a daemonized grandchild) can hold

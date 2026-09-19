@@ -307,6 +307,7 @@ pub fn parse_inputs(
 pub fn plan(_inputs: &Inputs) -> Vec<Task> {
     let mut tasks = crate::dnschecks::tasks();
     tasks.extend(crate::authchecks::tasks());
+    tasks.extend(crate::mxchecks::tasks());
     tasks.push(crate::dnschecks::meta_task());
     tasks
 }
@@ -601,6 +602,10 @@ fn tool_notes(ctx: &Ctx) -> Vec<String> {
             .join(", ")
     )];
     notes.push(format!("EHLO name: {}", ctx.helo));
+    match crate::tlsprobe::openssl_version() {
+        Some(v) => notes.push(format!("TLS probes: {v}")),
+        None => notes.push("openssl not found: TLS checks are reported as unknown".into()),
+    }
     notes
 }
 
@@ -840,6 +845,7 @@ mod tests {
             false,
         );
         std::env::set_var("MSFE_NG_RESOLVER", srv.addr.to_string());
+        std::env::set_var("MSFE_NG_DELIVERY_NO_NET", "1");
         let dir = std::env::temp_dir().join(format!("msfe-dlvrun-{}", std::process::id()));
         std::env::set_var("MSFE_NG_DELIVERY_DIR", &dir);
         let cfg = Config {
@@ -902,9 +908,16 @@ mod tests {
         assert_eq!(by(&r, "dns.ipv6", None), Verdict::Pass);
         assert_eq!(by(&r, "dns.apex_cname", None), Verdict::Pass);
         assert_eq!(by(&r, "meta.mailbox", None), Verdict::Unknown);
+        assert_eq!(by(&r, "meta.provider", None), Verdict::Pass);
+        assert_eq!(
+            by(&r, "mx.connect", Some("mx1.good.example (185.199.108.25)")),
+            Verdict::Unknown,
+            "probes are off in tests"
+        );
         assert!(r
             .planned
             .contains(&"dns.mx.host.mx1.good.example".to_string()));
+        assert!(r.planned.contains(&"mx.host.mx1.good.example".to_string()));
 
         let r = run_blocking(
             &cfg,
@@ -930,6 +943,7 @@ mod tests {
         );
         std::env::remove_var("MSFE_NG_RESOLVER");
         std::env::remove_var("MSFE_NG_DELIVERY_DIR");
+        std::env::remove_var("MSFE_NG_DELIVERY_NO_NET");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
