@@ -12,6 +12,7 @@
 //! single-threaded.
 
 mod api;
+mod conf_api;
 mod http;
 mod views;
 

@@ -377,6 +377,20 @@ pub fn scan(cfg: &Config, config_file: &Path) -> Catalog {
     }
 }
 
+/// Files MailScanner reads at start that changed after the service last
+/// started: a restart is pending. `since` is the service's start time (epoch
+/// seconds); `None` (not running / unknown) means nothing is pending.
+pub fn pending_restart(entries: &[Entry], since: Option<u64>) -> Vec<String> {
+    let Some(since) = since else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter(|e| e.reload == Reload::Restart && e.mtime > since)
+        .map(|e| e.id.clone())
+        .collect()
+}
+
 /// The entry for `id`, only when the scan produces it — the sole way a
 /// request may address a file.
 pub fn resolve(cfg: &Config, config_file: &Path, id: &str) -> Option<Entry> {
@@ -587,6 +601,24 @@ mod tests {
         assert!(creatable("conf.d", ".conf").is_none());
         assert!(creatable("conf.d", "../x.conf").is_none());
         assert!(creatable("mcp", "x.cf").is_none());
+    }
+
+    #[test]
+    fn pending_restart_names_start_only_files_newer_than_the_service() {
+        let (base, cfg, conf) = tree("pending");
+        let cat = scan(&cfg, &conf);
+        let now = cat.entries[0].mtime;
+        assert!(pending_restart(&cat.entries, None).is_empty());
+        assert!(pending_restart(&cat.entries, Some(now + 10)).is_empty());
+        let p = pending_restart(&cat.entries, Some(now - 10));
+        assert!(p.contains(&"ms:MailScanner.conf".to_string()));
+        assert!(p.contains(&"ms:spamassassin.conf".to_string()));
+        assert!(
+            !p.contains(&"ms:rules/bounce.rules".to_string()),
+            "rulesets reload per batch"
+        );
+        assert!(!p.contains(&"msfe:config.toml".to_string()));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

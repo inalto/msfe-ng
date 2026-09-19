@@ -268,6 +268,36 @@ pub fn lint_conf(bin: &Path, conf: Option<&Path>) -> LintReport {
     }
 }
 
+/// When the MailScanner unit last became active, as epoch seconds (`None`
+/// when it is not running or systemd cannot say).
+pub fn active_since() -> Option<u64> {
+    let out = Command::new("systemctl")
+        .args([
+            "show",
+            "-p",
+            "ActiveEnterTimestampMonotonic",
+            "--value",
+            crate::layout::service_unit(),
+        ])
+        .output()
+        .ok()?;
+    let mono_us: u64 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
+    if mono_us == 0 || !status().active {
+        return None;
+    }
+    let uptime: f64 = std::fs::read_to_string("/proc/uptime")
+        .ok()?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs_f64();
+    Some((now - uptime + mono_us as f64 / 1e6).max(0.0) as u64)
+}
+
 pub fn status() -> ServiceStatus {
     let active = Command::new("systemctl")
         .args(["is-active", "--quiet", crate::layout::service_unit()])

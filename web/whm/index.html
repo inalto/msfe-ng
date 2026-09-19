@@ -1807,116 +1807,380 @@ async function renderQueues(){
   refreshQ();
 }
 
-// ---- Config files & rulesets -------------------------------------------------
-async function renderConfig(){
-  const v=$('#view');v.innerHTML='';
+// ---- Config: the whole MailScanner etc tree ---------------------------------
+// One catalog of files (GET /api/conf/tree), one editor per kind, every save
+// through PUT /api/conf/file → validate on a staged copy → backup → apply →
+// restart/reload. Ids are the server's; the browser never names a path.
+const KIND_LABEL={keyvalue:'settings',toml:'settings','rules':'ruleset','filename-rules':'file rules','spam-lists':'RBL list','virus-scanners':'scanners','host-list':'hosts',text:'text',readonly:'locked'};
+const RELOAD_LABEL={restart:'restart on save',reload:'reload on save',none:'no reload'};
+const RELOAD_HINT={restart:'MailScanner reads this file only at start: saving restarts it (scanning pauses for a few seconds; mail queues meanwhile).',reload:'MailScanner re-reads this file for every batch: saving reloads it without a restart.',none:'MailScanner does not read this file; saving needs no reload.'};
+const fmtTime=t=>t?new Date(t*1000).toLocaleString():'';
 
-  const ec=el('div',{class:'card'},el('h2',{},'Configuration files'),
-    el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},
-      'A one-time .msfe-ng.bak backup of the original is kept next to each file. Reload MailScanner after changing MailScanner.conf.'));
-  v.append(ec);
-  const fsel=el('select');
-  [['mailscanner','MailScanner.conf'],['msfe','MSFE-NG config.toml']].forEach(([val,lbl])=>fsel.append(el('option',{value:val},lbl)));
-  const pathLbl=el('span',{class:'muted'});
-  let mode='visual';
-  const modeBtn=el('button',{class:'act plain'},'Raw text');
-
-  // --- raw mode (full-file textarea) ---
-  const ta=el('textarea',{spellcheck:'false',style:'min-height:22rem;display:none'});
-  const rawSave=el('button',{class:'act',style:'display:none'},'Save raw');
-  rawSave.onclick=async()=>{
-    if(!confirm('Save the whole file '+pathLbl.textContent+'?'))return;
-    rawSave.disabled=true;
-    const r=await api('/api/service/conf',{method:'PUT',body:{which:fsel.value,content:ta.value}});
-    rawSave.disabled=false;
-    if(r&&r.ok){toast(fsel.value==='mailscanner'?'Saved — reload MailScanner to apply':'Saved');}
-    else toast(r.error||'save failed');
-  };
-
-  // --- visual mode (key/value fields, comments shown and preserved) ---
-  const filter=el('input',{placeholder:'filter settings…',style:'flex:1;max-width:20rem'});
-  const vwrap=el('div');
-  const rows=el('div',{style:'max-height:32rem;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:.5rem .7rem'});
-  const vSave=el('button',{class:'act'},'Save changes');
-  let ORIG={};
-  async function loadVisual(){
-    rows.innerHTML='';ORIG={};pathLbl.textContent='loading…';
-    const d=await api('/api/service/conf/parsed?which='+fsel.value);
-    if(d.error){pathLbl.textContent='';rows.append(el('div',{class:'muted'},d.error));return;}
-    pathLbl.textContent=d.path;
-    (d.lines||[]).forEach(l=>{
-      if(l.t==='comment'||l.t==='other')
-        rows.append(el('div',{class:'muted',style:'font:.74rem/1.4 ui-monospace,monospace;white-space:pre-wrap'},l.text));
-      else if(l.t==='entry'){
-        ORIG[l.key]=l.value;
-        const inp=el('input',{value:l.value,'data-k':l.key,style:'flex:1;font-size:.8rem'});
-        inp.oninput=()=>{inp.style.borderColor=inp.value!==ORIG[l.key]?'var(--accent)':'';};
-        rows.append(el('div',{style:'display:flex;gap:.6rem;align-items:center;margin:.15rem 0'},
-          el('div',{style:'width:17rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.8rem;font-weight:600',title:l.key},l.key),inp));
-      }
-    });
+// Line diff without a library: strip the common head and tail, LCS over the
+// middle (bounded — beyond that the middle is shown as replaced).
+function lineDiff(a,b){
+  const A=a.split('\n'),B=b.split('\n');
+  let s=0;while(s<A.length&&s<B.length&&A[s]===B[s])s++;
+  let e=0;while(e<A.length-s&&e<B.length-s&&A[A.length-1-e]===B[B.length-1-e])e++;
+  const X=A.slice(s,A.length-e),Y=B.slice(s,B.length-e);
+  const out=[];
+  for(let i=0;i<s;i++)out.push({t:' ',s:A[i]});
+  if(X.length*Y.length>1500*1500){X.forEach(l=>out.push({t:'-',s:l}));Y.forEach(l=>out.push({t:'+',s:l}));}
+  else{
+    const n=X.length,m=Y.length,L=new Uint16Array((n+1)*(m+1));
+    for(let i=n-1;i>=0;i--)for(let j=m-1;j>=0;j--)L[i*(m+1)+j]=X[i]===Y[j]?L[(i+1)*(m+1)+j+1]+1:Math.max(L[(i+1)*(m+1)+j],L[i*(m+1)+j+1]);
+    let i=0,j=0;
+    while(i<n&&j<m){
+      if(X[i]===Y[j]){out.push({t:' ',s:X[i]});i++;j++;}
+      else if(L[(i+1)*(m+1)+j]>=L[i*(m+1)+j+1]){out.push({t:'-',s:X[i]});i++;}
+      else{out.push({t:'+',s:Y[j]});j++;}
+    }
+    while(i<n){out.push({t:'-',s:X[i++]});}
+    while(j<m){out.push({t:'+',s:Y[j++]});}
   }
+  for(let i=A.length-e;i<A.length;i++)out.push({t:' ',s:A[i]});
+  return out;
+}
+// Render a diff with a little context around each change.
+function renderDiff(ops,ctx=3){
+  const pre=el('pre',{class:'log diff'});
+  const keep=new Set();
+  ops.forEach((o,i)=>{if(o.t!==' ')for(let k=Math.max(0,i-ctx);k<=Math.min(ops.length-1,i+ctx);k++)keep.add(k);});
+  if(!keep.size){pre.textContent='No differences.';return pre;}
+  let gap=false;
+  ops.forEach((o,i)=>{
+    if(!keep.has(i)){gap=true;return;}
+    if(gap){pre.append(el('span',{class:'gap'},'⋯\n'));gap=false;}
+    pre.append(el('span',{class:o.t==='+'?'add':o.t==='-'?'del':''},(o.t==='+'?'+ ':o.t==='-'?'− ':'  ')+o.s+'\n'));
+  });
+  return pre;
+}
+
+// Key/value editor: entries as fields, comments shown and preserved; the save
+// body carries only the keys that changed. (Typed inputs arrive with the
+// engine schema.)
+function kvEditor(d){
+  const root=el('div',{class:'kv'});
+  const filter=el('input',{placeholder:'filter settings…',style:'max-width:20rem;margin-bottom:.5rem'});
+  const rows=el('div',{class:'kvrows'});
+  const ORIG={};
+  (d.parsed||[]).forEach(l=>{
+    if(l.t==='comment'||l.t==='other')rows.append(el('div',{class:'muted cmt'},l.text));
+    else if(l.t==='entry'){
+      ORIG[l.key]=l.value;
+      const inp=el('input',{value:l.value,'data-k':l.key});
+      inp.oninput=()=>{inp.classList.toggle('changed',inp.value!==ORIG[l.key]);};
+      rows.append(el('div',{class:'kvrow'},el('div',{class:'k',title:l.key},l.key),inp));
+    }
+  });
   filter.oninput=()=>{
     const q=filter.value.toLowerCase();
     [...rows.children].forEach(r=>{
       if(!q){r.style.display='';return;}
-      const inp=r.querySelector?r.querySelector('[data-k]'):null;
+      const inp=r.querySelector('[data-k]');
       r.style.display=(inp&&(inp.dataset.k.toLowerCase().includes(q)||inp.value.toLowerCase().includes(q)))?'':'none';
     });
   };
-  vSave.onclick=async()=>{
-    const changes={};
-    rows.querySelectorAll('[data-k]').forEach(i=>{if(i.value!==ORIG[i.dataset.k])changes[i.dataset.k]=i.value;});
-    const n=Object.keys(changes).length;
-    if(!n){toast('No changes to save');return;}
-    if(!confirm(`Apply ${n} change(s) to ${pathLbl.textContent}?\n\n`+Object.entries(changes).map(([k,v])=>`${k} = ${v}`).join('\n')+'\n\nOnly these lines are rewritten — comments and everything else stay untouched.'))return;
-    vSave.disabled=true;
-    const r=await api('/api/service/conf/apply',{method:'POST',body:{which:fsel.value,changes}});
-    vSave.disabled=false;
-    if(r&&r.ok){toast(`${r.applied} setting(s) saved`+(fsel.value==='mailscanner'?' — reload MailScanner to apply':''));loadVisual();}
-    else toast(r.error||'save failed');
-  };
-  vwrap.append(rows);
+  root.append(filter,rows);
+  return {root,body(){
+    const changes={};rows.querySelectorAll('[data-k]').forEach(i=>{if(i.value!==ORIG[i.dataset.k])changes[i.dataset.k]=i.value;});
+    return Object.keys(changes).length?{changes}:null;
+  },describe(){const b=this.body();return b?Object.entries(b.changes).map(([k,v])=>`${k} = ${v}`).join('\n'):'';},
+  focusKey(k){const i=rows.querySelector(`[data-k="${CSS.escape(k)}"]`);if(i){i.scrollIntoView({block:'center'});i.focus();i.classList.add('flash');setTimeout(()=>i.classList.remove('flash'),1500);}}};
+}
 
-  function applyMode(){
-    const vis=mode==='visual';
-    vwrap.style.display=vis?'':'none';filter.style.display=vis?'':'none';vSave.style.display=vis?'':'none';
-    ta.style.display=vis?'none':'';rawSave.style.display=vis?'none':'';
-    modeBtn.textContent=vis?'Raw text':'Visual editor';
+// Table editor for the row-shaped files. Rows remember the line they came
+// from so the server can keep comments in place; new rows carry no line.
+const TABLE_SPECS={
+  'rules':{cols:[{f:'direction',label:'Direction',type:'select',options:['To:','From:','FromOrTo:','FromAndTo:']},{f:'pattern',label:'Pattern',mono:true,ph:'*@domain.example'},{f:'and_direction',label:'and',type:'select',options:['','To:','From:','FromOrTo:','FromAndTo:']},{f:'and_pattern',label:'and-pattern',mono:true,ph:'(pattern)'},{f:'value',label:'Value',ph:'yes / no / deliver …'}],blank:{direction:'To:'},hint:'First match wins. Patterns are single tokens (*@domain, user@domain, default); the value is what the directive expects.'},
+  'filename-rules':{cols:[{f:'action',label:'Action',type:'select',options:['allow','deny','deny+delete','rename'],free:true},{f:'pattern',label:'Pattern (perl regex)',mono:true,ph:'\\.exe$'},{f:'log_text',label:'Log text',ph:'Windows executable'},{f:'user_text',label:'Text shown to the user',ph:'Executables are not allowed'}],blank:{action:'deny'},hint:'Checked top to bottom; the first matching pattern decides. "rename" keeps the file with a safe name; "rename to .txt" also changes the extension.'},
+  'spam-lists':{cols:[{f:'name',label:'Name',mono:true,ph:'SPAMHAUS-ZEN'},{f:'domain',label:'DNS zone',mono:true,ph:'zen.spamhaus.org.'}],blank:{},hint:'Names are what "Spam List" in MailScanner.conf refers to.'},
+  'virus-scanners':{cols:[{f:'name',label:'Name',mono:true,ph:'clamd'},{f:'wrapper',label:'Wrapper',mono:true,ph:'/usr/lib/MailScanner/wrapper/clamav-wrapper'},{f:'dir',label:'Install dir',mono:true,ph:'/usr'}],blank:{},hint:'Names are what "Virus Scanners" in MailScanner.conf refers to.'},
+  'host-list':{cols:[{f:'host',label:'Hostname',mono:true,ph:'phish.example'}],blank:{},hint:'One hostname per line; *.example covers subdomains. Paste several at once into a new row.'},
+};
+function tableEditor(d){
+  const spec=TABLE_SPECS[d.kind];
+  const root=el('div',{class:'tbl'});
+  if(spec.hint)root.append(el('div',{class:'muted',style:'font-size:.8rem;margin-bottom:.4rem'},spec.hint));
+  if(d.parsed&&d.parsed.normalized)root.append(el('div',{class:'note warn'},'Some lines use spaces where MailScanner expects tabs — saving rewrites them in the canonical form.'));
+  const table=el('table');root.append(table);
+  const ROWS=(d.parsed&&d.parsed.rows)||[];
+  const UN=(d.parsed&&d.parsed.unparsed)||[];
+  let dirty=false;
+  function rowFor(r){
+    const tr=el('tr',{class:'crow'});if(r.line)tr.dataset.line=r.line;
+    spec.cols.forEach(c=>{
+      let inp;
+      const val=r[c.f]==null?'':String(r[c.f]);
+      if(c.type==='select'&&!(c.free&&val&&!c.options.includes(val))){
+        inp=el('select',{'data-f':c.f});
+        c.options.forEach(o=>inp.append(el('option',{value:o,...(o===val?{selected:'selected'}:{})},o||'—')));
+        if(c.free)inp.append(el('option',{value:'rename to .txt'},'rename to .txt'));
+      } else {
+        inp=el('input',{'data-f':c.f,value:val,placeholder:c.ph||''});
+        if(c.mono)inp.classList.add('mono');
+      }
+      inp.oninput=()=>{dirty=true;};inp.onchange=()=>{dirty=true;};
+      tr.append(el('td',{},inp));
+    });
+    tr.append(el('td',{},Object.assign(el('button',{class:'act plain',title:'Remove'},'✕'),{onclick:()=>{tr.remove();dirty=true;}})));
+    return tr;
   }
-  modeBtn.onclick=()=>{mode=mode==='visual'?'raw':'visual';applyMode();loadAny();};
-  async function loadAny(){
-    if(mode==='visual')return loadVisual();
-    ta.value='';pathLbl.textContent='loading…';
-    const r=await api('/api/service/conf?which='+fsel.value);
-    if(r.error){pathLbl.textContent=r.error;return;}
-    ta.value=r.content;pathLbl.textContent=r.path;
+  function draw(){
+    table.innerHTML='';
+    table.append(el('tr',{},...spec.cols.map(c=>el('th',{},c.label)),el('th',{})));
+    ROWS.forEach(r=>table.append(rowFor(r)));
+    UN.forEach(u=>table.append(el('tr',{class:'unparsed'},el('td',{colspan:String(spec.cols.length+1)},
+      el('span',{class:'badge',style:'background:var(--critical);margin-right:.5rem'},'line '+u.line),
+      el('span',{class:'mono muted'},u.text),
+      el('span',{class:'muted',style:'margin-left:.5rem;font-size:.75rem'},'— not understood; kept as is (fix it in Raw mode)')))));
   }
-  fsel.onchange=loadAny;
-  ec.append(el('div',{class:'ctl'},fsel,modeBtn,filter,vSave,rawSave,pathLbl),vwrap,ta);
-  applyMode();
-  const loadConf=loadAny;
-
-  const rc=el('div',{class:'card'},el('h2',{},'Generated rulesets'),
-    el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},
-      'Read-only: these files are regenerated by sync — edit policy, not the files.'));
-  v.append(rc);
-  const list=el('div',{class:'ctl',style:'flex-wrap:wrap'});
-  const rpre=el('pre',{class:'log'},'Select a ruleset file to view it.');
-  rc.append(list,rpre);
-  const r=await api('/api/service/rules');
-  (r.files||[]).forEach(f=>{
-    list.append(Object.assign(el('button',{class:'act plain'},`${f.name} (${f.size} B)`),{onclick:async()=>{
-      rpre.textContent=await api('/api/service/rules/view?name='+encodeURIComponent(f.name),{raw:true});
-    }}));
+  draw();
+  const add=el('button',{class:'act plain'},'+ Add row');
+  add.onclick=()=>{const tr=rowFor(spec.blank);table.append(tr);dirty=true;const f=tr.querySelector('input');if(f)f.focus();};
+  root.append(el('div',{class:'ctl',style:'margin-top:.5rem'},add));
+  // host lists: paste many hosts into one field → one row each
+  if(d.kind==='host-list')table.addEventListener('paste',e=>{
+    const t=(e.clipboardData||window.clipboardData).getData('text');
+    const hosts=t.split(/[\s,;]+/).filter(Boolean);
+    if(hosts.length<2)return;
+    e.preventDefault();
+    const tr=e.target.closest('tr');
+    hosts.forEach((h,i)=>{if(i===0&&tr){tr.querySelector('input').value=h;}else{const nr=rowFor({host:h});(tr||table).after?tr.after(nr):table.append(nr);}});
+    dirty=true;
   });
-  if(!(r.files||[]).length)list.append(el('span',{class:'muted'},'No ruleset files in '+(r.dir||'rules dir')+' yet — run sync.'));
+  return {root,body(){
+    if(!dirty)return null;
+    const rows=[...table.querySelectorAll('tr.crow')].map(tr=>{
+      const o={};if(tr.dataset.line)o.line=+tr.dataset.line;
+      spec.cols.forEach(c=>{o[c.f]=tr.querySelector(`[data-f="${c.f}"]`).value.trim();});
+      return o;
+    });
+    return {rows};
+  },describe(){const b=this.body();return b?`${b.rows.length} row(s)`:'';}};
+}
 
+function rawEditor(d){
+  const root=el('div',{class:'raw'});
+  const ta=el('textarea',{spellcheck:'false',style:'min-height:26rem'});ta.value=d.content;
+  const diffBtn=el('button',{class:'act plain'},'Show diff');
+  const diffBox=el('div',{style:'display:none;margin-top:.5rem'});
+  diffBtn.onclick=()=>{diffBox.innerHTML='';diffBox.append(renderDiff(lineDiff(d.content,ta.value)));diffBox.style.display='';};
+  root.append(ta,el('div',{class:'ctl',style:'margin-top:.4rem'},diffBtn),diffBox);
+  return {root,body(){return ta.value!==d.content?{content:ta.value}:null;},describe(){const ops=lineDiff(d.content,ta.value);const a=ops.filter(o=>o.t==='+').length,r=ops.filter(o=>o.t==='-').length;return `+${a} / −${r} line(s)`;},
+    focusLine(n){const lines=ta.value.split('\n');let off=0;for(let i=0;i<n-1&&i<lines.length;i++)off+=lines[i].length+1;ta.focus();ta.setSelectionRange(off,off+(lines[n-1]||'').length);const lh=parseFloat(getComputedStyle(ta).lineHeight)||16;ta.scrollTop=Math.max(0,(n-4)*lh);}};
+}
+
+// Save-report renderer: validation (tool, problems, transcript), reload.
+function renderSaveReport(r){
+  const box=el('div',{class:'report'});
+  if(r.error)box.append(el('div',{class:'note '+(r.rolled_back?'bad':'warn')},r.rolled_back?'Rolled back — '+r.error:r.error));
+  const v=r.validation;
+  if(v){
+    const head=el('div',{class:'note '+(v.ok?'ok':v.timed_out?'warn':'bad')},
+      el('b',{},v.tool+': '),v.ok?'no problems found':v.timed_out?'did not finish (inconclusive — the file was kept)':'problems found');
+    box.append(head);
+    if(v.problems&&v.problems.length)box.append(el('ul',{class:'problems'},...v.problems.map(p=>el('li',{},p))));
+    if(v.output){const det=el('details',{},el('summary',{class:'muted'},'transcript'),el('pre',{class:'log'},v.output));box.append(det);}
+  }
+  if(r.reloaded&&r.reloaded.action!=='none'){
+    box.append(el('div',{class:'note '+(r.reloaded.ok?'ok':'bad')},el('b',{},'MailScanner '+r.reloaded.action+': '),r.reloaded.ok?'done':'failed — see the Service tab'));
+    if(r.reloaded.transcript&&r.reloaded.transcript.length&&!r.reloaded.ok)box.append(el('pre',{class:'log'},r.reloaded.transcript.join('\n')));
+  } else if(r.reloaded&&r.reloaded.transcript&&r.reloaded.transcript.length){
+    box.append(el('div',{class:'muted',style:'font-size:.8rem'},r.reloaded.transcript.join(' ')));
+  }
+  if(r.backup_id)box.append(el('div',{class:'muted',style:'font-size:.78rem'},'Previous version kept in history as '+r.backup_id));
+  return box;
+}
+
+async function renderConfig(){
+  const v=$('#view');v.innerHTML='';
+  const bar=el('div',{class:'ctl cfgbar'});
+  const pendingNote=el('div',{class:'note warn',style:'display:none'});
+  const wrap=el('div',{class:'cfg2'});
+  const tree=el('aside',{class:'tree'});
+  const ed=el('section',{class:'card editor'});
+  wrap.append(tree,ed);v.append(bar,pendingNote,wrap);
+
+  const state={files:[],pending:[],roots:[]};
+  let cur=null,editor=null,mode='form';
+  const dirty=()=>!!(editor&&editor.body&&editor.body());
+
+  // ---- tree -----------------------------------------------------------------
+  const tfilter=el('input',{placeholder:'find a file…',class:'tfilter'});
+  const tlist=el('div',{class:'tlist'});
+  const newBtn=el('button',{class:'act plain',title:'Create a conf.d fragment or a new ruleset'},'+ New');
+  tree.append(el('div',{class:'ctl',style:'margin-bottom:.4rem'},tfilter,newBtn),tlist);
+  function drawTree(){
+    tlist.innerHTML='';
+    const q=tfilter.value.toLowerCase();
+    state.roots.forEach(root=>{
+      const files=state.files.filter(f=>f.root===root.id&&(!q||f.rel.toLowerCase().includes(q)));
+      if(!files.length)return;
+      tlist.append(el('div',{class:'grp',title:root.path},root.label,el('span',{class:'gpath'},root.path)));
+      const groups=new Map();
+      files.forEach(f=>{const dir=f.rel.includes('/')?f.rel.slice(0,f.rel.lastIndexOf('/')):'';if(!groups.has(dir))groups.set(dir,[]);groups.get(dir).push(f);});
+      [...groups.keys()].sort((a,b)=>a===''?-1:b===''?1:a.localeCompare(b)).forEach(dir=>{
+        if(dir)tlist.append(el('div',{class:'dir'},dir+'/'));
+        groups.get(dir).forEach(f=>{
+          const name=f.rel.includes('/')?f.rel.slice(f.rel.lastIndexOf('/')+1):f.rel;
+          const b=el('button',{'data-id':f.id,'aria-selected':String(!!cur&&cur.id===f.id),title:f.editable?f.path:f.readonly_reason},
+            el('span',{class:'name'},name),
+            f.editable?el('span',{class:'kb'},KIND_LABEL[f.kind]||f.kind):el('span',{class:'kb lock'},'🔒'));
+          if(state.pending.includes(f.id))b.append(el('span',{class:'kb pend',title:'changed since MailScanner last started'},'restart'));
+          b.onclick=()=>open(f.id);
+          tlist.append(b);
+        });
+      });
+    });
+    if(!tlist.children.length)tlist.append(el('div',{class:'muted',style:'padding:.5rem'},'No files match.'));
+  }
+  tfilter.oninput=drawTree;
+  async function loadTree(){
+    const d=await api('/api/conf/tree');
+    if(d.error){tlist.innerHTML='';tlist.append(el('div',{class:'muted'},d.error));return;}
+    state.files=d.files||[];state.roots=d.roots||[];state.pending=d.pending_restart||[];
+    drawTree();
+    if(state.pending.length){
+      pendingNote.innerHTML='';
+      pendingNote.append(el('b',{},'Restart pending: '),`${state.pending.length} file(s) MailScanner reads only at start changed since it last started (${state.pending.map(i=>i.replace(/^ms:/,'')).join(', ')}). `,
+        Object.assign(el('button',{class:'act plain',style:'margin-left:.5rem'},'Restart MailScanner now'),{onclick:async e=>{
+          e.target.disabled=true;const r=await api('/api/service/control',{method:'POST',body:{action:'restart'}});e.target.disabled=false;
+          toast(r&&r.ok?'MailScanner restarted':'Restart failed — see the Service tab');loadTree();}}));
+      pendingNote.style.display='';
+    } else pendingNote.style.display='none';
+  }
+  newBtn.onclick=()=>{
+    const m=modal('New file');
+    const dsel=el('select');[['conf.d','conf.d/ — MailScanner.conf fragment'],['rules','rules/ — a new ruleset']].forEach(([val,lbl])=>dsel.append(el('option',{value:val},lbl)));
+    const name=el('input',{placeholder:'name'});
+    const hint=el('div',{class:'muted',style:'font-size:.8rem;margin:.4rem 0'},'conf.d fragments end in .conf and override MailScanner.conf (read alphabetically); rulesets end in .rules.');
+    const ok=el('button',{class:'act'},'Create');
+    ok.onclick=async()=>{
+      let n=name.value.trim();if(!n)return;
+      const ext=dsel.value==='conf.d'?'.conf':'.rules';if(!n.endsWith(ext))n+=ext;
+      ok.disabled=true;const r=await api('/api/conf/create',{method:'POST',body:{dir:dsel.value,name:n}});ok.disabled=false;
+      if(r&&r.ok){m.close();toast('Created '+n);await loadTree();open(r.id);}else toast((r&&r.error)||'cannot create');
+    };
+    m.body.append(el('label',{class:'field'},'Where',dsel),el('label',{class:'field'},'File name',name),hint,el('div',{class:'ctl'},ok));
+    name.focus();
+  };
+
+  // ---- editor ---------------------------------------------------------------
+  function drawEmpty(){ed.innerHTML='';ed.append(el('div',{class:'empty'},'Pick a file on the left. Settings files get a form, rulesets and lists a table, everything else a text editor — every save is validated before it goes live and the previous version is kept.'));}
+  drawEmpty();
+  async function open(id,opts={}){
+    if(!opts.force&&dirty()&&!confirm('Discard unsaved changes?'))return;
+    const d=await api('/api/conf/file?id='+encodeURIComponent(id));
+    if(d.error){toast(d.error);return;}
+    cur=d;
+    if(!opts.keepMode)mode=(d.kind==='text'||d.kind==='readonly')?'raw':'form';
+    tlist.querySelectorAll('button[data-id]').forEach(b=>b.setAttribute('aria-selected',String(b.dataset.id===id)));
+    drawEditor();
+  }
+  function drawEditor(){
+    ed.innerHTML='';editor=null;
+    const d=cur;
+    const head=el('div',{class:'ehead'},
+      el('div',{class:'path mono'},d.path),
+      el('div',{class:'meta'},
+        el('span',{class:'kb'},KIND_LABEL[d.kind]||d.kind),
+        d.editable?el('span',{class:'kb '+d.reload,title:RELOAD_HINT[d.reload]},RELOAD_LABEL[d.reload]):el('span',{class:'kb lock'},'read-only'),
+        el('span',{class:'muted'},fmtSize(d.size)+' · '+fmtTime(d.mtime)),
+        d.symlink?el('span',{class:'muted',title:'The directory is a symlink; edits go to its target'},'→ '+d.symlink):''));
+    ed.append(head);
+    if(!d.editable){
+      ed.append(el('div',{class:'note'},d.readonly_reason||'read-only'));
+      if(/Rules tab/.test(d.readonly_reason||''))ed.append(el('div',{class:'ctl'},Object.assign(el('button',{class:'act plain'},'Open the Rules tab'),{onclick:()=>$('#tabs button[data-tab="rules"]').click()})));
+      ed.append(el('pre',{class:'log',style:'max-height:40rem'},d.content));
+      return;
+    }
+    const hasForm=d.kind!=='text';
+    const modeBtn=el('button',{class:'act plain'},mode==='form'?'Raw text':'Form');
+    modeBtn.style.display=hasForm?'':'none';
+    modeBtn.onclick=()=>{if(dirty()&&!confirm('Switching mode discards unsaved changes. Continue?'))return;mode=mode==='form'?'raw':'form';drawEditor();};
+    const saveBtn=el('button',{class:'act'},'Save');
+    const discard=el('button',{class:'act plain'},'Discard');
+    const histBtn=el('button',{class:'act plain'},'History'+(d.history?` (${d.history})`:''));
+    const skipLint=el('input',{type:'checkbox'});const skipReload=el('input',{type:'checkbox'});
+    const opts=el('span',{class:'opts muted'});
+    if(d.validator==='mailscanner-lint'||d.validator==='mailscanner-lint-after'||d.validator==='spamassassin-lint')
+      opts.append(el('label',{title:'Skip the '+(d.validator.startsWith('spam')?'spamassassin --lint':'MailScanner --lint')+' check (5–20 s). Only the syntax check runs.'},skipLint,' save without lint'));
+    if(d.reload!=='none')opts.append(el('label',{title:RELOAD_HINT[d.reload]},skipReload,' apply without '+d.reload));
+    ed.append(el('div',{class:'ctl etools'},modeBtn,saveBtn,discard,histBtn,opts));
+    const body=el('div',{class:'ebody'});ed.append(body);
+    const result=el('div',{class:'eresult'});ed.append(result);
+    if(mode==='form'&&(d.kind==='keyvalue'||d.kind==='toml'))editor=kvEditor(d);
+    else if(mode==='form'&&TABLE_SPECS[d.kind])editor=tableEditor(d);
+    else editor=rawEditor(d);
+    body.append(editor.root);
+    discard.onclick=()=>{if(!dirty()||confirm('Discard unsaved changes?'))open(d.id,{force:true,keepMode:true});};
+    saveBtn.onclick=async()=>{
+      const b=editor.body();
+      if(!b){toast('Nothing changed');return;}
+      const what=editor.describe?editor.describe():'';
+      const lint=skipLint.checked?'skip':'auto',reload=skipReload.checked?'skip':'auto';
+      const willLint=lint==='auto'&&d.validator!=='syntax'&&d.validator!=='toml';
+      if(!confirm(`Save ${d.rel}?\n\n${what}\n\n`+(willLint?'The change is validated'+(d.validator.startsWith('spam')?' with spamassassin --lint':' with MailScanner --lint on a staged copy')+' before it goes live; ':'')+(reload==='auto'&&d.reload!=='none'?`MailScanner is ${d.reload==='restart'?'restarted':'reloaded'} afterwards.`:'no reload.')))return;
+      saveBtn.disabled=true;result.innerHTML='';
+      result.append(el('div',{class:'note'},willLint?'Validating on a staged copy — MailScanner --lint runs a real test batch, usually 5–20 s…':'Saving…'));
+      const r=await api('/api/conf/file',{method:'PUT',body:{id:d.id,expect_mtime:d.mtime,lint,reload,...b}});
+      saveBtn.disabled=false;result.innerHTML='';
+      if(!r||(r.error&&!r.validation&&!r.rolled_back)){
+        if(r&&r.error==='stale'){toast('The file changed on disk — reloaded');open(d.id,{force:true,keepMode:true});return;}
+        toast((r&&r.error)||'save failed');if(r&&r.error){result.append(renderSaveReport(r));result.scrollIntoView({block:'nearest',behavior:'smooth'});}return;
+      }
+      result.append(renderSaveReport(r));
+      result.scrollIntoView({block:'nearest',behavior:'smooth'});
+      if(r.ok&&r.changed){toast('Saved'+(r.reloaded&&r.reloaded.action!=='none'?' — MailScanner '+r.reloaded.action+(r.reloaded.ok?'ed':' failed'):''));
+        const keep=result;await open(d.id,{force:true,keepMode:true});ed.append(keep);loadTree();}
+      else if(r.ok&&!r.changed)toast('No change to save');
+      else toast(r.rolled_back?'Rolled back':'Not saved — see the report');
+    };
+    histBtn.onclick=()=>showHistory(d);
+  }
+
+  // ---- history --------------------------------------------------------------
+  async function showHistory(d){
+    const m=modal('History — '+d.rel);
+    const list=el('div',{class:'hlist'});const view=el('div');
+    m.body.append(el('div',{class:'hwrap'},list,view));
+    const h=await api('/api/conf/history?id='+encodeURIComponent(d.id));
+    if(!h.backups||!h.backups.length){list.append(el('div',{class:'muted'},'No previous versions yet — one is kept at every save.'));return;}
+    h.backups.forEach(b=>{
+      const btn=el('button',{},el('span',{class:'mono'},b.stamp==='original'?'original (before MSFE-NG)':b.stamp.replace(/^(\d{4})(\d\d)(\d\d)-(\d\d)(\d\d)(\d\d).*/,'$1-$2-$3 $4:$5:$6')),el('span',{class:'muted'},` ${b.reason} · ${fmtSize(b.size)}`));
+      btn.onclick=async()=>{
+        list.querySelectorAll('button').forEach(x=>x.setAttribute('aria-selected','false'));btn.setAttribute('aria-selected','true');
+        view.innerHTML='';view.append(el('div',{class:'muted'},'loading…'));
+        const c=await api('/api/conf/history/view?id='+encodeURIComponent(d.id)+'&stamp='+encodeURIComponent(b.stamp));
+        view.innerHTML='';
+        if(c.error){view.append(el('div',{class:'note bad'},c.error));return;}
+        const restore=el('button',{class:'act'},'Restore this version');
+        restore.onclick=async()=>{
+          if(!confirm(`Restore ${d.rel} to the ${b.stamp} version?\n\nThe current file is kept in history; the restored one is validated like any save.`))return;
+          restore.disabled=true;
+          const r=await api('/api/conf/restore',{method:'POST',body:{id:d.id,stamp:b.stamp,lint:'auto',reload:'auto'}});
+          restore.disabled=false;
+          if(r&&r.ok&&r.changed){toast('Restored');m.close();await open(d.id,{force:true});ed.append(renderSaveReport(r));loadTree();}
+          else if(r&&r.ok){toast('Identical to the current file');}
+          else{view.prepend(renderSaveReport(r||{error:'restore failed'}));}
+        };
+        view.append(el('div',{class:'ctl'},el('span',{class:'muted'},'Differences: this version → current'),restore),renderDiff(lineDiff(c.content,d.content)));
+      };
+      list.append(btn);
+    });
+  }
+
+  loadTree();
+
+  // ---- maintenance & tools (below the editor) --------------------------------
+  const maint=el('details',{class:'card maint',open:''},el('summary',{},'Maintenance & tools'));
+  v.append(maint);
   // Spam checks — force MailScanner to scan mail for every domain
   const sc=el('div',{class:'card'},el('h2',{},'Spam checks'),
     el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},
       'Sets MailScanner’s global “Spam Checks = yes”, so SpamAssassin runs on mail for every domain (this is the authoritative switch — it overrides any per-domain rule). MailScanner is restarted to apply the change.'));
-  v.append(sc);
+  maint.append(sc);
   const scout=el('pre',{class:'log',style:'display:none'},'');
   const scbtn=el('button',{class:'act'},'Enable spam checks for all domains');
   scbtn.onclick=async()=>{
@@ -1935,7 +2199,7 @@ async function renderConfig(){
       'Backups are timestamped SQL dumps in backup_dir ('+esc(PREFS.backup_dir||'/opt/msfe-ng/backups')+'). '+
       '"Fix common problems" applies pending migrations, then optimizes and analyzes the MSFE-NG tables. '+
       'Bayes repair expires old tokens; recreate wipes all training (a database backup is taken first).'));
-  v.append(dc);
+  maint.append(dc);
   const dout=el('pre',{class:'log'},'Choose an action.');
   async function dbAction(path,label,confirmMsg,btn){
     if(confirmMsg&&!confirm(confirmMsg))return;
@@ -1952,7 +2216,7 @@ async function renderConfig(){
   const cc=el('div',{class:'card'},el('h2',{},'Queue auto-clean'),
     el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},
       'Every 5 minutes, messages in the DELIVERY queue matching an enabled rule are removed automatically. 0 disables a rule — everything ships off. The scanning queue is never touched, so unscanned mail cannot be deleted. Note: mail scanned only by MailScanner may carry no spool spam score, so the score rule matches mail scored by the cPanel SpamAssassin ACL.'));
-  v.append(cc);
+  maint.append(cc);
   const cconf=await api('/api/config');
   const cgrid=el('div',{class:'grid2'});
   const CLEAN_FIELDS=[
@@ -2007,7 +2271,7 @@ async function renderConfig(){
   const tc=el('div',{class:'card'},el('h2',{},'Telegram alerts'),
     el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},
       'Get a Telegram message when the delivery queue grows, the scanning queue is stuck, or one account suddenly sends a lot of mail (the alert names the account). Create a bot with @BotFather to get a token; the chat id is your own id or a group id. 0 disables a threshold.'));
-  v.append(tc);
+  maint.append(tc);
   const tgrid=el('div',{class:'grid2'});
   const tok=el('input',{type:'password',placeholder:cconf.telegram_configured?'(configured — leave empty to keep)':'123456:ABC-DEF…','autocomplete':'off'});
   tok.dataset.tkey='telegram_bot_token';
@@ -2058,7 +2322,6 @@ async function renderConfig(){
   dbtns.append(bBackup,bFix,bRepair,bReset);
   dc.append(dbtns,dout);
 
-  loadConf();
 }
 
 // Doctor banner: shown on every tab whenever any chain link is unhealthy.

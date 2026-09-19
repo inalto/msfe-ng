@@ -129,6 +129,44 @@ fn render_with<T>(t: &Table<T>, mut row: impl FnMut(&T) -> String) -> String {
     out
 }
 
+/// A table with its rows replaced by the editor's, comments and blanks kept
+/// in place: a submitted row carrying the 1-based line it came from replaces
+/// that line, original rows nobody submitted are deleted, rows without a line
+/// are appended after the last row (or at the end). Unparsed lines stay —
+/// removing them is the raw editor's job.
+pub fn rebuild<T: Clone>(orig: &Table<T>, rows: Vec<(Option<usize>, T)>) -> Table<T> {
+    let mut out: Vec<Line<T>> = Vec::with_capacity(orig.lines.len() + rows.len());
+    let mut last_row_at: Option<usize> = None;
+    for (i, l) in orig.lines.iter().enumerate() {
+        match l {
+            Line::Row(_) => {
+                if let Some((_, r)) = rows.iter().find(|(at, _)| *at == Some(i + 1)) {
+                    out.push(Line::Row(r.clone()));
+                    last_row_at = Some(out.len());
+                }
+            }
+            other => out.push(other.clone()),
+        }
+    }
+    let fresh: Vec<Line<T>> = rows
+        .into_iter()
+        .filter(|(at, _)| at.is_none())
+        .map(|(_, r)| Line::Row(r))
+        .collect();
+    match last_row_at {
+        Some(at) => {
+            let tail = out.split_off(at);
+            out.extend(fresh);
+            out.extend(tail);
+        }
+        None => out.extend(fresh),
+    }
+    Table {
+        lines: out,
+        normalized: false,
+    }
+}
+
 // ---- filename / filetype rules ------------------------------------------------
 
 /// What MailScanner does with an attachment whose name (or type) matches.
@@ -521,6 +559,27 @@ garbage line without tabs\n";
         assert!(is_hostname("a-b.c"));
         assert!(!is_hostname(".a.b"));
         assert!(!is_hostname("a..b"));
+    }
+
+    #[test]
+    fn rebuild_keeps_comments_replaces_deletes_and_appends() {
+        let t = parse_host_list("# head\na.example\n# between\nb.example\nbad host\nc.example\n");
+        let rows = vec![
+            (Some(2), "a2.example".to_string()),
+            (Some(6), "c.example".to_string()),
+            (None, "new.example".to_string()),
+        ];
+        let out = render_host_list(&rebuild(&t, rows));
+        assert_eq!(
+            out,
+            "# head\na2.example\n# between\nbad host\nc.example\nnew.example\n"
+        );
+        // no rows at all: everything appended at the end
+        let t = parse_host_list("# only comments\n");
+        assert_eq!(
+            render_host_list(&rebuild(&t, vec![(None, "x.example".into())])),
+            "# only comments\nx.example\n"
+        );
     }
 
     #[test]

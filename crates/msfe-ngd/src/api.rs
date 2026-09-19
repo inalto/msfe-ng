@@ -1016,6 +1016,9 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
         (m, p) if p.starts_with("/api/jobs/") => {
             jobs_route(m, &p["/api/jobs/".len()..], req, cfg, config_file)
         }
+        (m, p) if p.starts_with("/api/conf/") => {
+            crate::conf_api::handle(m, p, req, cfg, config_file)
+        }
         ("GET", "/api/engine/migrate") => engine_migrate_preflight(cfg, config_file),
         ("GET", "/api/resolver") => resolver_state(),
 
@@ -1110,7 +1113,7 @@ fn read_full_message(cfg: &Config, id: &str) -> Option<Vec<u8>> {
 
 // ---- structured rule handlers ------------------------------------------------
 
-fn rule_to_json(r: &rulefile::Rule) -> Json {
+pub(crate) fn rule_to_json(r: &rulefile::Rule) -> Json {
     let opt = |o: &Option<String>| o.clone().map(Json::Str).unwrap_or(Json::Null);
     Json::Object(vec![
         ("direction".into(), Json::str(r.direction.as_str())),
@@ -1126,7 +1129,7 @@ fn rule_to_json(r: &rulefile::Rule) -> Json {
     ])
 }
 
-fn json_to_rule(v: &Json) -> Result<rulefile::Rule, String> {
+pub(crate) fn json_to_rule(v: &Json) -> Result<rulefile::Rule, String> {
     let dir = rulefile::Direction::parse(&v.str_field("direction"))
         .ok_or_else(|| format!("bad direction '{}'", v.str_field("direction")))?;
     let and_dir_s = v.str_field("and_direction");
@@ -1988,7 +1991,7 @@ fn conf_apply(req: &Request, cfg: &Config, config_file: &Path) -> Response {
     }
 }
 
-fn strs(v: &[String]) -> Json {
+pub(crate) fn strs(v: &[String]) -> Json {
     Json::Array(v.iter().map(Json::str).collect())
 }
 
@@ -2000,14 +2003,14 @@ fn conf_id(which: &str) -> String {
     }
 }
 
-fn lint_mode(v: Option<&Json>) -> confsave::LintMode {
+pub(crate) fn lint_mode(v: Option<&Json>) -> confsave::LintMode {
     match v.and_then(Json::as_str) {
         Some("skip") => confsave::LintMode::Skip,
         _ => confsave::LintMode::Auto,
     }
 }
 
-fn reload_mode(v: Option<&Json>) -> confsave::ReloadMode {
+pub(crate) fn reload_mode(v: Option<&Json>) -> confsave::ReloadMode {
     match v.and_then(Json::as_str) {
         Some("skip") => confsave::ReloadMode::Skip,
         _ => confsave::ReloadMode::Auto,
@@ -2015,7 +2018,7 @@ fn reload_mode(v: Option<&Json>) -> confsave::ReloadMode {
 }
 
 /// A `SaveReport` as the fields every save-like route answers with.
-fn save_report_json(r: &confsave::SaveReport) -> Vec<(String, Json)> {
+pub(crate) fn save_report_json(r: &confsave::SaveReport) -> Vec<(String, Json)> {
     let validation = match &r.validation {
         Some(v) => Json::Object(vec![
             ("tool".into(), Json::str(v.tool)),
