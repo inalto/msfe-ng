@@ -8,6 +8,7 @@
 //! of the original `msbe.pl` / `msrules.pl` / `mschange.pl` and on MailWatch,
 //! but no original code is copied. See CONTRIBUTING.md.
 
+pub mod b64;
 pub mod civil;
 pub mod confcatalog;
 pub mod confcheck;
@@ -37,6 +38,7 @@ pub mod mime;
 pub mod monitor;
 pub mod msdefs;
 pub mod msgrammar;
+pub mod msgtest;
 pub mod panel;
 pub mod quarantine;
 pub mod queueview;

@@ -340,11 +340,12 @@ let days=7;
 const tabs={dash:renderDash,settings:renderSettings,lists:renderLists,messages:renderMessages,rules:renderRules,service:renderService,logs:renderLogs,queues:renderQueues,quarantine:renderQuarantine,config:renderConfig};
 let dashTimer=null; // dashboard auto-refresh; cleared on every tab switch
 let logTimer=null; // maillog auto-refresh; cleared on every tab switch
-let jrnTimer=null; // restart-console journal polling; cleared on every tab switch
+let jrnTimer=null;
+let cfgJobTimer=null; // Config-tab job poller (test message / selftest); cleared on every tab switch // restart-console journal polling; cleared on every tab switch
 $('#tabs').addEventListener('click',e=>{
   const b=e.target.closest('button');if(!b)return;
   clearInterval(logTimer);logTimer=null;
-  clearInterval(jrnTimer);jrnTimer=null;
+  clearInterval(cfgJobTimer);clearInterval(jrnTimer);jrnTimer=null;
   clearInterval(msgTimer);msgTimer=null;
   clearInterval(dashTimer);dashTimer=null;
   document.querySelectorAll('#tabs button').forEach(x=>x.setAttribute('aria-selected',x===b));
@@ -2292,6 +2293,76 @@ async function renderConfig(){
   // ---- maintenance & tools (below the editor) --------------------------------
   const maint=el('details',{class:'card maint',open:''},el('summary',{},'Maintenance & tools'));
   v.append(maint);
+
+  // Test message: each stage asked directly over a sample or an uploaded
+  // message, the actions predicted from the rulesets — nothing delivered.
+  const mc=el('div',{class:'card'},el('h2',{},'Test message (simulation)'),
+    el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},
+      'Runs SpamAssassin with MailScanner\'s spamassassin.conf as the scanning user, the virus scanner, and the filename/filetype rules over a message, then predicts MailScanner\'s actions from your rulesets for its sender and recipient. Nothing is delivered. "Send real test mail" submits clean, GTUBE and EICAR messages through the MTA instead — the authoritative end-to-end test; their verdicts appear on the Messages tab.'));
+  maint.append(mc);
+  const msel=el('select');
+  [['gtube','GTUBE spam'],['eicar','EICAR virus (attachment)'],['clean','Clean message'],['upload','Upload a .eml…']].forEach(([val,lbl])=>msel.append(el('option',{value:val},lbl)));
+  const mfile=el('input',{type:'file',accept:'.eml,message/rfc822,text/plain',style:'display:none'});
+  msel.onchange=()=>{mfile.style.display=msel.value==='upload'?'':'none';};
+  const moffBox=el('input',{type:'checkbox',checked:'checked'});
+  const moff=el('label',{class:'muted',style:'font-size:.8rem;display:flex;gap:.3rem;align-items:center',title:'spamassassin -L: no DNS blocklists, Razor or Pyzor — fast and deterministic'},moffBox,' offline (skip network tests)');
+  const mrun=el('button',{class:'act'},'Run simulation');
+  const mself=el('button',{class:'act plain'},'Send real test mail (selftest)');
+  const mcon=el('div',{style:'display:none;margin-top:.5rem'});const mtitle=el('div',{class:'muted',style:'font-size:.8rem'});const mpre=el('pre',{class:'log',style:'max-height:12rem'});
+  mcon.append(mtitle,mpre);
+  const mres=el('div',{style:'margin-top:.5rem'});
+  mc.append(el('div',{class:'ctl'},msel,mfile,moff,mrun,mself),mcon,mres);
+  function followCfgJob(name,label,onDone){
+    clearInterval(cfgJobTimer);mcon.style.display='';mtitle.textContent=label+' — running…';mpre.textContent='';
+    const tick=async()=>{
+      let s;try{s=await api('/api/jobs/'+name);}catch(e){s=null;}
+      if(!s||s.error)return;
+      mpre.textContent=s.log||'(no output yet)';mpre.scrollTop=mpre.scrollHeight;
+      if(s.running)return;
+      clearInterval(cfgJobTimer);cfgJobTimer=null;
+      mtitle.textContent=label+(s.exit===0?' — finished':' — '+(s.exit==null?'interrupted':'failed (exit '+s.exit+') — full log: '+s.log_path));
+      onDone&&onDone(s.exit===0);
+    };
+    tick();cfgJobTimer=setInterval(tick,2000);
+  }
+  function renderMsgResult(r){
+    const box=el('div',{class:'msgres'});
+    const sa=r.spamassassin||{},av=r.virus||{},pr=r.predicted||{};
+    const row=(lvl,label,text)=>el('div',{class:'note '+lvl},el('b',{},label+': '),text);
+    box.append(el('div',{class:'muted',style:'font-size:.78rem'},'Sample: '+(r.sample||'')+' — simulation, not a real delivery'));
+    box.append(row(!sa.ran?'warn':sa.spam===true?'bad':sa.spam===false?'ok':'warn','SpamAssassin',
+      !sa.ran?(sa.note||'did not run'):sa.spam==null?(sa.note||'no verdict'):`${sa.spam?'spam':'not spam'} — score ${sa.score} (required ${sa.required})${sa.tests&&sa.tests.length?' · tests: '+sa.tests.join(', '):''}${sa.note?' · '+sa.note:''}`));
+    box.append(row(!av.ran||av.infected==null?'warn':av.infected?'bad':'ok','Virus',
+      !av.ran?(av.note||'no scanner found'):av.infected==null?(av.note||'no verdict'):av.infected?`infected — ${av.signature} (${av.tool})`:`clean (${av.tool})`));
+    const cs=r.content||[];
+    box.append(row(cs.some(c=>/^deny/.test(c.action))?'bad':cs.length?'warn':'ok','Content rules',
+      cs.length?cs.map(c=>`${c.filename}: ${c.action} by ${String(c.rule_file).replace(/^ms:/,'')} (${c.pattern} — ${c.log_text})`).join(' · '):'no filename/filetype rule matched'));
+    box.append(row('','Predicted outcome',`${pr.from||'?'} → ${pr.to||'?'}: ${pr.outcome||''}`));
+    const res=Object.entries(pr.resolved||{});
+    if(res.length)box.append(el('div',{class:'muted',style:'font-size:.78rem'},'Resolved for this sender/recipient: '+res.map(([k,v])=>`${k} = ${v||'(empty)'}`).join(' · ')));
+    if(r.transcript&&r.transcript.length)box.append(el('details',{},el('summary',{class:'muted',style:'cursor:pointer'},'transcript'),el('pre',{class:'log'},r.transcript.join('\n'))));
+    return box;
+  }
+  mrun.onclick=async()=>{
+    const body={sample:msel.value,online:!moffBox.checked};
+    if(msel.value==='upload'){
+      const f=mfile.files&&mfile.files[0];if(!f){toast('Choose a .eml file first');return;}
+      if(f.size>2900000){toast('The message must be under 2.9 MB');return;}
+      body.eml_b64=await new Promise((res,rej)=>{const rd=new FileReader();rd.onload=()=>res(String(rd.result).split(',').pop());rd.onerror=rej;rd.readAsDataURL(f);});
+    }
+    mrun.disabled=true;mres.innerHTML='';
+    const r=await api('/api/jobs/conf-test-message',{method:'POST',body});
+    mrun.disabled=false;
+    if(!r||!r.ok){toast((r&&r.error)||'cannot start');return;}
+    followCfgJob('conf-test-message','Simulation',async()=>{const d=await api('/api/conf/test/message/last');mres.innerHTML='';if(d&&d.known)mres.append(renderMsgResult(d));else mres.append(el('div',{class:'note bad'},'No result was written — see the log above'));});
+  };
+  mself.onclick=async()=>{
+    if(!confirm('Send three real test messages (clean, GTUBE spam, EICAR virus) from msfe-ng-selftest@localhost to root@localhost through the MTA on 127.0.0.1:25?\n\nThey are scanned like any other mail; find them on the Messages tab in a minute (subject "MSFE-NG selftest").'))return;
+    const r=await api('/api/jobs/selftest',{method:'POST'});
+    if(!r||!r.ok){toast((r&&r.error)||'cannot start');return;}
+    followCfgJob('selftest','Real test mail',ok=>{mres.innerHTML='';mres.append(el('div',{class:'note '+(ok?'ok':'bad')},ok?'Sent — the Messages tab shows the real verdicts once MailScanner has scanned them.':'Sending failed — is the MTA listening on 127.0.0.1:25? See the log above.'));});
+  };
+  api('/api/conf/test/message/last').then(d=>{if(d&&d.known)mres.append(renderMsgResult(d));});
   // Spam checks — force MailScanner to scan mail for every domain
   const sc=el('div',{class:'card'},el('h2',{},'Spam checks'),
     el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},

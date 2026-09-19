@@ -174,7 +174,7 @@ pub fn start(name: &str, script: &str, env: &[(&str, String)]) -> io::Result<()>
     Ok(())
 }
 
-fn sh_quote(p: &Path) -> String {
+pub(crate) fn sh_quote(p: &Path) -> String {
     format!("'{}'", p.display().to_string().replace('\'', "'\\''"))
 }
 

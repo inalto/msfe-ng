@@ -176,7 +176,7 @@ fn conf_test_validates_its_arguments() {
     assert!(err.contains("--bogus") && err.contains("usage:"), "{err}");
     let out = msfe_ng(&d, &["conf"]);
     assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("conf test"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("conf <test"));
     // --with needs id=file, and the file must exist
     let out = msfe_ng(&d, &["conf", "test", "--with", "nonsense"]);
     assert_eq!(out.status.code(), Some(2));

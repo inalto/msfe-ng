@@ -30,6 +30,7 @@ pub fn handle(
         ("POST", "/api/conf/restore") => restore(req, cfg, config_file),
         ("POST", "/api/conf/test") => test(req, cfg, config_file),
         ("GET", "/api/conf/test/last") => test_last(cfg),
+        ("GET", "/api/conf/test/message/last") => message_last(),
         _ => Response::json(404, r#"{"error":"not found"}"#),
     }
 }
@@ -456,6 +457,66 @@ fn test(req: &Request, cfg: &Config, config_file: &Path) -> Response {
     match conftest::run(cfg, config_file, &edits, parts) {
         Ok(r) => Response::json(200, &r.to_json().to_string()),
         Err(e) => err(500, &format!("test failed: {e}")),
+    }
+}
+
+/// Start the test-message simulation job: the sample (or the uploaded
+/// message, base64) is written under backup_dir/tests and handed to
+/// `msfe-ng conf test-message` in the background.
+pub(crate) fn start_message_test(cfg: &Config, v: &Json) -> std::io::Result<()> {
+    use msfe_core::{b64, msgtest};
+    let kind = v.str_field("sample");
+    let online = matches!(v.get("online"), Some(Json::Bool(true)));
+    let bytes: Vec<u8> = if kind == "upload" {
+        let enc = v.get("eml_b64").and_then(Json::as_str).unwrap_or("");
+        if enc.len() > 3_900_000 {
+            return Err(std::io::Error::other(
+                "the message is too large (3.9 MB max)",
+            ));
+        }
+        let data = enc.rsplit(',').next().unwrap_or(enc); // data: URL prefix tolerated
+        let Some(b) = b64::decode(data) else {
+            return Err(std::io::Error::other("eml_b64 is not valid base64"));
+        };
+        if b.is_empty()
+            || !b.iter().take(4096).any(|&c| c == b'\n')
+            || !String::from_utf8_lossy(&b[..b.len().min(4096)]).contains(':')
+        {
+            return Err(std::io::Error::other(
+                "that does not look like a message (RFC 822 headers expected)",
+            ));
+        }
+        b
+    } else {
+        msgtest::sample_eml(&kind)
+            .ok_or_else(|| std::io::Error::other("sample must be clean, gtube, eicar or upload"))?
+            .into_bytes()
+    };
+    let dir = Path::new(&cfg.backup_dir).join("tests");
+    std::fs::create_dir_all(&dir)?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let path = dir.join(format!(
+        "sample-{}.eml",
+        if kind == "upload" { "upload" } else { &kind }
+    ));
+    std::fs::write(&path, &bytes)?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    msgtest::start_job(&path, online)
+}
+
+fn message_last() -> Response {
+    match msfe_core::msgtest::last() {
+        Some(Json::Object(mut f)) => {
+            f.insert(0, ("known".into(), Json::Bool(true)));
+            Response::json(200, &Json::Object(f).to_string())
+        }
+        _ => Response::json(200, r#"{"known":false}"#),
     }
 }
 

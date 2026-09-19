@@ -2206,11 +2206,13 @@ fn jobs_route(
     cfg: &Config,
     config_file: &Path,
 ) -> Response {
-    use msfe_core::{engine_migration, jobs, resolver, upgrade};
+    use msfe_core::{engine_migration, jobs, msgtest, resolver, upgrade};
     if name != upgrade::SELF_JOB
         && name != upgrade::ENGINE_JOB
         && name != engine_migration::JOB
         && name != resolver::JOB
+        && name != msgtest::JOB
+        && name != msgtest::SELFTEST_JOB
     {
         return Response::json(404, r#"{"error":"no such job"}"#);
     }
@@ -2248,6 +2250,10 @@ fn jobs_route(
             let v = Json::parse(&req.body).unwrap_or(Json::Null);
             let res = if name == upgrade::SELF_JOB {
                 upgrade::start_self(v.get("version").and_then(Json::as_str))
+            } else if name == msgtest::JOB {
+                crate::conf_api::start_message_test(cfg, &v)
+            } else if name == msgtest::SELFTEST_JOB {
+                msgtest::start_selftest()
             } else if name == resolver::JOB {
                 let s = resolver::state();
                 match s.blockers.first() {

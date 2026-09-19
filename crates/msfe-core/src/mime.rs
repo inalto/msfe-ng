@@ -210,6 +210,30 @@ fn render(e: &Entity, images: &HashMap<String, (String, Vec<u8>)>, depth: usize,
     }
 }
 
+/// The attachments of a raw message: every non-multipart part that carries
+/// a file name, as `(decoded name, transfer-decoded bytes)`, in order.
+pub fn attachments(raw: &[u8]) -> Vec<(String, Vec<u8>)> {
+    fn walk(e: &Entity, out: &mut Vec<(String, Vec<u8>)>) {
+        if !e.children.is_empty() {
+            for c in &e.children {
+                walk(c, out);
+            }
+            return;
+        }
+        let name = e.params.get("name").cloned().or_else(|| {
+            header(&e.headers, "content-disposition")
+                .map(|d| parse_content_type(&d).1)
+                .and_then(|p| p.get("filename").cloned())
+        });
+        if let Some(n) = name {
+            out.push((crate::queueview::decode_rfc2047(&n), e.body.clone()));
+        }
+    }
+    let mut out = Vec::new();
+    walk(&parse_entity(raw, 0), &mut out);
+    out
+}
+
 /// True when an alternative branch (e.g. `multipart/related`) holds HTML.
 fn contains_html(e: &Entity) -> bool {
     e.ctype == "text/html" || e.children.iter().any(contains_html)

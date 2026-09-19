@@ -45,6 +45,7 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
         ("doctor", _) => Some(&["--fix"]),
         ("resolver", _) => Some(NONE),
         ("conf", Some("test")) => Some(&["--no-lint", "--json", "--with"]),
+        ("conf", Some("test-message")) => Some(&["--offline", "--json"]),
         ("conf", _) => Some(NONE),
         _ => None,
     }
@@ -71,7 +72,7 @@ fn usage_of(cmd: &str) -> &'static str {
         "upgrade" => "msfe-ng upgrade [--check]",
         "doctor" => "msfe-ng doctor [--fix]",
         "resolver" => "msfe-ng resolver <status|install>",
-        "conf" => "msfe-ng conf test [--no-lint] [--json] [--with <id>=<file>]...",
+        "conf" => "msfe-ng conf <test [--no-lint] [--json] [--with <id>=<file>]... | test-message <clean|gtube|eicar|file.eml> [--offline] [--json]>",
         _ => "msfe-ng help",
     }
 }
@@ -1008,6 +1009,9 @@ fn cmd_engine(sub: Option<&str>) -> ExitCode {
 /// on a staged copy instead of the live tree. Exit 1 on any failure.
 fn cmd_conf(sub: Option<&str>, rest: &[String]) -> ExitCode {
     use msfe_core::conftest::{self, Level, Parts, PendingEdit};
+    if sub == Some("test-message") {
+        return cmd_conf_test_message(rest);
+    }
     if sub != Some("test") {
         eprintln!("usage: {}", usage_of("conf"));
         return ExitCode::from(2);
@@ -1084,6 +1088,119 @@ fn cmd_conf(sub: Option<&str>, rest: &[String]) -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// `conf test-message`: what the chain would do with a message — SpamAssassin
+/// score, virus verdict, filename/filetype rule matches and the MailScanner
+/// actions predicted from the rulesets — without delivering it.
+fn cmd_conf_test_message(rest: &[String]) -> ExitCode {
+    use msfe_core::msgtest;
+    let offline = rest.iter().any(|a| a == "--offline");
+    let json = rest.iter().any(|a| a == "--json");
+    let Some(what) = rest.iter().find(|a| !a.starts_with('-')) else {
+        eprintln!("usage: {}", usage_of("conf"));
+        return ExitCode::from(2);
+    };
+    let path: PathBuf = match msgtest::sample_eml(what) {
+        Some(text) => {
+            let p = std::env::temp_dir().join(format!(
+                "msfe-ng-sample-{}-{}.eml",
+                what,
+                std::process::id()
+            ));
+            if let Err(e) = std::fs::write(&p, text) {
+                eprintln!("msfe-ng conf test-message: cannot write the sample: {e}");
+                return ExitCode::from(1);
+            }
+            p
+        }
+        None => {
+            let p = PathBuf::from(what);
+            if !p.is_file() {
+                eprintln!("msfe-ng conf test-message: {what} is neither a sample (clean|gtube|eicar) nor a readable file");
+                return ExitCode::from(2);
+            }
+            p
+        }
+    };
+    let cfg = Config::load(&config_path());
+    let r = msgtest::run_message(&cfg, &path, !offline);
+    if msgtest::sample_eml(what).is_some() {
+        let _ = std::fs::remove_file(&path);
+    }
+    let r = match r {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("msfe-ng conf test-message: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    if json {
+        println!("{}", r.to_json());
+        return ExitCode::SUCCESS;
+    }
+    let sa = &r.spamassassin;
+    println!(
+        "SpamAssassin: {}",
+        if !sa.ran {
+            sa.note.clone()
+        } else {
+            format!(
+                "{} score={} required={} tests={}{}",
+                match sa.spam {
+                    Some(true) => "SPAM",
+                    Some(false) => "not spam",
+                    None => "no verdict",
+                },
+                sa.score
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "?".into()),
+                sa.required
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "?".into()),
+                if sa.tests.is_empty() {
+                    "-".to_string()
+                } else {
+                    sa.tests.join(",")
+                },
+                if sa.note.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", sa.note)
+                }
+            )
+        }
+    );
+    let av = &r.virus;
+    println!(
+        "Virus:        {}",
+        match av.infected {
+            Some(true) => format!("INFECTED {} ({})", av.signature, av.tool),
+            Some(false) => format!("clean ({})", av.tool),
+            None => av.note.clone(),
+        }
+    );
+    if r.content.is_empty() {
+        println!("Content:      no filename/filetype rule matched");
+    }
+    for c in &r.content {
+        println!(
+            "Content:      {} → {} by {} ({}: {})",
+            c.filename, c.action, c.rule_file, c.pattern, c.log_text
+        );
+    }
+    println!(
+        "Predicted:    {} → {}: {}",
+        r.predicted.from, r.predicted.to, r.predicted.outcome
+    );
+    for (k, v) in &r.predicted.resolved {
+        println!("              {k} = {v}");
+    }
+    println!(
+        "
+(simulation — the stages were asked directly; `msfe-ng selftest` sends real mail through the MTA)"
+    );
+    ExitCode::SUCCESS
 }
 
 fn cmd_rules(sub: Option<&str>) -> ExitCode {
@@ -1514,6 +1631,7 @@ COMMANDS:
     selftest            Send GTUBE/EICAR/clean test mail through the MTA
     conf test           Test the MailScanner configuration: lint + cross-file checks
                         (--with ms:<file>=<candidate> tests an edit on a staged copy)
+    conf test-message   Simulate what the chain does with a message (clean|gtube|eicar|file.eml)
     digest [--dry-run]  Email quarantine digests to digest-enabled domains
     housekeeping        Prune old mail-log rows (cleanmysql retention)
     monitor [--dry-run] Auto-clean the delivery queue, fix misfiled spool files, send Telegram alerts (cron)
