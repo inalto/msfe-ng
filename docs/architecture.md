@@ -51,3 +51,21 @@ uninstall exact and unambiguous.
   **and** unconditional conf removal (the original's test was inverted), then
   delete our files and restore `Cpanel/Exim.pm` from backup (once M2 patches it).
 - **DirectAdmin**: `plugins/msfe_ng/{plugin.conf,admin,user}` with CGI entrypoints.
+
+## Delivery test: probes without dependencies
+
+The deliverability diagnostic keeps the std-only rule: a small DNS client
+(EDNS0/DO, TCP fallback, RD=0 for authoritative views), SMTP courtesy calls
+(banner, EHLO, QUIT — never MAIL FROM to a third party) and, through the
+system tools every EL host has, `openssl s_client` for STARTTLS/DANE, `curl`
+for MTA-STS policies, `delv`/`unbound-host` for DNSSEC. A run is a
+dependency-ordered task graph on a small worker pool with a 90 s deadline;
+results stream to the tab as they finish. Every outbound target passes the
+SSRF guard on its *resolved* address, and a lookup that fails is reported as
+*unknown*, never as a finding. The cPanel audit reads files and calls
+`exim -bt`, `uapi`, `whmapi1`, `ss` and `systemctl` read-only, scoped to the
+one account; other addresses in evidence are masked. Uploaded messages,
+diagnostic-inbox mail and reports are kept root-only and swept after a day;
+scheduled monitors live in MySQL (migration 0003) and run from the monitor
+cron.
+

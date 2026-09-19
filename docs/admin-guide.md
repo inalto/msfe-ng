@@ -59,9 +59,23 @@ Verify: `msfe-ng health` and **WHM → Plugins → MSFE-NG**.
 - **Self-test** — `msfe-ng selftest` sends GTUBE/EICAR/clean mail through the MTA.
 - **Doctor** — `msfe-ng doctor` checks every link of the chain and names the fix.
 - **Monitor** — `msfe-ng monitor` (cron, every 5 min) applies the queue
-  auto-clean rules, sends Telegram alerts, and always relocates delivery-queue
-  files that MailScanner filed in the wrong split-spool subdirectory (never
-  deletes). Preview with `--dry-run`.
+  auto-clean rules, sends Telegram alerts, runs the scheduled delivery tests,
+  and always relocates delivery-queue files that MailScanner filed in the
+  wrong split-spool subdirectory (never deletes). Preview with `--dry-run`.
+- **Config editor & tester** — the Config tab edits every file under
+  MailScanner's configuration directory with validation on a staged copy,
+  backups and rollback; `msfe-ng conf test` runs the lint and cross-file
+  checks from the shell, `msfe-ng conf test-message` simulates a message,
+  `msfe-ng snapshot export|import` moves the whole tree between servers.
+- **Delivery test** — `msfe-ng delivery test <address> [--audit]` (or the
+  Delivery test tab) diagnoses deliverability for any address: DNS,
+  SPF/DKIM/DMARC, the MX hosts and their TLS, MTA-STS/DANE, blocklists, and —
+  for addresses hosted here — the account, routing, outbound identity,
+  limits, logs and queues. `delivery eml` takes a saved message or bounce
+  apart, `delivery inbox` manages the diagnostic inbox (one-time addresses
+  wired into Exim), `delivery testmail` sends and follows a real message,
+  `delivery monitor` schedules re-tests with Telegram alerts. Details in the
+  wiki: <https://github.com/inalto/msfe-ng/wiki/Delivery-test>.
 
 ### Exim 4.100 and MailScanner's message-id probe
 
@@ -98,8 +112,11 @@ conf, detected at install time — the RPM's `/etc/MailScanner` or ConfigServer'
 file is gone), `mailscanner_custom_dir` (fallback only — the logging plugin
 goes wherever `Custom Functions Dir` in `MailScanner.conf` points),
 `mailscanner_rules_dir` (leave unset: `sync` follows the conf's `%rules-dir%`),
-`spambox_conf`, `quarantine_dir`, `socket`, `webroot`. See comments in the
-seeded file; `msfe-ng config` prints the values in effect.
+`spambox_conf`, `quarantine_dir`, `socket`, `webroot`; the delivery test's
+`delivery_runs_per_min`, `delivery_cache_secs`, `delivery_log_days`,
+`delivery_max_monitors`, `delivery_helo`. See comments in the seeded file;
+`msfe-ng config` prints the values in effect, and the Config tab edits the
+file with the same validation as everything else.
 
 ## Message bodies (archiving)
 

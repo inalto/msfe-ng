@@ -259,6 +259,18 @@ only when a generated rule file actually changed. If you see restarts every
 10 minutes, something else is rewriting the rules — check the *stray* flags on
 the [Rules](Rules) tab.
 
+## "Mail to/from an address does not arrive"
+
+Run a [Delivery test](Delivery-test) for the address (Delivery test tab, the
+`test` link next to a recipient in Messages, or `msfe-ng delivery test
+<address> --audit`). It separates what the world sees (DNS, SPF/DKIM/DMARC,
+the MX hosts and their TLS, blocklists) from what this server does with the
+address (routing, mailbox, forwarders, outbound identity, limits, the Exim
+and Dovecot logs, the queues), and every finding carries the fix. A bounce
+the sender received can be uploaded and is classified (Gmail, Microsoft,
+Yahoo, blocklists, cPanel limits…); the diagnostic inbox shows how a message
+from the other side arrives here.
+
 ## Following one message through the logs
 
 The [Logs](Logs) tab searches the **whole** mail log or Exim mainlog —

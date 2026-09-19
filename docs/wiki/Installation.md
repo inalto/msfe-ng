@@ -26,7 +26,8 @@ finds: the MailScanner RPM's `/etc/MailScanner`, or ConfigServer's
 `/usr/mailscanner` tree), starts the `msfe-ng` systemd service,
 registers the WHM/DA plugin and the cron jobs (rule sync every 10 min, queue
 monitor every 5 min, digests and housekeeping nightly). On upgrade it keeps
-your config, applies new DB migrations and restarts the daemon.
+your config, applies new DB migrations (`msfe-ng db-migrate --status` lists
+them; 1.0 adds the delivery-monitor tables) and restarts the daemon.
 
 Check it: `msfe-ng health`, then open **WHM → Plugins → MSFE-NG**. Later
 upgrades: the same one-liner, `msfe-ng upgrade`, or **Service → Updates →

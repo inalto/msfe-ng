@@ -53,7 +53,7 @@ oldest message, plus a scan for **incorrectly queued files** — spool files tha
 sit where Exim will never look. **Fix queues & force delivery run** moves them
 aside into `msfe-ng-badqueue` (never deletes) and kicks a queue run. The
 last automatic clean is noted here too. Per-message work happens on the
-[Queues](Queues) tab.
+[Queues](Queues) tab, which shows both queues in full.
 
 ## View as user
 
