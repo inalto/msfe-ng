@@ -21,6 +21,7 @@ pub fn handle(
     config_file: &Path,
 ) -> Response {
     match (method, path) {
+        // /api/snapshot/* is routed here too (same module, same helpers)
         ("GET", "/api/conf/tree") => tree(cfg, config_file),
         ("GET", "/api/conf/file") => file(req, cfg, config_file),
         ("PUT", "/api/conf/file") => save(req, cfg, config_file),
@@ -31,6 +32,11 @@ pub fn handle(
         ("POST", "/api/conf/test") => test(req, cfg, config_file),
         ("GET", "/api/conf/test/last") => test_last(cfg),
         ("GET", "/api/conf/test/message/last") => message_last(),
+        ("POST", "/api/snapshot/export") => snapshot_export(req, cfg, config_file),
+        ("GET", "/api/snapshot/list") => snapshot_list(cfg),
+        ("POST", "/api/snapshot/inspect") => snapshot_inspect(req, cfg, config_file),
+        ("GET", "/api/snapshot/diff") => snapshot_diff(req, cfg, config_file),
+        ("POST", "/api/snapshot/import") => snapshot_import(req, cfg, config_file),
         _ => Response::json(404, r#"{"error":"not found"}"#),
     }
 }
@@ -686,6 +692,271 @@ fn restore(req: &Request, cfg: &Config, config_file: &Path) -> Response {
     ) {
         Ok(r) => Response::json(200, &Json::Object(save_report_json(&r)).to_string()),
         Err(er) => err(404, &format!("cannot restore: {er}")),
+    }
+}
+
+// ---- snapshots ---------------------------------------------------------------------
+
+fn manifest_json(m: &msfe_core::snapshot::Manifest) -> Json {
+    let mut f = match m.to_json() {
+        Json::Object(f) => f,
+        _ => Vec::new(),
+    };
+    f.retain(|(k, _)| k != "files"); // the diff table carries the file list
+    Json::Object(f)
+}
+
+/// `POST /api/snapshot/export {only?}`: write a snapshot and hand it back as
+/// base64 for the browser to save (the daemon's bodies are text).
+fn snapshot_export(req: &Request, cfg: &Config, config_file: &Path) -> Response {
+    use msfe_core::snapshot::{self, Only};
+    let v = Json::parse(&req.body).unwrap_or(Json::Null);
+    let only = Only::parse(&v.str_field("only")).unwrap_or(Only::All);
+    match snapshot::export(cfg, config_file, only, None) {
+        Ok((path, m)) => {
+            let bytes = std::fs::read(&path).unwrap_or_default();
+            Response::json(
+                200,
+                &Json::Object(vec![
+                    ("ok".into(), Json::Bool(true)),
+                    (
+                        "name".into(),
+                        Json::str(
+                            path.file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_default(),
+                        ),
+                    ),
+                    ("path".into(), Json::str(path.display().to_string())),
+                    ("size".into(), Json::Int(bytes.len() as i64)),
+                    ("files".into(), Json::Int(m.files.len() as i64)),
+                    ("b64".into(), Json::str(msfe_core::b64::encode(&bytes))),
+                ])
+                .to_string(),
+            )
+        }
+        Err(e) => err(500, &format!("export failed: {e}")),
+    }
+}
+
+fn snapshot_list(cfg: &Config) -> Response {
+    let items: Vec<Json> = msfe_core::snapshot::list(cfg)
+        .into_iter()
+        .map(|(p, size, mtime)| {
+            Json::Object(vec![
+                s(
+                    "name",
+                    &p.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                ),
+                ("size".into(), Json::Int(size as i64)),
+                ("mtime".into(), Json::Int(mtime as i64)),
+            ])
+        })
+        .collect();
+    Response::json(
+        200,
+        &Json::Object(vec![
+            s(
+                "dir",
+                &msfe_core::snapshot::snapshots_dir(cfg)
+                    .display()
+                    .to_string(),
+            ),
+            ("snapshots".into(), Json::Array(items)),
+        ])
+        .to_string(),
+    )
+}
+
+fn inspection_json(insp: &msfe_core::snapshot::Inspection) -> Json {
+    Json::Object(vec![
+        s("token", &insp.token),
+        ("manifest".into(), manifest_json(&insp.manifest)),
+        (
+            "files".into(),
+            Json::Array(
+                insp.files
+                    .iter()
+                    .map(|f| {
+                        Json::Object(vec![
+                            s("id", &f.id),
+                            s("status", f.status.as_str()),
+                            (
+                                "live_size".into(),
+                                f.live_size
+                                    .map(|n| Json::Int(n as i64))
+                                    .unwrap_or(Json::Null),
+                            ),
+                            ("snap_size".into(), Json::Int(f.snap_size as i64)),
+                            ("importable".into(), Json::Bool(f.importable)),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+    ])
+}
+
+/// `POST /api/snapshot/inspect {b64}` (an upload) or `{name}` (a snapshot on
+/// this host): unpack privately and compare with the live tree.
+fn snapshot_inspect(req: &Request, cfg: &Config, config_file: &Path) -> Response {
+    use msfe_core::{b64, snapshot};
+    let v = match body(req) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let tarball: std::path::PathBuf = if let Some(enc) = v.get("b64").and_then(Json::as_str) {
+        if enc.len() > 3_900_000 {
+            return err(400, "the snapshot is too large to upload here (3.9 MB max) — use msfe-ng snapshot import on the server");
+        }
+        let data = enc.rsplit(',').next().unwrap_or(enc);
+        let Some(bytes) = b64::decode(data) else {
+            return err(400, "b64 is not valid base64");
+        };
+        let dir = snapshot::snapshots_dir(cfg).join(".uploads");
+        if std::fs::create_dir_all(&dir).is_err() {
+            return err(500, "cannot create the upload dir");
+        }
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
+        let p = dir.join(format!("upload-{}.tar.gz", std::process::id()));
+        if std::fs::write(&p, &bytes).is_err() {
+            return err(500, "cannot write the upload");
+        }
+        p
+    } else {
+        let name = v.str_field("name");
+        if !service::safe_name(&name) || !name.ends_with(".tar.gz") {
+            return err(400, "name must be a snapshot file name");
+        }
+        snapshot::snapshots_dir(cfg).join(name)
+    };
+    let r = snapshot::inspect(cfg, config_file, &tarball);
+    if tarball.starts_with(snapshot::snapshots_dir(cfg).join(".uploads")) {
+        let _ = std::fs::remove_file(&tarball);
+    }
+    match r {
+        Ok(insp) => Response::json(200, &inspection_json(&insp).to_string()),
+        Err(e) => err(400, &format!("{e}")),
+    }
+}
+
+/// `GET /api/snapshot/diff?token=&id=`: the live and the snapshot text of one file.
+fn snapshot_diff(req: &Request, cfg: &Config, config_file: &Path) -> Response {
+    use msfe_core::snapshot;
+    let token = req.query_param("token").unwrap_or_default();
+    let id = req.query_param("id").unwrap_or_default();
+    let insp = match snapshot::reopen(cfg, config_file, &token) {
+        Ok(i) => i,
+        Err(e) => return err(404, &format!("{e}")),
+    };
+    let snap = match snapshot::snapshot_content(&insp, &id) {
+        Ok(t) => t,
+        Err(e) => return err(404, &format!("{e}")),
+    };
+    let cat = confcatalog::scan(cfg, config_file);
+    let live_path = if let Some(rel) = id.strip_prefix("msfe:") {
+        Some(cat.msfe_dir.join(rel))
+    } else {
+        cat.entries
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| e.path.clone())
+    };
+    let live = live_path
+        .and_then(|p| std::fs::read(p).ok())
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default();
+    Response::json(
+        200,
+        &Json::Object(vec![s("id", &id), s("live", &live), s("snapshot", &snap)]).to_string(),
+    )
+}
+
+/// `POST /api/snapshot/import {token, files:[id…], lint}`.
+fn snapshot_import(req: &Request, cfg: &Config, config_file: &Path) -> Response {
+    use msfe_core::snapshot;
+    let v = match body(req) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let insp = match snapshot::reopen(cfg, config_file, &v.str_field("token")) {
+        Ok(i) => i,
+        Err(e) => return err(404, &format!("{e}")),
+    };
+    let select: Vec<String> = v
+        .get("files")
+        .and_then(Json::as_array)
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|x| x.as_str().map(str::to_string))
+        .collect();
+    let done = snapshot::import(cfg, config_file, &insp, &select, lint_mode(v.get("lint")));
+    snapshot::discard(&insp);
+    match done {
+        Ok(results) => {
+            let ok = results.iter().all(|(_, r)| r.error.is_none());
+            let first = results
+                .iter()
+                .find(|(_, r)| r.changed || r.error.is_some())
+                .map(|(_, r)| r);
+            let validation = first.and_then(|r| r.validation.as_ref()).map(|vv| {
+                Json::Object(vec![
+                    s("tool", vv.tool),
+                    ("ok".into(), Json::Bool(vv.ok)),
+                    ("timed_out".into(), Json::Bool(vv.timed_out)),
+                    s("output", &vv.output),
+                    ("problems".into(), strs(&vv.problems)),
+                ])
+            });
+            let reloaded = first.map(|r| {
+                Json::Object(vec![
+                    s("action", r.reloaded.action),
+                    ("ok".into(), Json::Bool(r.reloaded.ok)),
+                    ("transcript".into(), strs(&r.reloaded.transcript)),
+                ])
+            });
+            Response::json(
+                200,
+                &Json::Object(vec![
+                    ("ok".into(), Json::Bool(ok)),
+                    (
+                        "results".into(),
+                        Json::Array(
+                            results
+                                .iter()
+                                .map(|(id, r)| {
+                                    Json::Object(vec![
+                                        s("id", id),
+                                        ("changed".into(), Json::Bool(r.changed)),
+                                        (
+                                            "backup_id".into(),
+                                            r.backup_id
+                                                .clone()
+                                                .map(Json::Str)
+                                                .unwrap_or(Json::Null),
+                                        ),
+                                        ("rolled_back".into(), Json::Bool(r.rolled_back)),
+                                        (
+                                            "error".into(),
+                                            r.error.clone().map(Json::Str).unwrap_or(Json::Null),
+                                        ),
+                                    ])
+                                })
+                                .collect(),
+                        ),
+                    ),
+                    ("validation".into(), validation.unwrap_or(Json::Null)),
+                    ("reloaded".into(), reloaded.unwrap_or(Json::Null)),
+                ])
+                .to_string(),
+            )
+        }
+        Err(e) => err(500, &format!("import failed: {e}")),
     }
 }
 

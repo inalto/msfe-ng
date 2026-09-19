@@ -796,6 +796,15 @@
     cursor: pointer;
     font-size: 0.78rem;
   }
+  table.snapdiff td {
+    font-size: 0.8rem;
+  }
+  table.snapdiff tr.st-same td {
+    color: var(--muted);
+  }
+  .cfgbar {
+    margin-bottom: 0.6rem;
+  }
   details.maint > summary {
     cursor: pointer;
     font-weight: 650;

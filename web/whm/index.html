@@ -2112,6 +2112,98 @@ async function renderConfig(){
     toast(r.summary&&r.summary.fail?`${r.summary.fail} problem(s) found`:'No problems found');
   }
   testBtn.onclick=()=>runTest([]);
+
+  // ---- snapshots ------------------------------------------------------------
+  const b64ToBlob=(b64,type)=>{const bin=atob(b64);const u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return new Blob([u],{type});};
+  const expBtn=el('button',{class:'act plain',title:'Download MailScanner\'s etc tree and /etc/msfe-ng as one tar.gz (kept on the server too)'},'Export snapshot');
+  const impBtn=el('button',{class:'act plain',title:'Compare a snapshot with this server and import chosen files'},'Import snapshot');
+  bar.append(el('span',{style:'flex:1'}),expBtn,impBtn);
+  expBtn.onclick=async()=>{
+    if(!confirm('Export a snapshot of the MailScanner configuration and /etc/msfe-ng?\n\nIt contains config.toml with the database password — keep the file private. A copy stays in the backups dir on the server.'))return;
+    expBtn.disabled=true;
+    const r=await api('/api/snapshot/export',{method:'POST',body:{}});
+    expBtn.disabled=false;
+    if(!r||!r.ok){toast((r&&r.error)||'export failed');return;}
+    const url=URL.createObjectURL(b64ToBlob(r.b64,'application/gzip'));
+    const a=el('a',{href:url,download:r.name});document.body.append(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),10000);
+    toast(`Snapshot: ${r.files} files, ${fmtSize(r.size)} — also kept at ${r.path}`);
+  };
+  impBtn.onclick=()=>importWizard();
+  async function importWizard(){
+    const m=modal('Import a snapshot');
+    const step1=el('div');
+    const file=el('input',{type:'file',accept:'.gz,.tgz,application/gzip'});
+    const orSel=el('select');orSel.append(el('option',{value:''},'— or pick a snapshot kept on this server —'));
+    const inspectBtn=el('button',{class:'act'},'Compare with this server');
+    const s1note=el('div',{class:'muted',style:'font-size:.8rem;margin:.4rem 0'},'Uploads go through the panel as text, so files up to about 2.9 MB work here; larger ones: copy the file to the server and run msfe-ng snapshot import.');
+    step1.append(el('label',{class:'field'},'Snapshot file (.tar.gz)',file),el('label',{class:'field'},'',orSel),s1note,el('div',{class:'ctl'},inspectBtn));
+    m.body.append(step1);
+    api('/api/snapshot/list').then(l=>{(l.snapshots||[]).forEach(sn=>orSel.append(el('option',{value:sn.name},`${sn.name} · ${fmtSize(sn.size)} · ${fmtTime(sn.mtime)}`)));});
+    inspectBtn.onclick=async()=>{
+      let body;
+      const f=file.files&&file.files[0];
+      if(f){
+        if(f.size>2900000){toast('Too large to upload here — use msfe-ng snapshot import on the server');return;}
+        const b64=await new Promise((res,rej)=>{const rd=new FileReader();rd.onload=()=>res(String(rd.result).split(',').pop());rd.onerror=rej;rd.readAsDataURL(f);});
+        body={b64};
+      } else if(orSel.value) body={name:orSel.value};
+      else {toast('Choose a file or a server snapshot');return;}
+      inspectBtn.disabled=true;
+      const r=await api('/api/snapshot/inspect',{method:'POST',body});
+      inspectBtn.disabled=false;
+      if(!r||r.error){toast((r&&r.error)||'cannot read the snapshot');return;}
+      step2(r);
+    };
+    function step2(insp){
+      m.body.innerHTML='';
+      const mf=insp.manifest||{};
+      m.body.append(el('div',{class:'muted',style:'font-size:.8rem;margin-bottom:.5rem'},mf.legacy?'Legacy msfe-ng backup (MSFE-NG config dir only).':`Taken on ${mf.host||'?'} at ${fmtTime(mf.created)} — MSFE-NG ${mf.msfe_ng||'?'}, MailScanner ${mf.mailscanner_version||'unknown'}${mf.ms_etc?' · etc: '+mf.ms_etc:''}`));
+      const table=el('table',{class:'snapdiff'});
+      table.append(el('tr',{},el('th',{},''),el('th',{},'Status'),el('th',{},'File'),el('th',{},'Snapshot'),el('th',{},'Live')));
+      const boxes=[];
+      (insp.files||[]).forEach(f=>{
+        const cb=el('input',{type:'checkbox'});
+        const preselect=f.importable&&(f.status==='changed'||f.status==='new')&&f.id!=='msfe:config.toml';
+        cb.checked=preselect;cb.disabled=!f.importable||f.status==='same';cb.dataset.id=f.id;boxes.push(cb);
+        const name=el('button',{class:'linkbtn mono',title:'Show the differences'},f.id);
+        name.onclick=async()=>{
+          const d=await api('/api/snapshot/diff?token='+encodeURIComponent(insp.token)+'&id='+encodeURIComponent(f.id));
+          const dm=modal('Snapshot → live: '+f.id);
+          if(d.error){dm.body.append(el('div',{class:'note bad'},d.error));return;}
+          dm.body.append(el('div',{class:'muted',style:'font-size:.78rem;margin-bottom:.4rem'},'− lines are in the snapshot only, + lines only on this server'),renderDiff(lineDiff(d.snapshot||'',d.live||'')));
+        };
+        const tr=el('tr',{class:'st-'+f.status},el('td',{},cb),el('td',{},el('span',{class:'kb '+(f.status==='changed'?'restart':f.status==='new'?'reload':'')},f.status)),
+          el('td',{},name,f.id==='msfe:config.toml'?el('span',{class:'ktag warn',style:'margin-left:.4rem',title:'Paths, database password and panel settings of the host it came from'},'host-specific'):''),
+          el('td',{class:'num'},fmtSize(f.snap_size)),el('td',{class:'num'},f.live_size==null?'—':fmtSize(f.live_size)));
+        table.append(tr);
+      });
+      const skipLint=el('input',{type:'checkbox'});
+      const all=el('button',{class:'act plain'},'Select all changed');const none=el('button',{class:'act plain'},'Select none');
+      all.onclick=()=>boxes.forEach(b=>{if(!b.disabled)b.checked=true;});none.onclick=()=>boxes.forEach(b=>{b.checked=false;});
+      const go=el('button',{class:'act'},'Import selected');
+      m.body.append(table,el('div',{class:'ctl',style:'margin-top:.6rem'},all,none,el('label',{class:'muted',style:'font-size:.8rem;display:flex;gap:.3rem;align-items:center;margin-left:auto'},skipLint,' import without lint'),go));
+      go.onclick=async()=>{
+        const files=boxes.filter(b=>b.checked).map(b=>b.dataset.id);
+        if(!files.length){toast('Nothing selected');return;}
+        if(!confirm(`Import ${files.length} file(s)?\n\n${files.join('\n')}\n\nThe set is validated${skipLint.checked?' (syntax only)':' with MailScanner --lint on a staged copy'} before anything goes live; the current versions are kept in history; MailScanner is restarted or reloaded once as the files require.`))return;
+        go.disabled=true;
+        m.body.innerHTML='';m.body.append(el('div',{class:'note'},'Importing — validating on a staged copy, then applying and reloading…'));
+        const r=await api('/api/snapshot/import',{method:'POST',body:{token:insp.token,files,lint:skipLint.checked?'skip':'auto'}});
+        m.body.innerHTML='';
+        if(!r||r.error){m.body.append(el('div',{class:'note bad'},(r&&r.error)||'import failed'));return;}
+        const res=r.results||[];
+        const ok=res.filter(x=>x.changed).length;
+        m.body.append(el('div',{class:'note '+(r.ok?'ok':'bad')},el('b',{},r.ok?`Imported ${ok} file(s)`:'Import refused'),r.ok?' — the previous versions are in each file\'s History.':' — nothing was changed.'));
+        const rt=el('table');rt.append(el('tr',{},el('th',{},'File'),el('th',{},'Result')));
+        res.forEach(x=>rt.append(el('tr',{},el('td',{class:'mono'},x.id),el('td',{},x.changed?'imported'+(x.backup_id?' (previous kept as '+x.backup_id+')':''):(x.error||'unchanged')))));
+        m.body.append(rt,renderSaveReport({validation:r.validation,reloaded:r.reloaded,rolled_back:res.some(x=>x.rolled_back),error:r.ok?null:(res.find(x=>x.error)||{}).error}));
+        toast(r.ok?`Imported ${ok} file(s)`:'Import refused — see the report');
+        loadTree();if(cur)open(cur.id,{force:true,keepMode:true});
+      };
+    }
+  }
+
   api('/api/conf/test/last').then(r=>{
     if(r&&r.known){testBody.append(renderTestReport(r,openFinding));const s=r.summary||{};testSummary.textContent=`Configuration test — last run ${fmtTime(r.started)}: ${s.fail?s.fail+' problem(s)':'no problems'}${s.warn?', '+s.warn+' warning(s)':''}`;testSummary.classList.toggle('bad',!!s.fail);}
     else testSummary.textContent='Configuration test — not run yet';
