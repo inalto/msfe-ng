@@ -108,6 +108,11 @@ fn domain_task(ctx: &Ctx, res: &Results) -> (Vec<Check>, Vec<Task>) {
         }
     }
     res.set_fact("domain_exists", Json::Bool(exists));
+    // all SERVFAIL: let the DNSSEC check say whether a broken chain is why
+    res.set_fact(
+        "domain_servfail",
+        Json::Bool(!exists && errors.len() == 5 && errors.iter().all(|e| e.contains("SERVFAIL"))),
+    );
     let c = if exists {
         Check::new(
             "dns.domain",
@@ -569,15 +574,11 @@ fn mx_host_task(domain: String, pref: u16, host: String) -> Task {
             }
             _ => {}
         }
-        let mut mxips = match res.fact("mx_ips") {
-            Some(Json::Object(f)) => f,
-            _ => Vec::new(),
-        };
-        mxips.push((
-            host.clone(),
+        res.insert_fact_entry(
+            "mx_ips",
+            &host,
             Json::Array(ips.iter().map(|i| Json::str(i.to_string())).collect()),
-        ));
-        res.set_fact("mx_ips", Json::Object(mxips));
+        );
         let ip_list = ips
             .iter()
             .map(|i| i.to_string())

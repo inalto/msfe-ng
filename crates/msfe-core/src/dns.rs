@@ -858,6 +858,9 @@ pub(crate) mod testsupport {
         let mut out = Vec::new();
         out.extend_from_slice(&query[0..2]);
         let mut flags: u16 = 0x8180 | rcode as u16; // QR, RD, RA
+        if query[2] & 0x01 == 0 {
+            flags |= 0x0400; // an RD=0 query gets an authoritative-looking answer (AA)
+        }
         if tc {
             flags |= 0x0200;
         }

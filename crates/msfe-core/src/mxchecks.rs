@@ -158,7 +158,8 @@ fn servers_task(ctx: &Ctx, res: &Results) -> (Vec<Check>, Vec<Task>) {
     (checks, more)
 }
 
-fn host_ips(res: &Results, host: &str) -> Vec<IpAddr> {
+/// The addresses `dns.mx.host.<host>` recorded for an MX.
+pub fn host_ips(res: &Results, host: &str) -> Vec<IpAddr> {
     match res.fact("mx_ips") {
         Some(Json::Object(f)) => f
             .iter()
@@ -300,18 +301,14 @@ fn host_checks(
 
 /// Which names the MX presents in its certificate (for MTA-STS later).
 fn record_tls_fact(res: &Results, host: &str, t: &TlsProbe) {
-    let mut f = match res.fact("mx_tls") {
-        Some(Json::Object(f)) => f,
-        _ => Vec::new(),
-    };
     let names: Vec<Json> = t
         .leaf
         .as_ref()
         .map(|c| c.sans.iter().map(Json::str).collect())
         .unwrap_or_default();
-    f.retain(|(h, _)| h != host);
-    f.push((
-        host.to_string(),
+    res.insert_fact_entry(
+        "mx_tls",
+        host,
         Json::Object(vec![
             (
                 "ok".into(),
@@ -319,8 +316,7 @@ fn record_tls_fact(res: &Results, host: &str, t: &TlsProbe) {
             ),
             ("names".into(), Json::Array(names)),
         ]),
-    ));
-    res.set_fact("mx_tls", Json::Object(f));
+    );
 }
 
 fn smtp_checks(

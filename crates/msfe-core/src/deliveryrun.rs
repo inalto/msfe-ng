@@ -69,6 +69,19 @@ impl Results {
             .unwrap_or_else(|e| e.into_inner())
             .insert(k.to_string(), v);
     }
+    /// Add `(key, value)` to the object fact `k` (created when absent),
+    /// replacing an earlier entry with the same key — atomically, since
+    /// tasks that run side by side all write the same object.
+    pub fn insert_fact_entry(&self, k: &str, key: &str, value: Json) {
+        let mut g = self.facts.lock().unwrap_or_else(|e| e.into_inner());
+        let mut entries = match g.remove(k) {
+            Some(Json::Object(f)) => f,
+            _ => Vec::new(),
+        };
+        entries.retain(|(h, _)| h != key);
+        entries.push((key.to_string(), value));
+        g.insert(k.to_string(), Json::Object(entries));
+    }
     pub fn fact(&self, k: &str) -> Option<Json> {
         self.facts
             .lock()
@@ -308,6 +321,7 @@ pub fn plan(_inputs: &Inputs) -> Vec<Task> {
     let mut tasks = crate::dnschecks::tasks();
     tasks.extend(crate::authchecks::tasks());
     tasks.extend(crate::mxchecks::tasks());
+    tasks.extend(crate::tschecks::tasks());
     tasks.push(crate::dnschecks::meta_task());
     tasks
 }
