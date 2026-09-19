@@ -88,15 +88,61 @@ entry for an inbound address is a low warning with that note, not a failure.
 - **fresh run** — ignore a report cached in the last 10 minutes
   (`delivery_cache_secs`).
 
-## Server audit, diagnostic inbox, monitoring
+## Server audit (addresses hosted here)
 
-For an address hosted on this cPanel server the audit adds a **This server**
-section (account, routing, outbound identity, services, limits, logs and
-queues, abuse signals); a **diagnostic inbox** gives a one-time address to
-send a message to for an inbound analysis; a **test mail** sends a real
-message out and follows it through the logs; **monitors** re-run a test on a
-schedule and alert on regressions. These arrive in later releases and are
-listed here so the section names match.
+For an address whose domain belongs to a cPanel account on this server,
+*include server audit* (ticked automatically when the domain is hosted here)
+adds a **This server** section. It is read-only — files under /etc and
+/var/cpanel, `exim -bt`, `uapi`/`whmapi1` queries, `ss`, `systemctl` — and
+looks only at that account; other people's addresses in evidence are masked
+(`j***@example.com`).
+
+- **Account** — the owning account and whether it is suspended; Exim's
+  routing list for the domain (local / remote / backup MX) against where
+  the public MX points (a local domain whose MX is elsewhere means mail sent
+  from this server never reaches the real mailboxes); the mailbox
+  (`Email list_pops_with_disk`: suspended incoming or login, quota); the
+  default address (reject / blackhole / catch-all forward).
+- **Routing** — `exim -bt` for the address (undeliverable, local, remote),
+  forwarders to external addresses (with the SRS advice), loops and pipes,
+  filters that discard, autoresponder, BoxTrapper, whether MailScanner is
+  in the path and whether cPanel's SpamAssassin scans a second time,
+  greylisting.
+- **Outbound identity** — the IP mail leaves from (`/etc/mailips` or the
+  main IP), the HELO name resolved both ways against it, SPF evaluated for
+  that IP, cPanel's DKIM key compared with what DNS publishes (a different
+  key in DNS is worse than none), smarthost / `queue_only`, whether port 25
+  outbound is open, and the outbound IP on the sender blocklists.
+- **Services and network** — exim, dovecot, cphulkd, mailscanner state;
+  listening ports; csf `TCP_IN`/`TCP_OUT`/`SMTP_BLOCK`; Exim version and
+  `require_secure_auth`; the submission-port certificate for `mail.<domain>`.
+- **Limits and filtering** — the hourly limit against the last hour of
+  authenticated sends, the defer/fail cutoff, the acceptance ACL options
+  (sender verification off is a warning), cPanel Spam Filters and auto-delete.
+- **Logs and queues** — the Exim main log for the last *log days* (default
+  2, up to 7; the live file's tail plus two rotated ones, 32 MB each at
+  most): messages to and from the address with deliveries, bounces (the
+  remote response is classified — Gmail, Microsoft, Yahoo, iCloud,
+  Proofpoint, Mimecast, blocklists, cPanel limits — with the fix and the
+  delisting page), deferrals; SMTP-time rejections of mail to or from the
+  address; failed logins as the address; the panic log; Dovecot logins
+  (addresses, failures); MailScanner's verdicts on mail from the address;
+  messages for or from it in the queues (frozen ones with their log).
+- **Abuse and reputation** — csf entries for the supplied IP and the
+  recent login addresses, cPHulk, outbound bursts from the account this
+  hour, logins from many different addresses.
+
+A probe of the server's own MX address is marked as such: Exim treats its
+own host as trusted (it advertises AUTH to itself, for instance), so what
+remote senders see is best checked from another host.
+
+## Diagnostic inbox, test mail, monitoring
+
+A **diagnostic inbox** gives a one-time address to send a message to for an
+inbound analysis; a **test mail** sends a real message out and follows it
+through the logs; **monitors** re-run a test on a schedule and alert on
+regressions. These arrive in later releases and are listed here so the
+section names match.
 
 ## Safety
 
@@ -122,7 +168,7 @@ private resolver (Service → *Private DNS resolver*) so their rows answer.
 *Recent tests* lists the last runs. The same run from the shell:
 
 ```
-msfe-ng delivery test user@example.com [--ip 203.0.113.5] [--selector s1] [--json | --html] [--force]
+msfe-ng delivery test user@example.com [--ip 203.0.113.5] [--selector s1] [--audit] [--days 7] [--json | --html] [--force]
 ```
 
 Checks stream as `[VERDICT] id  title` lines, followed by a per-scope summary

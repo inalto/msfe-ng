@@ -24,6 +24,7 @@ pub mod db;
 pub mod dbtools;
 pub mod delivery;
 pub mod deliveryhtml;
+pub mod deliverylog;
 pub mod deliveryrun;
 pub mod digest;
 pub mod dkim;

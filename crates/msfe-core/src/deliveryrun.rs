@@ -331,6 +331,7 @@ pub fn plan(inputs: &Inputs) -> Vec<Task> {
     tasks.extend(crate::tschecks::tasks());
     tasks.extend(crate::repchecks::tasks());
     tasks.extend(crate::cpaudit::tasks(inputs));
+    tasks.extend(crate::deliverylog::tasks(inputs));
     tasks.push(crate::dnschecks::meta_task());
     tasks
 }

@@ -40,7 +40,7 @@ msfe-ng snapshot export [file] [--only mailscanner|msfe]   MailScanner etc tree 
 msfe-ng snapshot import <file> [--dry-run] [--only …] [--yes]   compare with this host, import chosen files
 msfe-ng snapshot list
 msfe-ng backup <file.tgz> | restore <file.tgz>      aliases: snapshot export/import --only msfe
-msfe-ng delivery test <address> [--ip <ip>] [--selector <s>] [--json | --html] [--force]   deliverability diagnostic (exit 1 on a failure, 3 on a bad address)
+msfe-ng delivery test <address> [--ip <ip>] [--selector <s>] [--audit] [--days <n>] [--json | --html] [--force]   deliverability diagnostic (+ cPanel audit; exit 1 on a failure, 3 on a bad address)
 ```
 
 Environment: `MSFE_NG_SOCKET` (daemon socket), `MSFE_NG_CONFIG` (config file),
