@@ -2055,6 +2055,10 @@ fn resolver_state() -> Response {
             ("on_loopback".into(), Json::Bool(s.on_loopback)),
             ("unbound_installed".into(), Json::Bool(s.unbound_installed)),
             ("unbound_active".into(), Json::Bool(s.unbound_active)),
+            (
+                "unbound_answers".into(),
+                s.unbound_answers.map(Json::Bool).unwrap_or(Json::Null),
+            ),
             ("port53".into(), strs(&s.port53)),
             ("public_v4".into(), strs(&s.public_v4)),
             ("public_v6".into(), strs(&s.public_v6)),

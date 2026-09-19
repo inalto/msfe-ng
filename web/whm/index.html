@@ -1288,6 +1288,7 @@ async function renderService(){
     (p.notes||[]).forEach(n=>rsList.append(el('li',{},n)));
     (p.blockers||[]).forEach(b=>rsList.append(el('li',{style:'color:var(--critical)'},b)));
     rsBtn.disabled=!p.ok;
+    rsBtn.textContent=p.unbound_active?'Switch this host to unbound on loopback':p.unbound_installed?'Start unbound and switch this host to it':'Install unbound on loopback';
   }
   rsBtn.onclick=async()=>{
     if(!confirm('Install a private DNS resolver?\n\nunbound is installed and started on 127.0.0.1, PowerDNS (if present) is bound to the public addresses, and the system resolver is switched to loopback only once a blocklist query through unbound succeeds. Reversible: the .msfe-ng.bak copies hold the previous files.'))return;

@@ -42,6 +42,8 @@ pub struct State {
     pub on_loopback: bool,
     pub unbound_installed: bool,
     pub unbound_active: bool,
+    /// Does unbound on 127.0.0.1 resolve a public name? `None` when not active.
+    pub unbound_answers: Option<bool>,
     /// What else serves port 53 here (`pdns`, `named`, `dnsmasq`, …).
     pub port53: Vec<String>,
     pub public_v4: Vec<String>,
@@ -59,7 +61,7 @@ impl State {
     }
     /// Already done: unbound answering and resolv.conf on loopback.
     pub fn done(&self) -> bool {
-        self.on_loopback && self.unbound_active
+        self.on_loopback && self.unbound_active && self.unbound_answers != Some(false)
     }
 }
 
@@ -127,6 +129,13 @@ pub fn state() -> State {
         ..Default::default()
     };
     if live {
+        if s.unbound_active {
+            s.unbound_answers = Some(
+                query_a("127.0.0.1", "a.root-servers.net")
+                    .map(|a| !a.is_empty())
+                    .unwrap_or(false),
+            );
+        }
         s.public_v4 = public_addrs("-4");
         s.public_v6 = public_addrs("-6");
         s.has_v6_loopback = Command::new("ip")
@@ -270,6 +279,24 @@ pub fn ifcfg_with_local_dns(text: &str, v6: bool) -> Option<String> {
 
 /// Query `name` (A) at `server`:53 over UDP; the answer's A records.
 pub fn query_a(server: &str, name: &str) -> io::Result<Vec<String>> {
+    query(server, name).map(|(_, a)| a)
+}
+
+/// The response code's name (`NOERROR`, `SERVFAIL`, `REFUSED`, …).
+pub fn rcode_name(msg: &[u8]) -> &'static str {
+    match msg.get(3).map(|b| b & 0x0f) {
+        Some(0) => "NOERROR",
+        Some(1) => "FORMERR",
+        Some(2) => "SERVFAIL",
+        Some(3) => "NXDOMAIN",
+        Some(5) => "REFUSED",
+        Some(_) => "other",
+        None => "no response",
+    }
+}
+
+/// `(rcode, A records)` for `name` at `server`.
+pub fn query(server: &str, name: &str) -> io::Result<(&'static str, Vec<String>)> {
     let sock = UdpSocket::bind(if server.contains(':') {
         "[::]:0"
     } else {
@@ -285,7 +312,38 @@ pub fn query_a(server: &str, name: &str) -> io::Result<Vec<String>> {
     sock.send_to(&q, (server, 53))?;
     let mut buf = [0u8; 1024];
     let (n, _) = sock.recv_from(&mut buf)?;
-    Ok(parse_a_answers(&buf[..n]))
+    Ok((rcode_name(&buf[..n]), parse_a_answers(&buf[..n])))
+}
+
+/// Who listens on port 53 (`ss -lnup`), as "addr:port process" lines.
+fn port53_listeners() -> Vec<String> {
+    Command::new("ss")
+        .args(["-lnup", "sport = :53"])
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .skip(1)
+                .filter_map(|l| {
+                    let f: Vec<&str> = l.split_whitespace().collect();
+                    f.get(3).map(|addr| {
+                        let proc_ = f
+                            .get(5)
+                            .map(|p| {
+                                p.split("users:((\"")
+                                    .nth(1)
+                                    .unwrap_or(p)
+                                    .split('"')
+                                    .next()
+                                    .unwrap_or(p)
+                            })
+                            .unwrap_or("?");
+                        format!("{addr} {proc_}")
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// A records in a DNS response (compression handled by skipping names).
@@ -414,23 +472,76 @@ pub fn install() -> io::Result<()> {
     println!("  {} (Restart=on-failure)", dropin.display());
     if live {
         let _ = Command::new("systemctl").arg("daemon-reload").status();
-        if !run_logged(Command::new("systemctl").args(["enable", "--now", "unbound"]))? {
+        if Path::new("/usr/sbin/unbound-checkconf").exists()
+            && !run_logged(&mut Command::new("unbound-checkconf"))?
+        {
+            return Err(io::Error::other(
+                "unbound-checkconf rejects the configuration",
+            ));
+        }
+        if !run_logged(Command::new("systemctl").args(["enable", "unbound"]))? {
+            return Err(io::Error::other("systemctl enable unbound failed"));
+        }
+        // restart, not start: a changed config must be picked up either way
+        if !run_logged(Command::new("systemctl").args(["restart", "unbound"]))? {
             return Err(io::Error::other(
                 "unbound did not start — journalctl -u unbound",
             ));
         }
-        let _ = Command::new("systemctl")
-            .args(["restart", "unbound"])
-            .status();
     }
 
-    step(4, "verify: a blocklist query through 127.0.0.1");
+    step(
+        4,
+        "verify: recursion, then a blocklist query, through 127.0.0.1",
+    );
     if live {
         std::thread::sleep(Duration::from_secs(1));
-        let answers = query_a("127.0.0.1", TEST_NAME)?;
+        if !unit_active("unbound") {
+            let journal = Command::new("journalctl")
+                .args(["-u", "unbound", "--no-pager", "-n", "5"])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default();
+            return Err(io::Error::other(format!(
+                "unbound is not running (journalctl -u unbound):\n{journal}"
+            )));
+        }
+        let listeners = port53_listeners();
+        println!("  port 53 listeners: {}", listeners.join("; "));
+        if let Some(l) = listeners
+            .iter()
+            .find(|l| l.starts_with("127.0.0.1:53") && !l.contains("unbound"))
+        {
+            return Err(io::Error::other(format!(
+                "127.0.0.1:53 is served by {l}, not unbound — PowerDNS/BIND must be bound to the public addresses only (and restarted) before unbound can take loopback; resolv.conf left untouched"
+            )));
+        }
+        // unbound answers SERVFAIL for a few seconds after start while its
+        // validator fetches the trust anchor: retry before giving up
+        let settle = |name: &str, want: &dyn Fn(&str) -> bool| -> (&'static str, Vec<String>) {
+            let mut last = ("no response", Vec::new());
+            for _ in 0..12 {
+                if let Ok((rc, a)) = query("127.0.0.1", name) {
+                    if a.iter().any(|x| want(x)) {
+                        return (rc, a);
+                    }
+                    last = (rc, a);
+                }
+                std::thread::sleep(Duration::from_millis(2500));
+            }
+            last
+        };
+        let (rc, a) = settle("a.root-servers.net", &|_| true);
+        if a.is_empty() {
+            return Err(io::Error::other(format!(
+                "unbound answers {rc} for a.root-servers.net after 30 s: it cannot recurse — outbound DNS (udp/tcp 53) blocked by the firewall (csf: check UDP_OUT/TCP_OUT), or DNSSEC failing (clock, /var/lib/unbound/root.key); journalctl -u unbound — resolv.conf left untouched"
+            )));
+        }
+        println!("  a.root-servers.net → {} — recursion works", a.join(", "));
+        let (rc, answers) = settle(TEST_NAME, &|x| x.starts_with("127.0.0."));
         if !answers.iter().any(|a| a.starts_with("127.0.0.")) {
             return Err(io::Error::other(format!(
-                "unbound on 127.0.0.1 did not answer {TEST_NAME} with 127.0.0.x (got {answers:?}) — resolv.conf left untouched"
+                "{TEST_NAME} answered {rc} {answers:?} through unbound — Spamhaus does not answer this host's own address either (a blocklisted or datacenter IP?); resolv.conf left untouched"
             )));
         }
         println!("  {TEST_NAME} → {} — the list answers", answers.join(", "));

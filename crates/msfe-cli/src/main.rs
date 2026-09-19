@@ -512,12 +512,11 @@ fn cmd_resolver(sub: Option<&str>) -> ExitCode {
             );
             println!(
                 "unbound: {}; port 53 also served by: {}; network manager: {}",
-                if s.unbound_active {
-                    "active"
-                } else if s.unbound_installed {
-                    "installed, not active"
-                } else {
-                    "not installed"
+                match (s.unbound_active, s.unbound_answers) {
+                    (true, Some(true)) => "active, resolving",
+                    (true, _) => "active but NOT resolving (journalctl -u unbound)",
+                    (false, _) if s.unbound_installed => "installed, not active",
+                    _ => "not installed",
                 },
                 if s.port53.is_empty() {
                     "nothing".into()
