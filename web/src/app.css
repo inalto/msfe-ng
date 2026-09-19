@@ -193,10 +193,13 @@
     font-weight: 600;
   }
   .rail nav button .ico {
-    width: 1.05rem;
-    text-align: center;
+    width: 1.15rem;
+    height: 1.15rem;
+    flex-shrink: 0;
     opacity: 0.85;
-    font-size: 0.95rem;
+  }
+  .rail nav button[aria-selected="true"] .ico {
+    opacity: 1;
   }
   .rail .foot {
     margin-top: auto;
@@ -276,8 +279,8 @@
       padding: 0.55rem 0;
     }
     .app.mini .rail nav button .ico {
-      font-size: 0.95rem;
-      width: auto;
+      width: 1.25rem;
+      height: 1.25rem;
     }
     .app.mini .rail .health {
       justify-content: center;
