@@ -338,7 +338,12 @@ mod tests {
         // correctly placed message must be left alone
         misfiled_message(&out_dir, "1wnE6A-00000004Oi3-3lJH", "A");
 
-        let cfg = Config::default();
+        // no database: the cooldown state must not come from a real server
+        let cfg = Config {
+            db_host: "127.0.0.1".into(),
+            db_port: 1,
+            ..Config::default()
+        };
         let r = run_with_dirs(&cfg, false, &in_dir, &out_dir);
         assert_eq!(r.spool_repaired, 1);
         assert!(out_dir.join("V/1wnE6V-00000004Oi2-3lJH-H").is_file());
