@@ -103,7 +103,18 @@ sub db_driver {
 
 sub db_dsn {
     my $driver = db_driver() || 'mysql';
-    return "DBI:$driver:database=$DB{db_name};host=$DB{db_host};port=$DB{db_port}";
+    return dsn_for($driver, \%DB);
+}
+
+# `localhost` means the Unix socket to both drivers; DBD::MariaDB refuses a
+# port with it ("port cannot be specified when host is localhost"), so the
+# port only goes into the DSN for a real host.
+sub dsn_for {
+    my ($driver, $db) = @_;
+    my $dsn = "DBI:$driver:database=$db->{db_name};host=$db->{db_host}";
+    $dsn .= ";port=$db->{db_port}"
+        if $db->{db_port} && $db->{db_host} ne 'localhost' && $db->{db_host} ne '';
+    return $dsn;
 }
 
 sub db_connect {
@@ -265,6 +276,18 @@ sub clean {
     return '' unless defined $s;
     $s =~ s/[\r\n\t]+/ /g;
     return $s;
+}
+
+# For `msfe-ng doctor`: connect exactly as a scanning child would (same
+# config, driver, DSN, user) and say how it went. Run as the scan user:
+#   perl -e 'require "…/MSFENG.pm"; print MailScanner::CustomConfig::connection_check()'
+sub connection_check {
+    read_db_config();
+    require DBI;
+    db_connect();
+    my $out = $DBH ? "ok: " . db_dsn() . " as $DB{db_user}" : ($DBI::errstr || 'connect failed');
+    db_disconnect();
+    return $out;
 }
 
 sub _log {

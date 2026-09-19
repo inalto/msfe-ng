@@ -626,6 +626,7 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
         ));
         if dbi {
             let driver = setup::db_driver(&lay.perl);
+            let driver_ok = driver.is_some();
             out.push(check(
                 "logging DB driver",
                 driver.is_some(),
@@ -636,6 +637,19 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
                 },
                 "msfe-ng doctor --fix (dnf -y install perl-DBD-MariaDB — perl-DBD-MySQL conflicts with the MariaDB repo's packages)",
             ));
+            // the plugin's own connect, as the scan user: the root mysql
+            // client passing says nothing about DBI/DSN/grants from mailnull
+            if driver_ok && cfg.db_configured() {
+                let (ok, detail) =
+                    plugin_connection_check(&lay.perl, &plugin, engine::run_user_for(cfg));
+                out.push(check(
+                    "logging plugin connects to the DB",
+                    ok,
+                    Level::Fail,
+                    detail,
+                    "check db_* in /etc/msfe-ng/config.toml and the DB user's grants for connections from localhost; messages are not recorded until this connects",
+                ));
+            }
         }
         // the plugin (group mail) must read the credentials; the world must not
         use std::os::unix::fs::MetadataExt;
@@ -1366,6 +1380,47 @@ pub fn fix(cfg: &Config, config_file: &Path) -> Vec<String> {
         ));
     }
     done
+}
+
+/// Run the plugin's `connection_check` under the engine's perl as the scan
+/// user (via `su`, which needs no sudoers entry).
+fn plugin_connection_check(perl: &[String], plugin: &Path, user: &str) -> (bool, String) {
+    let script = format!(
+        "require '{}'; print MailScanner::CustomConfig::connection_check();",
+        plugin.display()
+    );
+    let cmd = format!("{} -e {}", perl.join(" "), shell_quote(&script));
+    let out = Command::new("su")
+        .args(["-s", "/bin/sh", user, "-c", &cmd])
+        .output();
+    match out {
+        Ok(o) => {
+            let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            if text.starts_with("ok:") {
+                (true, format!("{} — {}", user, &text[4..]))
+            } else if text.is_empty() {
+                (
+                    false,
+                    format!(
+                        "as {user}: {}",
+                        if err.is_empty() {
+                            "no answer from the plugin".into()
+                        } else {
+                            err
+                        }
+                    ),
+                )
+            } else {
+                (false, format!("as {user}: {text}"))
+            }
+        }
+        Err(e) => (false, format!("cannot run the check as {user}: {e}")),
+    }
+}
+
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Does spamassassin.conf's `envelope_sender_header` name the header

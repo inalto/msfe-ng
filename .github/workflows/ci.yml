@@ -85,6 +85,6 @@ jobs:
             echo "== $f"; perl -c "$f" || exit 1
           done
       - name: logging plugin test
-        run: perl panel/mailscanner/t/msfeng.t
+        run: perl panel/mailscanner/t/msfeng.t && perl panel/mailscanner/t/dsn.t
       - name: cPanel live.cgi contract test
         run: perl panel/cpanel/jupiter/t/live-cgi.t
