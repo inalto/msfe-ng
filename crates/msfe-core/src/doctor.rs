@@ -1383,7 +1383,9 @@ pub fn fix(cfg: &Config, config_file: &Path) -> Vec<String> {
 }
 
 /// Run the plugin's `connection_check` under the engine's perl as the scan
-/// user (via `su`, which needs no sudoers entry).
+/// user with group `mail` — exactly the identity of a scanning child
+/// (MailScanner sets GID mail, which is what lets it read config.toml,
+/// root:mail 0640). `su` needs no sudoers entry.
 fn plugin_connection_check(perl: &[String], plugin: &Path, user: &str) -> (bool, String) {
     let script = format!(
         "require '{}'; print MailScanner::CustomConfig::connection_check();",
@@ -1391,7 +1393,7 @@ fn plugin_connection_check(perl: &[String], plugin: &Path, user: &str) -> (bool,
     );
     let cmd = format!("{} -e {}", perl.join(" "), shell_quote(&script));
     let out = Command::new("su")
-        .args(["-s", "/bin/sh", user, "-c", &cmd])
+        .args(["-s", "/bin/sh", "-g", "mail", user, "-c", &cmd])
         .output();
     match out {
         Ok(o) => {
