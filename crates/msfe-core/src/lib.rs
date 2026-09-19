@@ -8,6 +8,7 @@
 //! of the original `msbe.pl` / `msrules.pl` / `mschange.pl` and on MailWatch,
 //! but no original code is copied. See CONTRIBUTING.md.
 
+pub mod authchecks;
 pub mod b64;
 pub mod civil;
 pub mod confcatalog;
@@ -24,6 +25,8 @@ pub mod delivery;
 pub mod deliveryhtml;
 pub mod deliveryrun;
 pub mod digest;
+pub mod dkim;
+pub mod dmarc;
 pub mod dns;
 pub mod dnschecks;
 pub mod doctor;
@@ -46,6 +49,7 @@ pub mod msgrammar;
 pub mod msgtest;
 pub mod netguard;
 pub mod panel;
+pub mod psl;
 pub mod quarantine;
 pub mod queueview;
 pub mod resolver;
@@ -56,6 +60,7 @@ pub mod service;
 pub mod setup;
 pub mod snapshot;
 pub mod spambox;
+pub mod spf;
 pub mod stats;
 pub mod sync;
 pub mod telegram;
