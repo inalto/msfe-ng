@@ -853,7 +853,7 @@ fn named_queue_base() -> std::path::PathBuf {
         .unwrap_or_else(|_| DEFAULT_NAMED_QUEUE_BASE.to_string())
         .into()
 }
-fn exim_conf_path() -> std::path::PathBuf {
+pub fn exim_conf_path() -> std::path::PathBuf {
     std::env::var("MSFE_NG_EXIM_CONF")
         .unwrap_or_else(|_| "/etc/exim.conf".to_string())
         .into()

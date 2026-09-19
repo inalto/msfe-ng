@@ -324,12 +324,13 @@ pub fn parse_inputs(
 }
 
 /// The task list of a public delivery test (phase A).
-pub fn plan(_inputs: &Inputs) -> Vec<Task> {
+pub fn plan(inputs: &Inputs) -> Vec<Task> {
     let mut tasks = crate::dnschecks::tasks();
     tasks.extend(crate::authchecks::tasks());
     tasks.extend(crate::mxchecks::tasks());
     tasks.extend(crate::tschecks::tasks());
     tasks.extend(crate::repchecks::tasks());
+    tasks.extend(crate::cpaudit::tasks(inputs));
     tasks.push(crate::dnschecks::meta_task());
     tasks
 }

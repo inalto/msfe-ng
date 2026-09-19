@@ -18,6 +18,7 @@ pub mod config;
 pub mod confsave;
 pub mod confstage;
 pub mod conftest;
+pub mod cpaudit;
 pub mod csf;
 pub mod db;
 pub mod dbtools;

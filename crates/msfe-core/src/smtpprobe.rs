@@ -26,6 +26,9 @@ pub struct SmtpProbe {
     pub eightbit: bool,
     pub smtputf8: bool,
     pub enhanced_codes: bool,
+    /// When AUTH was advertised on the clear-text connection: the reply code
+    /// to a bare `AUTH PLAIN` (334 = accepted in clear, 5xx = refused).
+    pub auth_clear: Option<u16>,
     pub transcript: String,
     pub error: Option<String>,
 }
@@ -223,6 +226,25 @@ pub fn probe(
         }
         Err(e) => p.error = Some(format!("no EHLO reply: {e}")),
     }
+    // AUTH advertised in clear: does the server really take it, or refuse
+    // until TLS (538)? A bare AUTH PLAIN carries no credentials; a 334 is
+    // cancelled with "*"
+    if !p.auth.is_empty() && p.error.is_none() && w.write_all(b"AUTH PLAIN\r\n").is_ok() {
+        tr.push_str("> AUTH PLAIN\n");
+        if let Ok((code, lines)) = read_reply(&mut r, deadline) {
+            tr.push_str(&lines.join("\n"));
+            tr.push('\n');
+            p.auth_clear = Some(code);
+            if code == 334 {
+                let _ = w.write_all(b"*\r\n");
+                tr.push_str("> *\n");
+                if let Ok((_, l2)) = read_reply(&mut r, deadline) {
+                    tr.push_str(&l2.join("\n"));
+                    tr.push('\n');
+                }
+            }
+        }
+    }
     let _ = w.write_all(b"QUIT\r\n");
     tr.push_str("> QUIT\n");
     if let Ok((_, lines)) = read_reply(&mut r, Instant::now() + Duration::from_secs(2)) {
@@ -374,8 +396,9 @@ mod tests {
             vec![
                 (
                     "EHLO",
-                    "250-mx.test Hello\r\n250-STARTTLS\r\n250 SIZE 1000\r\n",
+                    "250-mx.test Hello\r\n250-STARTTLS\r\n250-AUTH PLAIN LOGIN\r\n250 SIZE 1000\r\n",
                 ),
+                ("AUTH", "538 Encryption required for requested authentication mechanism\r\n"),
                 ("QUIT", "221 bye\r\n"),
             ],
             "220 mx.test ESMTP\r\n",
@@ -393,6 +416,7 @@ mod tests {
         assert_eq!(p.banner, "220 mx.test ESMTP");
         assert!(p.starttls);
         assert_eq!(p.size, Some(1000));
+        assert_eq!(p.auth_clear, Some(538));
         assert!(p.transcript.contains("> EHLO probe.local") && p.transcript.contains("221 bye"));
         // HELO fallback
         let addr = fake_smtp(

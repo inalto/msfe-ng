@@ -271,7 +271,21 @@ fn host_checks(
             SESSION_TIMEOUT,
         );
         let ptr_names = res.fact_strs(&format!("ptr.{ip}"));
+        // probing our own address (server audit): Exim treats its own host
+        // as trusted, so some of what it advertises is not what the world sees
+        let is_self = netguard::own_addresses().contains(&ip);
         checks.extend(smtp_checks(&p, host, &tgt, fam, primary, &ptr_names));
+        if is_self {
+            for c in checks.iter_mut().filter(|c| {
+                c.id == "mx.caps" && c.verdict == Verdict::Warn && c.title.contains("AUTH")
+            }) {
+                c.verdict = Verdict::Pass;
+                c.severity = Severity::Info;
+                c.title = format!("{host} advertises AUTH to itself");
+                c.explanation = "this probe ran from the server to its own address, which Exim treats as a trusted host and offers AUTH to; remote senders see the port-25 EHLO without it (checked from outside: `msfe-ng delivery test` on another host, or the public part of this report run elsewhere)".into();
+                c.fix = None;
+            }
+        }
         let t = tls_thread.join().unwrap_or_else(|_| TlsProbe {
             error: Some("the TLS probe crashed".into()),
             ..Default::default()
@@ -514,12 +528,35 @@ fn smtp_checks(
     }
     let caps_ev = p.caps.join("\n");
     let auth_on_25 = !p.auth.is_empty();
-    if auth_on_25 {
+    if auth_on_25 && p.auth_clear == Some(334) {
         out.push(
-            Check::new("mx.caps", SC, MX, Verdict::Warn, Severity::Medium, format!("{host} offers AUTH before TLS on port 25"), format!("AUTH {} is advertised on the clear-text connection; credentials of clients that fall for it travel unencrypted, and port 25 should be for server-to-server mail only", p.auth.join(" ")))
+            Check::new("mx.caps", SC, MX, Verdict::Warn, Severity::Medium, format!("{host} accepts AUTH before TLS on port 25"), format!("AUTH {} is advertised on the clear-text connection and a bare AUTH PLAIN was accepted (334): credentials of clients that use it travel unencrypted, and port 25 should be for server-to-server mail only", p.auth.join(" ")))
                 .target(tgt)
-                .evidence("EHLO", caps_ev.clone())
-                .fix_summary("Advertise AUTH only after STARTTLS and on the submission ports 465/587 (Exim: `auth_advertise_hosts = ${if eq{$tls_in_cipher}{}{}{*}}`; cPanel: WHM → Exim Configuration Manager → Require SSL/TLS for authentication)"),
+                .evidence("transcript", p.transcript.clone())
+                .fix_summary("Require TLS before authentication and keep AUTH for the submission ports 465/587 (Exim: `auth_advertise_hosts = ${if eq{$tls_in_cipher}{}{}{*}}`; cPanel: WHM → Exim Configuration Manager → Security → Require clients to connect with SSL or issue the STARTTLS command before they are allowed to authenticate)"),
+        );
+    } else if auth_on_25 {
+        out.push(
+            Check::new(
+                "mx.caps",
+                SC,
+                MX,
+                Verdict::Pass,
+                Severity::Info,
+                format!("{host} advertises the usual extensions"),
+                format!(
+                    "SIZE {}{}; AUTH is advertised on port 25 but refused before TLS ({})",
+                    p.size
+                        .map(|s| format!("{} MB", s / 1_048_576))
+                        .unwrap_or_default(),
+                    if p.smtputf8 { ", SMTPUTF8" } else { "" },
+                    p.auth_clear
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "no reply".into())
+                ),
+            )
+            .target(tgt)
+            .evidence("transcript", p.transcript.clone()),
         );
     } else if missing.is_empty() {
         out.push(
@@ -822,9 +859,21 @@ mod tests {
         p.ehlo_name = Some("other.name".into());
         p.starttls = false;
         p.auth = vec!["PLAIN".into()];
+        p.auth_clear = Some(334);
         let c = smtp_checks(&p, "mx.example", "t", "IPv4", true, &["ptr.example".into()]);
         assert_eq!(verdict_of(&c, "mx.ehlo"), Verdict::Warn);
-        assert_eq!(verdict_of(&c, "mx.caps"), Verdict::Warn);
+        assert_eq!(
+            verdict_of(&c, "mx.caps"),
+            Verdict::Warn,
+            "AUTH accepted in clear"
+        );
+        p.auth_clear = Some(538);
+        let c = smtp_checks(&p, "mx.example", "t", "IPv4", true, &[]);
+        assert_eq!(
+            verdict_of(&c, "mx.caps"),
+            Verdict::Pass,
+            "advertised but refused before TLS"
+        );
         assert_eq!(verdict_of(&c, "mx.starttls"), Verdict::Fail);
         p.ehlo_name = Some("mx7.corp.example".into());
         let c = smtp_checks(&p, "mx.corp.example", "t", "IPv4", true, &[]);
