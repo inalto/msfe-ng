@@ -5,7 +5,8 @@ use crate::http::{Request, Response};
 use msfe_core::json::Json;
 use msfe_core::rules::DomainPolicy;
 use msfe_core::{
-    civil, logindex, mailflow, quarantine, rulefile, rules, service, stats, sync, users, Config,
+    civil, confcatalog, confsave, logindex, mailflow, quarantine, rulefile, rules, service, stats,
+    sync, users, Config,
 };
 use std::path::Path;
 
@@ -1955,20 +1956,98 @@ fn conf_apply(req: &Request, cfg: &Config, config_file: &Path) -> Response {
     if changes.is_empty() {
         return Response::json(200, r#"{"ok":true,"applied":0}"#);
     }
-    let style = if which == "msfe" {
-        msfe_core::conffile::Style::Toml
-    } else {
-        msfe_core::conffile::Style::Plain
+    let Some(entry) = confcatalog::resolve(cfg, config_file, &conf_id(&which)) else {
+        return Response::json(404, r#"{"error":"file not found"}"#);
     };
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(e) => return Response::json(500, &format!("{{\"error\":\"cannot read: {e}\"}}")),
+    let _ = path;
+    let text = std::fs::read_to_string(&entry.path).unwrap_or_default();
+    let Some(new_text) = confsave::render_changes(&entry, &text, &changes) else {
+        return Response::json(400, r#"{"error":"not a key/value file"}"#);
     };
-    let (new_text, applied) = msfe_core::conffile::apply(&text, &changes, style);
-    match service::save_conf(&path, &new_text) {
-        Ok(()) => Response::json(200, &format!("{{\"ok\":true,\"applied\":{applied}}}")),
+    let applied = changes.len();
+    match confsave::save(
+        cfg,
+        confsave::SaveRequest {
+            entry: &entry,
+            new_text,
+            lint: lint_mode(v.get("lint")),
+            reload: reload_mode(v.get("reload")),
+            reason: "save",
+            expect_mtime: v
+                .get("expect_mtime")
+                .and_then(Json::as_i64)
+                .map(|m| m as u64),
+        },
+    ) {
+        Ok(r) => {
+            let mut obj = save_report_json(&r);
+            obj.insert(1, ("applied".into(), Json::Int(applied as i64)));
+            Response::json(200, &Json::Object(obj).to_string())
+        }
         Err(e) => Response::json(500, &format!("{{\"error\":\"cannot save: {e}\"}}")),
     }
+}
+
+fn strs(v: &[String]) -> Json {
+    Json::Array(v.iter().map(Json::str).collect())
+}
+
+/// The catalog id behind the legacy `which` selector.
+fn conf_id(which: &str) -> String {
+    match which {
+        "msfe" => "msfe:config.toml".into(),
+        _ => "ms:MailScanner.conf".into(),
+    }
+}
+
+fn lint_mode(v: Option<&Json>) -> confsave::LintMode {
+    match v.and_then(Json::as_str) {
+        Some("skip") => confsave::LintMode::Skip,
+        _ => confsave::LintMode::Auto,
+    }
+}
+
+fn reload_mode(v: Option<&Json>) -> confsave::ReloadMode {
+    match v.and_then(Json::as_str) {
+        Some("skip") => confsave::ReloadMode::Skip,
+        _ => confsave::ReloadMode::Auto,
+    }
+}
+
+/// A `SaveReport` as the fields every save-like route answers with.
+fn save_report_json(r: &confsave::SaveReport) -> Vec<(String, Json)> {
+    let validation = match &r.validation {
+        Some(v) => Json::Object(vec![
+            ("tool".into(), Json::str(v.tool)),
+            ("ok".into(), Json::Bool(v.ok)),
+            ("timed_out".into(), Json::Bool(v.timed_out)),
+            ("output".into(), Json::str(&v.output)),
+            ("problems".into(), strs(&v.problems)),
+        ]),
+        None => Json::Null,
+    };
+    vec![
+        ("ok".into(), Json::Bool(r.error.is_none())),
+        ("changed".into(), Json::Bool(r.changed)),
+        (
+            "backup_id".into(),
+            r.backup_id.clone().map(Json::Str).unwrap_or(Json::Null),
+        ),
+        ("validation".into(), validation),
+        (
+            "reloaded".into(),
+            Json::Object(vec![
+                ("action".into(), Json::str(r.reloaded.action)),
+                ("ok".into(), Json::Bool(r.reloaded.ok)),
+                ("transcript".into(), strs(&r.reloaded.transcript)),
+            ]),
+        ),
+        ("rolled_back".into(), Json::Bool(r.rolled_back)),
+        (
+            "error".into(),
+            r.error.clone().map(Json::Str).unwrap_or(Json::Null),
+        ),
+    ]
 }
 
 /// Resolve the editable-file selector to a path. Only these two files are ever
@@ -2011,8 +2090,25 @@ fn service_conf_write(req: &Request, cfg: &Config, config_file: &Path) -> Respon
     let Some(content) = v.get("content").and_then(Json::as_str) else {
         return Response::json(400, r#"{"error":"missing content"}"#);
     };
-    match service::save_conf(&path, content) {
-        Ok(()) => Response::json(200, r#"{"ok":true}"#),
+    let Some(entry) = confcatalog::resolve(cfg, config_file, &conf_id(&which)) else {
+        return Response::json(404, r#"{"error":"file not found"}"#);
+    };
+    let _ = path;
+    match confsave::save(
+        cfg,
+        confsave::SaveRequest {
+            entry: &entry,
+            new_text: content.to_string(),
+            lint: lint_mode(v.get("lint")),
+            reload: reload_mode(v.get("reload")),
+            reason: "save",
+            expect_mtime: v
+                .get("expect_mtime")
+                .and_then(Json::as_i64)
+                .map(|m| m as u64),
+        },
+    ) {
+        Ok(r) => Response::json(200, &Json::Object(save_report_json(&r)).to_string()),
         Err(e) => Response::json(500, &format!("{{\"error\":\"cannot save: {e}\"}}")),
     }
 }

@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const TABLES: &[&str] = &["maillog", "quarantine", "msfe_config"];
 
 /// UTC `YYYYMMDD-HHMMSS` from Unix seconds, for backup filenames.
-fn stamp(secs: u64) -> String {
+pub(crate) fn stamp(secs: u64) -> String {
     let d = crate::civil::Date::from_unix(secs);
     let sod = secs % 86_400;
     format!(
@@ -29,7 +29,7 @@ fn stamp(secs: u64) -> String {
     )
 }
 
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

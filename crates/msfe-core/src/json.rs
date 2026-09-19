@@ -100,6 +100,13 @@ impl Json {
             _ => None,
         }
     }
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Json::Int(n) => Some(*n),
+            Json::Num(s) => s.parse().ok(),
+            _ => None,
+        }
+    }
     pub fn as_array(&self) -> Option<&[Json]> {
         match self {
             Json::Array(a) => Some(a),

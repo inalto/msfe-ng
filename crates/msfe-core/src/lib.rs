@@ -12,6 +12,8 @@ pub mod civil;
 pub mod confcatalog;
 pub mod conffile;
 pub mod config;
+pub mod confsave;
+pub mod confstage;
 pub mod csf;
 pub mod db;
 pub mod dbtools;

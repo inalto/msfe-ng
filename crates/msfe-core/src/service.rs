@@ -215,6 +215,8 @@ pub fn set_engine_run(cfg: &Config, enabled: bool) -> io::Result<()> {
 pub struct LintReport {
     pub ok: bool,
     pub output: String,
+    /// The 180 s cap hit: inconclusive rather than a verdict on the config.
+    pub timed_out: bool,
 }
 
 /// Run MailScanner's own self-check (`--lint`): validates the configuration,
@@ -227,8 +229,18 @@ pub fn lint(cfg: &Config) -> LintReport {
 }
 
 pub fn lint_with(bin: &Path) -> LintReport {
+    lint_conf(bin, None)
+}
+
+/// `--lint` against a specific conf file (a staged candidate); the engine
+/// accepts the conf path as its positional argument and names it in a
+/// `Reading configuration file …` line.
+pub fn lint_conf(bin: &Path, conf: Option<&Path>) -> LintReport {
     let mut cmd = Command::new(bin);
     cmd.arg("--lint");
+    if let Some(c) = conf {
+        cmd.arg(c);
+    }
     // lint scans a real test batch: with a scanner unreachable it enters
     // MailScanner's retry loop and never exits — it once held the daemon
     // hostage for 90 minutes (WSOD in WHM)
@@ -238,10 +250,12 @@ pub fn lint_with(bin: &Path) -> LintReport {
             output: "MailScanner --lint did not finish within 180s — \
                      a virus/spam scanner is probably unreachable (check clamd and its socket)"
                 .into(),
+            timed_out: true,
         },
         Ok(o) => LintReport {
             ok: o.ok,
             output: format!("{}{}", o.stdout, o.stderr).trim().to_string(),
+            timed_out: false,
         },
         Err(_) => LintReport {
             ok: false,
@@ -249,6 +263,7 @@ pub fn lint_with(bin: &Path) -> LintReport {
                 "MailScanner engine is not installed at {} (run: msfe-ng engine install)",
                 bin.display()
             ),
+            timed_out: false,
         },
     }
 }

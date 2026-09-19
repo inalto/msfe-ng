@@ -281,7 +281,20 @@ fn format_epoch(v: &str) -> String {
 
 /// SpamAssassin's own configuration self-check (`spamassassin --lint`).
 pub fn lint() -> (bool, String) {
-    match Command::new("spamassassin").arg("--lint").output() {
+    lint_prefs(None)
+}
+
+/// `spamassassin --lint -p <prefs>`: the check with MailScanner's
+/// `spamassassin.conf` (or a staged candidate of it) as the user preferences
+/// file, the way the engine hands it to SpamAssassin. Without `prefs` SA reads
+/// only its own site config.
+pub fn lint_prefs(prefs: Option<&std::path::Path>) -> (bool, String) {
+    let mut cmd = Command::new("spamassassin");
+    cmd.arg("--lint");
+    if let Some(p) = prefs {
+        cmd.arg("-p").arg(p);
+    }
+    match cmd.output() {
         Ok(o) => {
             let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
             s.push_str(&String::from_utf8_lossy(&o.stderr));
