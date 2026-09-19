@@ -1019,6 +1019,9 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
         (m, p) if p.starts_with("/api/conf/") || p.starts_with("/api/snapshot/") => {
             crate::conf_api::handle(m, p, req, cfg, config_file)
         }
+        (m, p) if p.starts_with("/api/delivery/") => {
+            crate::delivery_api::handle(m, p, req, cfg, config_file)
+        }
         ("GET", "/api/engine/migrate") => engine_migrate_preflight(cfg, config_file),
         ("GET", "/api/resolver") => resolver_state(),
 

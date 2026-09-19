@@ -40,6 +40,36 @@ pub fn user_domains(user: &str) -> Vec<String> {
     d
 }
 
+/// The account that owns `domain` (cPanel `/etc/userdomains`, DirectAdmin
+/// per-user domain lists); `None` when the domain is not hosted here.
+pub fn owner_of_domain(domain: &str) -> Option<String> {
+    let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+    if let Ok(f) = std::env::var("MSFE_NG_USERDOMAINS_FILE") {
+        return owner_in_userdomains(&read(Path::new(&f)), &domain);
+    }
+    match detect_panel().kind() {
+        PanelKind::Cpanel => owner_in_userdomains(&read(Path::new("/etc/userdomains")), &domain),
+        PanelKind::DirectAdmin => {
+            let users = std::fs::read_dir("/usr/local/directadmin/data/users").ok()?;
+            users
+                .filter_map(Result::ok)
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .find(|u| valid_username(u) && owns_domain(u, &domain))
+        }
+        PanelKind::None => None,
+    }
+}
+
+/// `domain: user` lookup, exact domain match, the `*:` catch-all skipped.
+fn owner_in_userdomains(text: &str, domain: &str) -> Option<String> {
+    text.lines().find_map(|l| {
+        let (d, owner) = l.split_once(':')?;
+        let d = d.trim();
+        (!d.starts_with('*') && d.eq_ignore_ascii_case(domain) && valid_username(owner.trim()))
+            .then(|| owner.trim().to_string())
+    })
+}
+
 /// True if `user` owns `domain` — the authorization check for every user route.
 pub fn owns_domain(user: &str, domain: &str) -> bool {
     user_domains(user).iter().any(|d| d == domain)
@@ -92,6 +122,29 @@ fn read_lines(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owner_lookup_is_exact_and_skips_the_catch_all() {
+        let text = "*: nobody\nexample.com: alice\nsub.example.com: bob\nother.example: bad user\n";
+        assert_eq!(
+            owner_in_userdomains(text, "example.com").as_deref(),
+            Some("alice")
+        );
+        assert_eq!(
+            owner_in_userdomains(text, "EXAMPLE.COM").as_deref(),
+            Some("alice")
+        );
+        assert_eq!(
+            owner_in_userdomains(text, "sub.example.com").as_deref(),
+            Some("bob")
+        );
+        assert_eq!(owner_in_userdomains(text, "nope.example"), None);
+        assert_eq!(
+            owner_in_userdomains(text, "other.example"),
+            None,
+            "invalid user name"
+        );
+    }
 
     #[test]
     fn resolves_username_from_passwd_uid() {

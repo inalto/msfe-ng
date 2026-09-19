@@ -805,6 +805,153 @@
   .cfgbar {
     margin-bottom: 0.6rem;
   }
+  /* ---- Delivery test ----------------------------------------------------- */
+  .chip.unknown {
+    color: var(--muted);
+    border-color: var(--muted);
+  }
+  .chip.na {
+    color: var(--muted);
+  }
+  table.findings .dot.unknown,
+  .dlv-table .dot.unknown {
+    background: var(--muted);
+  }
+  .dlv-table .dot.na {
+    background: var(--line);
+  }
+  .dlv-table .dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--muted);
+  }
+  .dlv-table .dot.fail {
+    background: var(--critical);
+  }
+  .dlv-table .dot.warn {
+    background: var(--warning);
+  }
+  .dlv-table .dot.pass {
+    background: var(--good);
+  }
+  .kb.sev-critical {
+    color: var(--critical);
+    border-color: var(--critical);
+  }
+  .kb.sev-high {
+    color: var(--serious);
+    border-color: var(--serious);
+  }
+  .kb.sev-medium {
+    color: var(--warning);
+    border-color: var(--warning);
+  }
+  .dlv-scope {
+    margin-bottom: 1rem;
+  }
+  .dlv-group h3 {
+    margin: 0.7rem 0 0.2rem;
+    color: var(--ink2);
+  }
+  .dlv-table td {
+    font-size: 0.82rem;
+    white-space: normal;
+    max-width: none;
+  }
+  .dlv-row {
+    cursor: pointer;
+  }
+  .dlv-row td.dlv-v {
+    width: 1.4rem;
+  }
+  .dlv-row td.dlv-sev {
+    width: 5rem;
+  }
+  .dlv-row td.dlv-title {
+    width: 34%;
+  }
+  .dlv-row .dlv-target {
+    font-size: 0.76rem;
+    color: var(--muted);
+    word-break: break-all;
+  }
+  .dlv-row.open td {
+    background: var(--surface-2);
+  }
+  .dlv-detail td {
+    background: var(--surface-2);
+    padding: 0.6rem 0.9rem 0.8rem;
+  }
+  .dlv-explain {
+    margin-bottom: 0.4rem;
+  }
+  .dlv-fix {
+    border-left: 3px solid var(--accent);
+    background: var(--accent-weak);
+    border-radius: 0 8px 8px 0;
+    padding: 0.4rem 0.7rem;
+    margin: 0.4rem 0;
+    font-size: 0.82rem;
+  }
+  .dlv-fix b {
+    color: var(--accent);
+  }
+  .dlv-rec {
+    display: flex;
+    gap: 0.5rem;
+    align-items: flex-start;
+    margin-top: 0.3rem;
+  }
+  .dlv-rec pre {
+    flex: 1;
+    margin: 0;
+    max-height: 10rem;
+  }
+  .copybtn {
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--ink2);
+    border-radius: 6px;
+    padding: 0.15rem 0.5rem;
+    font-size: 0.72rem;
+    cursor: pointer;
+  }
+  .copybtn:hover {
+    color: var(--ink);
+    border-color: var(--accent);
+  }
+  .dlv-na > summary {
+    cursor: pointer;
+    font-size: 0.78rem;
+    margin-top: 0.5rem;
+  }
+  .dlv-chips {
+    display: inline-flex;
+    gap: 0.3rem;
+    flex-wrap: wrap;
+  }
+  .progress {
+    height: 4px;
+    background: var(--line);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .progress .bar {
+    height: 100%;
+    width: 0;
+    background: var(--accent);
+    transition: width 0.4s ease;
+  }
+  .dlv-mini {
+    font-family: var(--font-mono);
+    font-size: 0.76rem;
+  }
+  .dlv-adv > summary {
+    cursor: pointer;
+    font-size: 0.8rem;
+  }
   details.maint > summary {
     cursor: pointer;
     font-weight: 650;
@@ -1123,6 +1270,16 @@
     }
     .kv .kvrow .k {
       width: 9rem;
+    }
+    .dlv-row td.dlv-expl {
+      display: none;
+    }
+    .dlv-row td.dlv-title {
+      width: auto;
+    }
+    .card .dlv-table {
+      width: 100%;
+      min-width: 0;
     }
   }
 

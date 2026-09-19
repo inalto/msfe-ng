@@ -40,6 +40,16 @@ pub struct Config {
     /// Geolocation lookup URL for the client-IP modal, `{ip}` substituted.
     /// Empty disables lookups (the address is sent to this third party).
     pub geoip_url: String,
+    // ---- delivery test --------------------------------------------------------
+    /// Diagnostic runs allowed per minute (daemon-wide).
+    pub delivery_runs_per_min: u32,
+    /// A finished report is served again for this long (seconds).
+    pub delivery_cache_secs: u64,
+    /// Days of Exim logs the server audit scans by default (1–7).
+    pub delivery_log_days: u32,
+    pub delivery_max_monitors: u32,
+    /// The EHLO name the probes introduce themselves with; empty = hostname -f.
+    pub delivery_helo: String,
     // ---- interface & release preferences (MailControl-style settings) --------
     /// Messages tab auto-refresh interval in seconds (0 = off).
     pub refresh_secs: u32,
@@ -108,6 +118,11 @@ impl Default for Config {
             exim_mainlog_path: "/var/log/exim_mainlog".into(),
             mailscannerq_conf: "/etc/msfe-ng/mailscannerq.conf".into(),
             geoip_url: "https://ipwho.is/{ip}".into(),
+            delivery_runs_per_min: 6,
+            delivery_cache_secs: 600,
+            delivery_log_days: 2,
+            delivery_max_monitors: 20,
+            delivery_helo: String::new(),
             refresh_secs: 0,
             rows_per_page: 50,
             view_new_window: false,
@@ -196,6 +211,13 @@ impl Config {
                 "exim_mainlog_path" => c.exim_mainlog_path = v,
                 "mailscannerq_conf" => c.mailscannerq_conf = v,
                 "geoip_url" => c.geoip_url = v,
+                "delivery_runs_per_min" => {
+                    c.delivery_runs_per_min = v.parse().unwrap_or(6).clamp(1, 60)
+                }
+                "delivery_cache_secs" => c.delivery_cache_secs = v.parse().unwrap_or(600),
+                "delivery_log_days" => c.delivery_log_days = v.parse().unwrap_or(2).clamp(1, 7),
+                "delivery_max_monitors" => c.delivery_max_monitors = v.parse().unwrap_or(20),
+                "delivery_helo" => c.delivery_helo = v,
                 "refresh_secs" => c.refresh_secs = v.parse().unwrap_or(0),
                 "rows_per_page" => c.rows_per_page = v.parse().unwrap_or(50).clamp(10, 500),
                 "view_new_window" => c.view_new_window = v == "yes" || v == "true" || v == "1",
@@ -258,6 +280,23 @@ impl Config {
             ("spamcop_address".into(), Json::str(&self.spamcop_address)),
             ("learn_updates_db".into(), Json::Bool(self.learn_updates_db)),
             ("backup_dir".into(), Json::str(&self.backup_dir)),
+            (
+                "delivery_runs_per_min".into(),
+                Json::Int(self.delivery_runs_per_min as i64),
+            ),
+            (
+                "delivery_cache_secs".into(),
+                Json::Int(self.delivery_cache_secs as i64),
+            ),
+            (
+                "delivery_log_days".into(),
+                Json::Int(self.delivery_log_days as i64),
+            ),
+            (
+                "delivery_max_monitors".into(),
+                Json::Int(self.delivery_max_monitors as i64),
+            ),
+            ("delivery_helo".into(), Json::str(&self.delivery_helo)),
             (
                 "queue_clean_frozen_hours".into(),
                 Json::Int(self.queue_clean_frozen_hours as i64),

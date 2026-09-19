@@ -13,6 +13,7 @@
 
 mod api;
 mod conf_api;
+mod delivery_api;
 mod http;
 mod views;
 
@@ -68,6 +69,7 @@ fn main() -> io::Result<()> {
         let cfg = msfe_core::Config::load(std::path::Path::new(&config_path()));
         msfe_core::confstage::sweep(&cfg);
         msfe_core::snapshot::sweep(&cfg);
+        msfe_core::deliveryrun::sweep();
     }
 
     let listener = UnixListener::bind(&path)?;
