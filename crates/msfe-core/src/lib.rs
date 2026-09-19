@@ -48,6 +48,7 @@ pub mod rules;
 pub mod sa;
 pub mod service;
 pub mod setup;
+pub mod snapshot;
 pub mod spambox;
 pub mod stats;
 pub mod sync;

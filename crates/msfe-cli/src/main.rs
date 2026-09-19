@@ -44,6 +44,11 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
         ("upgrade", _) => Some(&["--check"]),
         ("doctor", _) => Some(&["--fix"]),
         ("resolver", _) => Some(NONE),
+        ("snapshot", Some("export")) => Some(&["--only"]),
+        ("snapshot", Some("import")) => Some(&["--dry-run", "--only", "--yes", "--no-lint"]),
+        ("snapshot", _) => Some(NONE),
+        ("backup", _) => Some(NONE),
+        ("restore", _) => Some(&["--yes"]),
         ("conf", Some("test")) => Some(&["--no-lint", "--json", "--with"]),
         ("conf", Some("test-message")) => Some(&["--offline", "--json"]),
         ("conf", _) => Some(NONE),
@@ -72,6 +77,9 @@ fn usage_of(cmd: &str) -> &'static str {
         "upgrade" => "msfe-ng upgrade [--check]",
         "doctor" => "msfe-ng doctor [--fix]",
         "resolver" => "msfe-ng resolver <status|install>",
+        "snapshot" => "msfe-ng snapshot <export [file] [--only mailscanner|msfe] | import <file> [--dry-run] [--only mailscanner|msfe] [--no-lint] [--yes] | list>",
+        "backup" => "msfe-ng backup <file.tar.gz>   (alias: snapshot export --only msfe)",
+        "restore" => "msfe-ng restore <file.tar.gz> [--yes]   (alias: snapshot import --only msfe)",
         "conf" => "msfe-ng conf <test [--no-lint] [--json] [--with <id>=<file>]... | test-message <clean|gtube|eicar|file.eml> [--offline] [--json]>",
         _ => "msfe-ng help",
     }
@@ -128,8 +136,9 @@ fn main() -> ExitCode {
         "rules" => cmd_rules(args.get(1).map(String::as_str)),
         "engine" => cmd_engine(args.get(1).map(String::as_str)),
         "doctor" => cmd_doctor(args.iter().any(|a| a == "--fix")),
-        "backup" => cmd_backup(args.get(1).map(String::as_str)),
-        "restore" => cmd_restore(args.get(1).map(String::as_str)),
+        "backup" => cmd_backup(sub),
+        "restore" => cmd_restore(sub, rest),
+        "snapshot" => cmd_snapshot(sub, rest),
         "help" | "--help" | "-h" => {
             print_help();
             ExitCode::SUCCESS
@@ -1541,75 +1550,286 @@ fn cmd_db(sub: Option<&str>) -> ExitCode {
     }
 }
 
+/// `backup <file>`: the MSFE-NG config dir as a snapshot (alias of
+/// `snapshot export --only msfe <file>`; the archive is the new format, which
+/// `restore` and `snapshot import` both read, as they read the old one).
 fn cmd_backup(file: Option<&str>) -> ExitCode {
-    let file = match file {
-        Some(f) => f,
-        None => {
-            eprintln!("usage: msfe-ng backup <file.tar.gz>");
-            return ExitCode::from(2);
-        }
+    let Some(file) = file else {
+        eprintln!("usage: {}", usage_of("backup"));
+        return ExitCode::from(2);
     };
-    let dir = conf_dir();
-    let parent = dir.parent().unwrap_or(Path::new("/etc"));
-    let name = dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("msfe-ng");
-    let status = std::process::Command::new("tar")
-        .arg("czf")
-        .arg(file)
-        .arg("-C")
-        .arg(parent)
-        .arg(name)
-        .status();
-    match status {
-        Ok(s) if s.success() => {
-            println!("backed up {} to {file}", dir.display());
+    let cfg = Config::load(&config_path());
+    match msfe_core::snapshot::export(
+        &cfg,
+        &config_path(),
+        msfe_core::snapshot::Only::Msfe,
+        Some(Path::new(file)),
+    ) {
+        Ok((path, m)) => {
+            println!(
+                "backed up {} ({} files) to {}",
+                conf_dir().display(),
+                m.files.len(),
+                path.display()
+            );
             ExitCode::SUCCESS
         }
-        _ => {
-            eprintln!("msfe-ng backup: tar failed");
+        Err(e) => {
+            eprintln!("msfe-ng backup: {e}");
             ExitCode::from(1)
         }
     }
 }
 
-/// Restore config + policy from a tarball produced by `backup`.
-fn cmd_restore(file: Option<&str>) -> ExitCode {
-    let file = match file {
-        Some(f) => f,
-        None => {
-            eprintln!("usage: msfe-ng restore <file.tar.gz>");
-            return ExitCode::from(2);
-        }
+/// `restore <file>`: every MSFE-NG config file in the archive (alias of
+/// `snapshot import --only msfe --no-lint`).
+fn cmd_restore(file: Option<&str>, rest: &[String]) -> ExitCode {
+    let Some(file) = file else {
+        eprintln!("usage: {}", usage_of("restore"));
+        return ExitCode::from(2);
     };
-    if !Path::new(file).exists() {
-        eprintln!("msfe-ng restore: {file} not found");
-        return ExitCode::from(1);
+    let mut args: Vec<String> = vec![
+        file.to_string(),
+        "--only".into(),
+        "msfe".into(),
+        "--no-lint".into(),
+    ];
+    if rest.iter().any(|a| a == "--yes") {
+        args.push("--yes".into());
     }
-    let parent = conf_dir()
-        .parent()
-        .unwrap_or(Path::new("/etc"))
-        .to_path_buf();
-    let status = std::process::Command::new("tar")
-        .arg("xzf")
-        .arg(file)
-        .arg("-C")
-        .arg(&parent)
-        .status();
-    match status {
-        Ok(s) if s.success() => {
-            println!(
-                "restored config into {}. Run: msfe-ng sync",
-                parent.display()
-            );
+    cmd_snapshot(Some("import"), &args)
+}
+
+/// `snapshot export|import|list`: the MailScanner etc tree and /etc/msfe-ng
+/// as one tar.gz with a manifest — backup, restore, or move to another host.
+fn cmd_snapshot(sub: Option<&str>, rest: &[String]) -> ExitCode {
+    use msfe_core::snapshot::{self, Only, Status};
+    let cfg = Config::load(&config_path());
+    let mut only = Only::All;
+    let mut positional: Vec<&String> = Vec::new();
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        if a == "--only" {
+            match it.next().map(String::as_str).and_then(Only::parse) {
+                Some(o) => only = o,
+                None => {
+                    eprintln!("msfe-ng snapshot: --only takes mailscanner or msfe");
+                    return ExitCode::from(2);
+                }
+            }
+        } else if !a.starts_with('-') {
+            positional.push(a);
+        }
+    }
+    match sub {
+        Some("list") => {
+            let l = snapshot::list(&cfg);
+            if l.is_empty() {
+                println!(
+                    "no snapshots in {}",
+                    snapshot::snapshots_dir(&cfg).display()
+                );
+                return ExitCode::SUCCESS;
+            }
+            for (p, size, mtime) in l {
+                println!("{}\t{}\t{}", fmt_when(mtime), fmt_size(size), p.display());
+            }
             ExitCode::SUCCESS
         }
+        Some("export") => {
+            let out = positional.first().map(|s| PathBuf::from(s.as_str()));
+            match snapshot::export(&cfg, &config_path(), only, out.as_deref()) {
+                Ok((path, m)) => {
+                    println!(
+                        "snapshot written: {} ({} files, {} · MailScanner {})",
+                        path.display(),
+                        m.files.len(),
+                        fmt_size(std::fs::metadata(&path).map(|x| x.len()).unwrap_or(0)),
+                        m.mailscanner_version.unwrap_or_else(|| "unknown".into())
+                    );
+                    println!("contains config.toml with the database password — keep it private");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("msfe-ng snapshot export: {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        Some("import") => {
+            let Some(file) = positional.first() else {
+                eprintln!("usage: {}", usage_of("snapshot"));
+                return ExitCode::from(2);
+            };
+            let dry = rest.iter().any(|a| a == "--dry-run");
+            let yes = rest.iter().any(|a| a == "--yes");
+            let lint = if rest.iter().any(|a| a == "--no-lint") {
+                msfe_core::confsave::LintMode::Skip
+            } else {
+                msfe_core::confsave::LintMode::Auto
+            };
+            let insp = match snapshot::inspect(&cfg, &config_path(), Path::new(file)) {
+                Ok(i) => i,
+                Err(e) => {
+                    eprintln!("msfe-ng snapshot import: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            let m = &insp.manifest;
+            if m.legacy {
+                println!("legacy msfe-ng backup archive (MSFE-NG config dir only)");
+            } else {
+                println!(
+                    "snapshot from {} taken {} (MSFE-NG {}, MailScanner {})",
+                    m.host,
+                    fmt_when(m.created),
+                    m.msfe_ng,
+                    m.mailscanner_version
+                        .clone()
+                        .unwrap_or_else(|| "unknown".into())
+                );
+            }
+            let wanted = |id: &str| match only {
+                Only::All => true,
+                Only::Mailscanner => id.starts_with("ms:"),
+                Only::Msfe => id.starts_with("msfe:"),
+            };
+            let mut select: Vec<String> = Vec::new();
+            for f in &insp.files {
+                if !wanted(&f.id) {
+                    continue;
+                }
+                let pick = f.importable && f.status != Status::Same;
+                println!(
+                    "{:<8} {} {}{}",
+                    f.status.as_str(),
+                    if pick { "*" } else { " " },
+                    f.id,
+                    if f.id == "msfe:config.toml" && pick {
+                        "   (host-specific: paths, database password)"
+                    } else {
+                        ""
+                    }
+                );
+                if pick {
+                    select.push(f.id.clone());
+                }
+            }
+            if select.is_empty() {
+                println!("nothing to import — every selected file is identical or not importable");
+                snapshot::discard(&insp);
+                return ExitCode::SUCCESS;
+            }
+            if dry {
+                println!(
+                    "dry run: {} file(s) would be imported (marked *)",
+                    select.len()
+                );
+                snapshot::discard(&insp);
+                return ExitCode::SUCCESS;
+            }
+            if !yes {
+                print!(
+                    "import {} file(s) marked *? The current versions are kept in history. [y/N] ",
+                    select.len()
+                );
+                let _ = std::io::stdout().flush();
+                let mut line = String::new();
+                let _ = std::io::stdin().read_line(&mut line);
+                if !matches!(line.trim(), "y" | "Y" | "yes") {
+                    println!("aborted");
+                    snapshot::discard(&insp);
+                    return ExitCode::from(1);
+                }
+            }
+            let done = match snapshot::import(&cfg, &config_path(), &insp, &select, lint) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("msfe-ng snapshot import: {e}");
+                    snapshot::discard(&insp);
+                    return ExitCode::from(1);
+                }
+            };
+            snapshot::discard(&insp);
+            let mut failed = 0;
+            for (id, r) in &done {
+                if r.changed {
+                    println!(
+                        "imported {id}{}",
+                        r.backup_id
+                            .as_ref()
+                            .map(|b| format!(" (previous kept as {b})"))
+                            .unwrap_or_default()
+                    );
+                } else {
+                    failed += 1;
+                    println!(
+                        "NOT imported {id}: {}",
+                        r.error.clone().unwrap_or_else(|| "unchanged".into())
+                    );
+                }
+            }
+            if let Some((_, r)) = done.iter().find(|(_, r)| r.changed || r.error.is_some()) {
+                if let Some(v) = &r.validation {
+                    println!(
+                        "validation: {} {}",
+                        v.tool,
+                        if v.ok { "ok" } else { "FAILED" }
+                    );
+                    if !v.ok {
+                        for p in &v.problems {
+                            println!("  {p}");
+                        }
+                    }
+                }
+                if r.reloaded.action != "none" {
+                    println!(
+                        "MailScanner {}: {}",
+                        r.reloaded.action,
+                        if r.reloaded.ok { "done" } else { "FAILED" }
+                    );
+                }
+                for l in &r.reloaded.transcript {
+                    println!("  {l}");
+                }
+            }
+            if failed > 0 {
+                ExitCode::from(1)
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
         _ => {
-            eprintln!("msfe-ng restore: tar failed");
-            ExitCode::from(1)
+            eprintln!("usage: {}", usage_of("snapshot"));
+            ExitCode::from(2)
         }
     }
+}
+
+fn fmt_size(n: u64) -> String {
+    if n >= 1_048_576 {
+        format!("{:.1} MB", n as f64 / 1_048_576.0)
+    } else if n >= 1024 {
+        format!("{:.1} KB", n as f64 / 1024.0)
+    } else {
+        format!("{n} B")
+    }
+}
+
+fn fmt_when(secs: u64) -> String {
+    if secs == 0 {
+        return "-".into();
+    }
+    let d = msfe_core::civil::Date::from_unix(secs);
+    let sod = secs % 86_400;
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        d.y,
+        d.m,
+        d.d,
+        sod / 3600,
+        (sod % 3600) / 60
+    )
 }
 
 fn print_help() {
@@ -1632,6 +1852,9 @@ COMMANDS:
     conf test           Test the MailScanner configuration: lint + cross-file checks
                         (--with ms:<file>=<candidate> tests an edit on a staged copy)
     conf test-message   Simulate what the chain does with a message (clean|gtube|eicar|file.eml)
+    snapshot export     Snapshot MailScanner's etc tree + /etc/msfe-ng into one tar.gz
+    snapshot import     Compare a snapshot with this host and import chosen files (--dry-run first)
+    snapshot list       Snapshots kept in backup_dir/snapshots
     digest [--dry-run]  Email quarantine digests to digest-enabled domains
     housekeeping        Prune old mail-log rows (cleanmysql retention)
     monitor [--dry-run] Auto-clean the delivery queue, fix misfiled spool files, send Telegram alerts (cron)

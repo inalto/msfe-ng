@@ -193,3 +193,81 @@ fn conf_test_validates_its_arguments() {
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("cannot read"));
 }
+
+#[test]
+fn snapshot_export_list_and_dry_run_import() {
+    let d = tmp("snapshot");
+    // the engine tree and the backups live outside the MSFE-NG config dir
+    let side = tmp("snapshot-side");
+    let etc = side.join("MailScanner");
+    std::fs::create_dir_all(etc.join("rules")).unwrap();
+    std::fs::write(
+        etc.join("MailScanner.conf"),
+        format!("%etc-dir% = {}\nMax Children = 5\n", etc.display()),
+    )
+    .unwrap();
+    std::fs::write(etc.join("rules/bounce.rules"), "FromOrTo: default no\n").unwrap();
+    std::fs::write(
+        d.join("config.toml"),
+        format!(
+            "mailscanner_conf = \"{}\"\nmailscanner_rules_dir = \"{}\"\nbackup_dir = \"{}\"\n",
+            etc.join("MailScanner.conf").display(),
+            etc.join("rules").display(),
+            side.join("backups").display()
+        ),
+    )
+    .unwrap();
+
+    let out = msfe_ng(&d, &["snapshot", "export", "--bogus"]);
+    assert_eq!(out.status.code(), Some(2));
+    let out = msfe_ng(&d, &["snapshot"]);
+    assert_eq!(out.status.code(), Some(2));
+
+    let out = msfe_ng(&d, &["snapshot", "export"]);
+    let so = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{so}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(so.contains("snapshot written:"), "{so}");
+    let out = msfe_ng(&d, &["snapshot", "list"]);
+    let so = String::from_utf8_lossy(&out.stdout);
+    assert!(so.contains("msfe-ng-snapshot-"), "{so}");
+    let path = so.split_whitespace().last().unwrap().to_string();
+
+    // change live, dry-run shows it and touches nothing
+    std::fs::write(etc.join("rules/bounce.rules"), "FromOrTo: default yes\n").unwrap();
+    let out = msfe_ng(&d, &["snapshot", "import", &path, "--dry-run"]);
+    let so = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{so}");
+    assert!(so.contains("changed  * ms:rules/bounce.rules"), "{so}");
+    assert!(so.contains("dry run: 1 file(s)"), "{so}");
+    assert_eq!(
+        std::fs::read_to_string(etc.join("rules/bounce.rules")).unwrap(),
+        "FromOrTo: default yes\n"
+    );
+
+    // the legacy commands still work and produce the new format
+    let bk = d.join("bk.tar.gz");
+    let out = msfe_ng(&d, &["backup", bk.to_str().unwrap()]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(bk.exists());
+    let out = msfe_ng(&d, &["restore", bk.to_str().unwrap(), "--yes"]);
+    let so = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{so}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(so.contains("nothing to import"), "{so}");
+    let _ = std::fs::remove_dir_all(&d);
+    let _ = std::fs::remove_dir_all(&side);
+}

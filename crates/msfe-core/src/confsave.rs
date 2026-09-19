@@ -527,6 +527,232 @@ pub fn save_with(cfg: &Config, req: SaveRequest, bin: &Path) -> io::Result<SaveR
     })
 }
 
+/// Save several files as one change: every candidate syntax-checked, all of
+/// them staged together and linted once, then promoted with one backup each
+/// and one restart/reload for the set. Any refusal refuses the whole set —
+/// an import is all or nothing. `conf.d` fragments (validated only after
+/// apply) are linted once more on the live tree and the whole set is put
+/// back if that fails.
+pub fn save_many(cfg: &Config, reqs: Vec<SaveRequest>) -> io::Result<Vec<SaveReport>> {
+    save_many_with(cfg, reqs, &layout::resolve(cfg).bin)
+}
+
+pub fn save_many_with(
+    cfg: &Config,
+    reqs: Vec<SaveRequest>,
+    bin: &Path,
+) -> io::Result<Vec<SaveReport>> {
+    let refuse_all = |n: usize, error: String, validation: Option<Validation>| -> Vec<SaveReport> {
+        (0..n)
+            .map(|_| SaveReport::refused(error.clone(), validation.clone()))
+            .collect()
+    };
+    let n = reqs.len();
+    // cheap refusals first
+    for r in &reqs {
+        if !r.entry.kind.editable() {
+            return Ok(refuse_all(n, format!("{}: read-only", r.entry.rel), None));
+        }
+        if let Err(e) = syntax_check(r.entry.kind, &r.new_text) {
+            return Ok(refuse_all(n, format!("{}: {e}", r.entry.rel), None));
+        }
+    }
+    let changed: Vec<bool> = reqs
+        .iter()
+        .map(|r| {
+            std::fs::read_to_string(&r.entry.path)
+                .map(|c| c != r.new_text)
+                .unwrap_or(true)
+        })
+        .collect();
+    if !changed.iter().any(|c| *c) {
+        return Ok((0..n)
+            .map(|_| SaveReport {
+                changed: false,
+                backup_id: None,
+                validation: None,
+                reloaded: Reloaded::none(""),
+                rolled_back: false,
+                error: None,
+            })
+            .collect());
+    }
+    let lint = reqs.first().map(|r| r.lint).unwrap_or(LintMode::Auto);
+    let reload = reqs.first().map(|r| r.reload).unwrap_or(ReloadMode::Auto);
+    let reason = reqs.first().map(|r| r.reason).unwrap_or("import");
+    let ms: Vec<&SaveRequest> = reqs
+        .iter()
+        .zip(&changed)
+        .filter(|(r, c)| **c && r.entry.root == Root::Ms)
+        .map(|(r, _)| r)
+        .collect();
+    let mut validation: Option<Validation> = None;
+    let mut lint_after = false;
+    if lint == LintMode::Auto && !ms.is_empty() {
+        let mut st = Stage::new(cfg)?;
+        let mut need_ms = false;
+        let mut need_sa = false;
+        for r in &ms {
+            match r.entry.validator {
+                Validator::MsLint | Validator::MsLintAfter => {
+                    if st.apply(&r.entry.rel, &r.new_text).is_err() {
+                        lint_after = true;
+                    } else {
+                        need_ms = true;
+                        if r.entry.validator == Validator::MsLintAfter {
+                            lint_after = true;
+                        }
+                    }
+                }
+                Validator::SaLint => {
+                    let _ = st.apply(&r.entry.rel, &r.new_text);
+                    need_sa = true;
+                }
+                _ => {}
+            }
+        }
+        if need_ms {
+            let lr = service::lint_conf(bin, Some(&st.conf()));
+            if !lr.timed_out && !lr.output.contains(&st.conf().display().to_string()) {
+                lint_after = true;
+            } else {
+                let v = ms_validation(&lr);
+                if !v.ok {
+                    return Ok(refuse_all(
+                        n,
+                        "MailScanner --lint rejected the change".into(),
+                        Some(v),
+                    ));
+                }
+                validation = Some(v);
+            }
+        }
+        if need_sa {
+            let (ok, output) = sa::lint_prefs(Some(&st.etc.join("spamassassin.conf")));
+            let problems = sa_lint_problems(&output);
+            if !ok || !problems.is_empty() {
+                return Ok(refuse_all(
+                    n,
+                    "spamassassin --lint rejected the change".into(),
+                    Some(Validation {
+                        tool: "spamassassin --lint",
+                        ok: false,
+                        output,
+                        timed_out: false,
+                        problems,
+                    }),
+                ));
+            }
+        }
+    }
+
+    // promote every changed file
+    let mut reports: Vec<SaveReport> = Vec::with_capacity(n);
+    let mut written: Vec<(usize, Option<String>, bool)> = Vec::new(); // (index, previous text, existed)
+    for (i, (r, c)) in reqs.iter().zip(&changed).enumerate() {
+        if !*c {
+            reports.push(SaveReport {
+                changed: false,
+                backup_id: None,
+                validation: None,
+                reloaded: Reloaded::none(""),
+                rolled_back: false,
+                error: None,
+            });
+            continue;
+        }
+        let existed = r.entry.path.exists();
+        let prev = std::fs::read_to_string(&r.entry.path).ok();
+        let backup_id = backup(cfg, r.entry, reason)?;
+        if let Some(dir) = r.entry.path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        sync::atomic_write(&r.entry.path, r.new_text.as_bytes())?;
+        written.push((i, prev, existed));
+        reports.push(SaveReport {
+            changed: true,
+            backup_id,
+            validation: validation.clone(),
+            reloaded: Reloaded::none(""),
+            rolled_back: false,
+            error: None,
+        });
+    }
+
+    if lint_after && lint == LintMode::Auto {
+        let lr = service::lint_conf(bin, None);
+        let v = ms_validation(&lr);
+        if !v.ok && !v.timed_out {
+            for (i, prev, existed) in &written {
+                let r = &reqs[*i];
+                match (existed, prev) {
+                    (true, Some(p)) => sync::atomic_write(&r.entry.path, p.as_bytes())?,
+                    _ => {
+                        let _ = std::fs::remove_file(&r.entry.path);
+                    }
+                }
+                reports[*i].changed = false;
+                reports[*i].rolled_back = true;
+                reports[*i].error = Some(
+                    "MailScanner --lint rejected the set; every file is back as it was".into(),
+                );
+            }
+            for rep in &mut reports {
+                rep.validation = Some(v.clone());
+            }
+            return Ok(reports);
+        }
+        for rep in &mut reports {
+            if rep.changed {
+                rep.validation = Some(v.clone());
+            }
+        }
+    }
+
+    // one reload for the set
+    let want_restart = reqs
+        .iter()
+        .zip(&changed)
+        .any(|(r, c)| *c && r.entry.reload == Reload::Restart);
+    let want_reload = reqs
+        .iter()
+        .zip(&changed)
+        .any(|(r, c)| *c && r.entry.reload == Reload::Reload);
+    let reloaded = if reload == ReloadMode::Skip {
+        Reloaded::none("reload skipped")
+    } else if want_restart {
+        if service::status().active {
+            let o = service::control("restart");
+            Reloaded {
+                action: "restart",
+                ok: o.ok,
+                transcript: o.transcript,
+            }
+        } else {
+            Reloaded::none("MailScanner is not running; the change applies at its next start")
+        }
+    } else if want_reload {
+        let ok = sync::reload_mailscanner();
+        Reloaded {
+            action: "reload",
+            ok,
+            transcript: vec![if ok {
+                "MailScanner reloaded".into()
+            } else {
+                "MailScanner reload failed (is it running?)".into()
+            }],
+        }
+    } else {
+        Reloaded::none("")
+    };
+    for rep in &mut reports {
+        if rep.changed {
+            rep.reloaded = reloaded.clone();
+        }
+    }
+    Ok(reports)
+}
+
 fn ms_validation(r: &service::LintReport) -> Validation {
     let problems = ms_lint_problems(&r.output);
     Validation {
@@ -788,6 +1014,105 @@ mod tests {
         let r = restore(&cfg, &e, &newest, LintMode::Skip, ReloadMode::Skip).unwrap();
         assert!(r.changed);
         assert_eq!(history(&cfg, &e)[0].reason, "restore");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn save_many_stages_everything_once_and_is_all_or_nothing() {
+        let (base, cfg, conf, bin) = fixture("many");
+        let a = confcatalog::resolve(&cfg, &conf, "ms:rules/bounce.rules").unwrap();
+        let b = confcatalog::resolve(&cfg, &conf, "ms:phishing.bad.sites.custom").unwrap();
+        fn mk<'a>(e: &'a Entry, text: &str) -> SaveRequest<'a> {
+            SaveRequest {
+                entry: e,
+                new_text: text.into(),
+                lint: LintMode::Auto,
+                reload: ReloadMode::Skip,
+                reason: "import",
+                expect_mtime: None,
+            }
+        }
+        // one bad file refuses the whole set, nothing written
+        let rs = save_many_with(
+            &cfg,
+            vec![
+                mk(
+                    &a,
+                    "FromOrTo: default BREAKME
+",
+                ),
+                mk(
+                    &b,
+                    "good.example
+",
+                ),
+            ],
+            &bin,
+        )
+        .unwrap();
+        assert!(rs.iter().all(|r| !r.changed && r.error.is_some()));
+        assert_eq!(
+            std::fs::read_to_string(&b.path).unwrap(),
+            "bad.example
+"
+        );
+        assert!(history(&cfg, &a).is_empty() && history(&cfg, &b).is_empty());
+        // a good set lands with one backup each and one lint
+        let rs = save_many_with(
+            &cfg,
+            vec![
+                mk(
+                    &a,
+                    "FromOrTo: default yes
+",
+                ),
+                mk(
+                    &b,
+                    "good.example
+",
+                ),
+            ],
+            &bin,
+        )
+        .unwrap();
+        assert!(rs.iter().all(|r| r.changed && r.error.is_none()), "{rs:?}");
+        assert!(rs[0].backup_id.is_some() && rs[1].backup_id.is_some());
+        assert!(rs[0]
+            .validation
+            .as_ref()
+            .unwrap()
+            .output
+            .contains("/.stage/"));
+        assert_eq!(
+            std::fs::read_to_string(&a.path).unwrap(),
+            "FromOrTo: default yes
+"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&b.path).unwrap(),
+            "good.example
+"
+        );
+        // an unchanged file in the set is left alone
+        let rs = save_many_with(
+            &cfg,
+            vec![
+                mk(
+                    &a,
+                    "FromOrTo: default yes
+",
+                ),
+                mk(
+                    &b,
+                    "other.example
+",
+                ),
+            ],
+            &bin,
+        )
+        .unwrap();
+        assert!(!rs[0].changed && rs[1].changed);
+        assert_eq!(history(&cfg, &a).len(), 1);
         let _ = std::fs::remove_dir_all(&base);
     }
 

@@ -64,9 +64,11 @@ fn main() -> io::Result<()> {
     }
 
     // a save that died mid-validation leaves its staged etc copy behind
-    msfe_core::confstage::sweep(&msfe_core::Config::load(std::path::Path::new(
-        &config_path(),
-    )));
+    {
+        let cfg = msfe_core::Config::load(std::path::Path::new(&config_path()));
+        msfe_core::confstage::sweep(&cfg);
+        msfe_core::snapshot::sweep(&cfg);
+    }
 
     let listener = UnixListener::bind(&path)?;
     // World-connectable on purpose: the panel's end-user CGIs run as the
