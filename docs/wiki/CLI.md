@@ -9,6 +9,7 @@ msfe-ng health                      check the running daemon via its Unix socket
 msfe-ng panel                       report the detected control panel
 msfe-ng config                      print the effective config as JSON (password redacted)
 msfe-ng doctor [--fix]              check every link of the scanning chain; names each fix (--fix applies the mechanical ones)
+msfe-ng resolver <status|install>   private DNS resolver (unbound on loopback) so the blocklists answer this host
 msfe-ng upgrade [--check]           upgrade MSFE-NG to the latest release (or just compare versions)
 msfe-ng version | help
 

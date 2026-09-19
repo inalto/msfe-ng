@@ -170,6 +170,7 @@ msfe-ng digest [--dry-run] | housekeeping | selftest
 msfe-ng exim <status|enable-scanning|disable-scanning|enable-cpanel-spamassassin|disable-cpanel-spamassassin>
 msfe-ng upgrade [--check]
 msfe-ng doctor [--fix]
+msfe-ng resolver <status|install>
 msfe-ng backup <file.tgz> | restore <file.tgz>
 ```
 

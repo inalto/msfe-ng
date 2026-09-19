@@ -1018,7 +1018,7 @@ pub fn dnsbl_verdict(
     let mut fix = Vec::new();
     if !blocked.is_empty() || shared_resolver.is_some() {
         fix.push(
-            "run a private recursive resolver (unbound on 127.0.0.1 — on cPanel, PowerDNS holds port 53 on every address until bound to the public ones) and point /etc/resolv.conf at it — see the wiki, Troubleshooting → DNS blocklists"
+            "Service tab → Private DNS resolver → Install (msfe-ng resolver install): unbound on 127.0.0.1, PowerDNS bound to the public addresses, resolv.conf switched — see the wiki, Troubleshooting → DNS blocklists"
                 .to_string(),
         );
     }

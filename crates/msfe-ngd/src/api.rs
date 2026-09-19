@@ -1016,6 +1016,7 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             jobs_route(m, &p["/api/jobs/".len()..], req, cfg, config_file)
         }
         ("GET", "/api/engine/migrate") => engine_migrate_preflight(cfg, config_file),
+        ("GET", "/api/resolver") => resolver_state(),
 
         // ---- structured rule management (root-only admin surface) -----------
         ("GET", "/api/rules/files") => rules_files(config_file),
@@ -2043,6 +2044,30 @@ fn service_update(cfg: &Config) -> Response {
     )
 }
 
+/// The DNS resolver situation (Service tab card).
+fn resolver_state() -> Response {
+    let s = msfe_core::resolver::state();
+    let strs = |v: &[String]| Json::Array(v.iter().map(Json::str).collect());
+    Response::json(
+        200,
+        &Json::Object(vec![
+            ("nameservers".into(), strs(&s.nameservers)),
+            ("on_loopback".into(), Json::Bool(s.on_loopback)),
+            ("unbound_installed".into(), Json::Bool(s.unbound_installed)),
+            ("unbound_active".into(), Json::Bool(s.unbound_active)),
+            ("port53".into(), strs(&s.port53)),
+            ("public_v4".into(), strs(&s.public_v4)),
+            ("public_v6".into(), strs(&s.public_v6)),
+            ("manager".into(), Json::str(&s.manager)),
+            ("done".into(), Json::Bool(s.done())),
+            ("ok".into(), Json::Bool(s.ok())),
+            ("blockers".into(), strs(&s.blockers)),
+            ("notes".into(), strs(&s.notes)),
+        ])
+        .to_string(),
+    )
+}
+
 /// What the ConfigServer → RPM migration would do on this host.
 fn engine_migrate_preflight(cfg: &Config, config_file: &Path) -> Response {
     let pf = msfe_core::engine_migration::preflight(cfg, config_file);
@@ -2078,8 +2103,12 @@ fn jobs_route(
     cfg: &Config,
     config_file: &Path,
 ) -> Response {
-    use msfe_core::{engine_migration, jobs, upgrade};
-    if name != upgrade::SELF_JOB && name != upgrade::ENGINE_JOB && name != engine_migration::JOB {
+    use msfe_core::{engine_migration, jobs, resolver, upgrade};
+    if name != upgrade::SELF_JOB
+        && name != upgrade::ENGINE_JOB
+        && name != engine_migration::JOB
+        && name != resolver::JOB
+    {
         return Response::json(404, r#"{"error":"no such job"}"#);
     }
     match method {
@@ -2116,6 +2145,12 @@ fn jobs_route(
             let v = Json::parse(&req.body).unwrap_or(Json::Null);
             let res = if name == upgrade::SELF_JOB {
                 upgrade::start_self(v.get("version").and_then(Json::as_str))
+            } else if name == resolver::JOB {
+                let s = resolver::state();
+                match s.blockers.first() {
+                    Some(b) => Err(std::io::Error::other(b.clone())),
+                    None => resolver::start_job(),
+                }
             } else if name == engine_migration::JOB {
                 let pf = engine_migration::preflight(cfg, config_file);
                 match pf.blockers.first() {

@@ -33,6 +33,7 @@ pub mod monitor;
 pub mod panel;
 pub mod quarantine;
 pub mod queueview;
+pub mod resolver;
 pub mod rulefile;
 pub mod rules;
 pub mod sa;

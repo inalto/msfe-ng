@@ -1254,6 +1254,51 @@ async function renderService(){
       engBtn.dataset.latest=e.latest;engBtn.style.display='';}
   };
   up.append(upline,engline,el('div',{class:'ctl'},upBtn,selfBtn,engBtn),jobCon);uc.append(up);
+  // Private DNS resolver: the blocklists refuse shared resolvers. Shown until
+  // unbound answers on loopback and resolv.conf points there.
+  const rs=el('div',{class:'card',style:'display:none'},el('h2',{},'Private DNS resolver'));
+  const rsInfo=el('div',{class:'muted',style:'font-size:.85rem;margin-bottom:.5rem'});
+  const rsList=el('ul',{style:'margin:.25rem 0 .5rem 1.2rem;font-size:.85rem'});
+  const rsBtn=el('button',{class:'act'},'Install unbound on loopback');
+  const rsCon=el('div',{style:'display:none;margin-top:.5rem'});
+  const rsTitle=el('div',{class:'muted',style:'margin:.25rem 0;font-size:.8rem'});
+  const rsPre=el('pre',{class:'log',style:'max-height:18rem'});
+  rsCon.append(rsTitle,rsPre);
+  rs.append(rsInfo,rsList,el('div',{class:'ctl'},rsBtn),rsCon);uc.append(rs);
+  let rsTimer=null;
+  function followRs(){
+    clearInterval(rsTimer);rsCon.style.display='';rsTitle.textContent='Resolver install — running';
+    const tick=async()=>{
+      let s;try{s=await api('/api/jobs/resolver-install');}catch(e){s=null;}
+      if(!s||s.error)return;
+      rsPre.textContent=s.log||'(no output yet)';rsPre.scrollTop=rsPre.scrollHeight;
+      if(s.running)return;
+      clearInterval(rsTimer);rsTimer=null;rsBtn.disabled=false;
+      rsTitle.textContent=s.exit===0?'Resolver install — finished':`Resolver install — ${s.exit==null?'interrupted':'FAILED (exit '+s.exit+')'} — full log: ${s.log_path}`;
+      loadRs();refreshDoctor();
+    };
+    tick();rsTimer=setInterval(tick,2000);
+  }
+  async function loadRs(){
+    const p=await api('/api/resolver');
+    if(!p||p.error||p.done){rs.style.display='none';return;}
+    rs.style.display='';
+    rsInfo.textContent=`This host resolves through ${p.nameservers.join(', ')||'nothing'}${p.on_loopback?'':' — a shared resolver, which Spamhaus and DNSWL refuse and URIBL rate-limits, so SpamAssassin scores without its best lists'}. Install runs unbound on 127.0.0.1${p.port53.includes('pdns')?' after binding PowerDNS to '+p.public_v4.concat(p.public_v6).join(', '):''}, verifies a blocklist answer through it, then points resolv.conf${p.manager==='networkmanager'?' and NetworkManager':p.manager==='network-scripts'?' and the ifcfg files':''} at it. Every file edited keeps a .msfe-ng.bak.`;
+    rsList.innerHTML='';
+    (p.notes||[]).forEach(n=>rsList.append(el('li',{},n)));
+    (p.blockers||[]).forEach(b=>rsList.append(el('li',{style:'color:var(--critical)'},b)));
+    rsBtn.disabled=!p.ok;
+  }
+  rsBtn.onclick=async()=>{
+    if(!confirm('Install a private DNS resolver?\n\nunbound is installed and started on 127.0.0.1, PowerDNS (if present) is bound to the public addresses, and the system resolver is switched to loopback only once a blocklist query through unbound succeeds. Reversible: the .msfe-ng.bak copies hold the previous files.'))return;
+    rsBtn.disabled=true;
+    const r=await api('/api/jobs/resolver-install',{method:'POST'});
+    if(!r||!r.ok){toast(r&&r.error||'cannot start');rsBtn.disabled=false;return;}
+    followRs();
+  };
+  loadRs();
+  api('/api/jobs/resolver-install').then(s=>{if(s&&s.running){rs.style.display='';rsBtn.disabled=true;followRs();}}).catch(()=>{});
+
   // Guided migration: ConfigServer's bundled MailScanner → the RPM. Shown only
   // while the /usr/mailscanner tree exists; runs as the engine-migrate job.
   const mig=el('div',{class:'card',style:'display:none'},el('h2',{},'Migrate from ConfigServer MailScanner'));

@@ -166,9 +166,16 @@ plus the resolver in use when it is not on loopback. The lists are probed at
 most every ten minutes; each change of verdict is logged by the daemon
 (`journalctl -u msfe-ng | grep 'DNS blocklists'`).
 
-The fix is a private recursive resolver on the server itself. On cPanel the
-port is held by PowerDNS (authoritative), so bind it to the public addresses
-and run unbound on loopback:
+The fix is a private recursive resolver on the server itself. **Service →
+Private DNS resolver → Install** (or `msfe-ng resolver install`; `msfe-ng
+resolver status` first) does it as a logged job: installs unbound, binds
+PowerDNS to the public addresses when it holds port 53, configures unbound
+on loopback with `Restart=on-failure`, **verifies a Spamhaus test query
+through 127.0.0.1 before touching anything else**, then points resolv.conf —
+and NetworkManager or the ifcfg files, so it is not written back — at
+loopback only. Every file edited keeps a `.msfe-ng.bak`. BIND (`named`) on
+port 53 is reported as a blocker: set its `listen-on` to the public
+addresses first. By hand, the same steps are:
 
 ```sh
 dnf -y install unbound

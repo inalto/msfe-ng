@@ -75,6 +75,10 @@ newer, an **Upgrade … now** button appears:
   for Exim* and restarts MailScanner. Mail queues meanwhile. A ConfigServer
   engine (`/usr/mailscanner`) is not upgraded in place — see [Migration](Migration).
 
+**Private DNS resolver** appears as a card until unbound answers on loopback
+and `resolv.conf` points there — see [Troubleshooting](Troubleshooting), *DNS
+blocklists*, for what the install does.
+
 **Migrate from ConfigServer MailScanner** appears as its own card while the
 legacy `/usr/mailscanner` tree exists — see [Migration](Migration) for what it
 does, step by step.

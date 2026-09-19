@@ -43,6 +43,7 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
         ("mailscanner", _) => Some(NONE),
         ("upgrade", _) => Some(&["--check"]),
         ("doctor", _) => Some(&["--fix"]),
+        ("resolver", _) => Some(NONE),
         _ => None,
     }
 }
@@ -67,6 +68,7 @@ fn usage_of(cmd: &str) -> &'static str {
         "mailscanner" => "msfe-ng mailscanner <status|enable-logging|disable-logging>",
         "upgrade" => "msfe-ng upgrade [--check]",
         "doctor" => "msfe-ng doctor [--fix]",
+        "resolver" => "msfe-ng resolver <status|install>",
         _ => "msfe-ng help",
     }
 }
@@ -109,6 +111,7 @@ fn main() -> ExitCode {
         "db" => cmd_db(args.get(1).map(String::as_str)),
         "mailscanner" => cmd_mailscanner(args.get(1).map(String::as_str)),
         "upgrade" => cmd_upgrade(args.iter().any(|a| a == "--check")),
+        "resolver" => cmd_resolver(args.get(1).map(String::as_str)),
         "sync" => cmd_sync(args.get(1).map(String::as_str)),
         "spambox" => cmd_spambox(args.get(1).map(String::as_str)),
         "selftest" => cmd_selftest(),
@@ -485,6 +488,69 @@ fn cmd_db_migrate(flag: Option<&str>) -> ExitCode {
 /// Opt-in activation of the MailScanner logging plugin. Edits the live
 /// MailScanner.conf (with a `.msfe-ng.bak` backup) and copies the plugin into
 /// MailScanner's own `Custom Functions Dir`. Never run by the installer.
+/// The private DNS resolver for the blocklists: report, or install unbound
+/// on loopback (PowerDNS rebound to the public addresses) and switch to it.
+fn cmd_resolver(sub: Option<&str>) -> ExitCode {
+    use msfe_core::resolver;
+    match sub {
+        Some("status") => {
+            let s = resolver::state();
+            println!(
+                "resolver: {} ({})",
+                if s.nameservers.is_empty() {
+                    "none".into()
+                } else {
+                    s.nameservers.join(", ")
+                },
+                if s.done() {
+                    "unbound on loopback — the blocklists answer this host"
+                } else if s.on_loopback {
+                    "loopback, but unbound is not active"
+                } else {
+                    "shared/provider resolver — Spamhaus and DNSWL refuse it"
+                }
+            );
+            println!(
+                "unbound: {}; port 53 also served by: {}; network manager: {}",
+                if s.unbound_active {
+                    "active"
+                } else if s.unbound_installed {
+                    "installed, not active"
+                } else {
+                    "not installed"
+                },
+                if s.port53.is_empty() {
+                    "nothing".into()
+                } else {
+                    s.port53.join(", ")
+                },
+                s.manager
+            );
+            for n in &s.notes {
+                println!("note: {n}");
+            }
+            for b in &s.blockers {
+                println!("blocked: {b}");
+            }
+            if !s.done() && s.ok() {
+                println!("\ninstall it with: msfe-ng resolver install   (or from the Service tab)");
+            }
+            ExitCode::SUCCESS
+        }
+        Some("install") => match resolver::install() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("\nmsfe-ng resolver install: {e}");
+                ExitCode::from(1)
+            }
+        },
+        _ => {
+            eprintln!("usage: msfe-ng resolver <status|install>");
+            ExitCode::from(2)
+        }
+    }
+}
+
 /// Upgrade MSFE-NG to the latest release (get.sh in the foreground), or
 /// just compare versions with --check.
 fn cmd_upgrade(check_only: bool) -> ExitCode {
@@ -1367,6 +1433,7 @@ COMMANDS:
     exim <status|enable-scanning|disable-scanning>   Toggle MailScanner scanning
     exim <enable|disable>-cpanel-spamassassin        cPanel's own SpamAssassin (double scan)
     upgrade [--check]                 Upgrade MSFE-NG to the latest release (or just compare)
+    resolver <status|install>         Private DNS resolver (unbound on loopback) so the blocklists answer
     service <status|start|stop|reload|restart|queue-fix|spool-repair>   MailScanner service & queues
     doctor [--fix]      Check every link of the scanning chain; names each fix (--fix applies the mechanical ones)
     rules lint          Check managed ruleset files for unparsable lines
