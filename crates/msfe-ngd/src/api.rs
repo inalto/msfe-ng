@@ -2216,6 +2216,7 @@ fn jobs_route(
         && name != resolver::JOB
         && name != msgtest::JOB
         && name != msgtest::SELFTEST_JOB
+        && name != msfe_core::testmail::JOB
     {
         return Response::json(404, r#"{"error":"no such job"}"#);
     }
@@ -2257,6 +2258,10 @@ fn jobs_route(
                 crate::conf_api::start_message_test(cfg, &v)
             } else if name == msgtest::SELFTEST_JOB {
                 msgtest::start_selftest()
+            } else if name == msfe_core::testmail::JOB {
+                Err(std::io::Error::other(
+                    "start it from POST /api/delivery/testmail",
+                ))
             } else if name == resolver::JOB {
                 let s = resolver::state();
                 match s.blockers.first() {

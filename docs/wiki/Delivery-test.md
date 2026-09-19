@@ -196,11 +196,27 @@ and rebuilds. Deleting the fragment files alone also switches it off. From
 the shell, `msfe-ng delivery inbox new` prints an address and `poll <token>`
 analyses what arrived.
 
-## Test mail, monitoring
+## Test message
 
-A **test mail** sends a real message out and follows it through the logs;
-**monitors** re-run a test on a schedule and alert on regressions. These
-arrive in later releases and are listed here so the section names match.
+*Send a test message — follow it to the remote server* sends one real
+message (subject `MSFE-NG delivery test <tag>`, a short note with the tag)
+from an address hosted here to an external mailbox through this server's
+Exim, after a confirmation. A background job (`delivery-testmail`) follows
+the Exim id through the main log for up to 150 s and reports: **accepted**
+by the remote (its response and the TLS used), **refused** (the response
+classified — Gmail, Microsoft, Yahoo, blocklists, cPanel limits — with the
+fix), **still deferred** (the reason; the Queues tab shows the message), or
+not delivered yet. Whether the message went through MailScanner is noted.
+Then look where it landed on the receiving side (inbox or spam, and its
+authentication results — the *Analyse a saved message* upload reads them).
+
+From the shell: `msfe-ng delivery testmail --from <hosted address> --to
+<address> [--follow <secs>] [--json]`.
+
+## Monitoring
+
+**Monitors** re-run a test on a schedule and alert on regressions. They
+arrive in a later release and are listed here so the section names match.
 
 ## Safety
 

@@ -62,6 +62,7 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
             "--force",
         ]),
         ("delivery", Some("inbox")) => Some(&["--dry-run", "--json"]),
+        ("delivery", Some("testmail")) => Some(&["--from", "--to", "--tag", "--json", "--follow"]),
         ("delivery", Some("eml")) => Some(&[
             "--bounce",
             "--address",
@@ -102,7 +103,7 @@ fn usage_of(cmd: &str) -> &'static str {
         "backup" => "msfe-ng backup <file.tar.gz>   (alias: snapshot export --only msfe)",
         "restore" => "msfe-ng restore <file.tar.gz> [--yes]   (alias: snapshot import --only msfe)",
         "conf" => "msfe-ng conf <test [--no-lint] [--json] [--with <id>=<file>]... | test-message <clean|gtube|eicar|file.eml> [--offline] [--json]>",
-        "delivery" => "msfe-ng delivery <test <address> [--ip <sending ip>] [--selector <dkim selector>] [--audit] [--days <1-7>] [--json | --html] [--force] | eml <file.eml> [--bounce] [--address <a>] [--ip <ip>] [--selector <s>] [--audit] [--json | --html] | inbox <install [--dry-run] | uninstall [--dry-run] | status | new | poll <token> [--json] | remove <token> | sweep>>",
+        "delivery" => "msfe-ng delivery <test <address> [--ip <sending ip>] [--selector <dkim selector>] [--audit] [--days <1-7>] [--json | --html] [--force] | eml <file.eml> [--bounce] [--address <a>] [--ip <ip>] [--selector <s>] [--audit] [--json | --html] | inbox <install [--dry-run] | uninstall [--dry-run] | status | new | poll <token> [--json] | remove <token> | sweep> | testmail --from <local address> --to <address> [--tag <t>] [--follow <secs>] [--json]>",
         _ => "msfe-ng help",
     }
 }
@@ -403,49 +404,17 @@ fn cmd_selftest() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Minimal SMTP submission over plain TCP (enough for localhost selftest).
+/// Minimal SMTP submission to the local MTA (the selftest's three messages).
 fn smtp_send(addr: &str, from: &str, to: &str, subject: &str, body: &str) -> std::io::Result<()> {
-    use std::io::{BufRead, BufReader};
-    use std::net::TcpStream;
-    use std::time::Duration;
-
-    let stream = TcpStream::connect(addr)?;
-    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
-    let mut reader = BufReader::new(stream.try_clone()?);
-    let mut w = stream;
-
-    let mut line = String::new();
-    let expect = |reader: &mut BufReader<TcpStream>, line: &mut String| -> std::io::Result<()> {
-        line.clear();
-        reader.read_line(line)?;
-        if line.starts_with('4') || line.starts_with('5') {
-            return Err(std::io::Error::other(format!(
-                "SMTP error: {}",
-                line.trim()
-            )));
-        }
-        Ok(())
-    };
-
-    expect(&mut reader, &mut line)?; // greeting
-    let steps = [
-        "HELO localhost\r\n".to_string(),
-        format!("MAIL FROM:<{from}>\r\n"),
-        format!("RCPT TO:<{to}>\r\n"),
-        "DATA\r\n".to_string(),
-    ];
-    for s in steps {
-        w.write_all(s.as_bytes())?;
-        expect(&mut reader, &mut line)?;
-    }
-    let data = format!(
-        "From: {from}\r\nTo: {to}\r\nSubject: [MSFE-NG selftest] {subject}\r\n\r\n{body}\r\n.\r\n"
-    );
-    w.write_all(data.as_bytes())?;
-    expect(&mut reader, &mut line)?; // 250 queued
-    w.write_all(b"QUIT\r\n")?;
-    Ok(())
+    let subject = format!("[MSFE-NG selftest] {subject}");
+    msfe_core::smtpprobe::submit_local(
+        addr,
+        from,
+        to,
+        &[("From", from), ("To", to), ("Subject", &subject)],
+        body,
+    )
+    .map(|_| ())
 }
 
 /// Apply pending SQL migrations (or `--status` to list state).
@@ -1840,6 +1809,9 @@ fn cmd_delivery(sub: Option<&str>, rest: &[String]) -> ExitCode {
     if sub == Some("inbox") {
         return cmd_delivery_inbox(rest);
     }
+    if sub == Some("testmail") {
+        return cmd_delivery_testmail(rest);
+    }
     let eml_mode = match sub {
         Some("test") => false,
         Some("eml") => true,
@@ -2042,6 +2014,74 @@ fn cmd_delivery(sub: Option<&str>, rest: &[String]) -> ExitCode {
     }
 }
 
+fn cmd_delivery_testmail(rest: &[String]) -> ExitCode {
+    use msfe_core::testmail;
+    let cfg = Config::load(&config_path());
+    let (mut from, mut to, mut tag, mut follow) = (None, None, None, testmail::FOLLOW_SECS);
+    let json = rest.iter().any(|a| a == "--json");
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--from" => from = it.next().cloned(),
+            "--to" => to = it.next().cloned(),
+            "--tag" => tag = it.next().cloned(),
+            "--follow" => follow = it.next().and_then(|v| v.parse().ok()).unwrap_or(follow),
+            _ => {}
+        }
+    }
+    let (Some(from), Some(to)) = (from, to) else {
+        eprintln!("usage: {}", usage_of("delivery"));
+        return ExitCode::from(2);
+    };
+    let (from, to) = match testmail::validate(&from, &to) {
+        Ok(x) => x,
+        Err(e) => {
+            eprintln!("msfe-ng delivery testmail: {e}");
+            return ExitCode::from(3);
+        }
+    };
+    let tag = tag.unwrap_or_else(testmail::new_tag);
+    let smtp = std::env::var("MSFE_NG_TESTMAIL_SMTP").unwrap_or_else(|_| "127.0.0.1:25".into());
+    let result = testmail::run(
+        &cfg,
+        &from,
+        &to,
+        &tag,
+        &smtp,
+        std::time::Duration::from_secs(follow.clamp(10, 900)),
+        &mut |p| {
+            if !json {
+                println!("{p}");
+            } else {
+                eprintln!("{p}");
+            }
+        },
+    );
+    if json {
+        println!("{result}");
+    } else {
+        println!();
+        if let Some(checks) = result.get("checks").and_then(|c| c.as_array()) {
+            for c in checks {
+                println!(
+                    "[{:<7}] {:<20} {}",
+                    c.str_field("verdict").to_uppercase(),
+                    c.str_field("id"),
+                    c.str_field("title")
+                );
+                if matches!(c.str_field("verdict").as_str(), "fail" | "warn" | "unknown") {
+                    println!("          {}", c.str_field("explanation"));
+                }
+            }
+        }
+    }
+    if matches!(result.get("ok"), Some(msfe_core::json::Json::Bool(true))) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
 fn cmd_delivery_inbox(rest: &[String]) -> ExitCode {
     use msfe_core::diaginbox;
     let cfg = Config::load(&config_path());
@@ -2226,6 +2266,8 @@ COMMANDS:
                         blocklists (--ip, --selector, --audit, --json, --html)
     delivery eml <file>  The same for a saved message (headers, authentication results, links,
                         attachments) or, with --bounce, a bounce taken apart
+    delivery testmail --from <a> --to <b>   Send a real test message from a hosted address and follow it
+                        through the Exim log until the remote accepts or refuses it
     delivery inbox <install|uninstall|status|new|poll <token>|remove <token>|sweep>
                         The diagnostic inbox: one-time dt-<token>@<host> addresses wired into
                         Exim via /etc/exim.conf.local; `new` prints one, `poll` analyses what arrived

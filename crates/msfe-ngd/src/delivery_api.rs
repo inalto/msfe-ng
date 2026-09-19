@@ -37,6 +37,8 @@ pub fn handle(
         }
         ("POST", "/api/delivery/inbox/install") => inbox_install(req, cfg, true),
         ("POST", "/api/delivery/inbox/uninstall") => inbox_install(req, cfg, false),
+        ("POST", "/api/delivery/testmail") => testmail_start(req),
+        ("GET", "/api/delivery/testmail/last") => testmail_last(),
         _ => Response::json(404, r#"{"error":"not found"}"#),
     }
 }
@@ -494,5 +496,50 @@ fn inbox_install(req: &Request, cfg: &Config, install: bool) -> Response {
             .to_string(),
         ),
         Err(e) => err(500, &e.to_string()),
+    }
+}
+
+// ---- the outbound test message -------------------------------------------------
+
+fn testmail_start(req: &Request) -> Response {
+    use msfe_core::testmail;
+    let v = match Json::parse(&req.body) {
+        Ok(v) => v,
+        Err(e) => return err(400, &format!("bad json: {e}")),
+    };
+    if !matches!(v.get("confirm"), Some(Json::Bool(true))) {
+        return err(400, "confirm:true required — this sends a real message");
+    }
+    let (from, to) = match testmail::validate(&v.str_field("from"), &v.str_field("to")) {
+        Ok(x) => x,
+        Err(e) => return err(400, &e),
+    };
+    if msfe_core::jobs::status(testmail::JOB).running {
+        return Response::json(
+            409,
+            r#"{"error":"a test message is already being followed"}"#,
+        );
+    }
+    let tag = testmail::new_tag();
+    match testmail::start(&from, &to, &tag) {
+        Ok(()) => Response::json(
+            202,
+            &Json::Object(vec![
+                ("ok".into(), Json::Bool(true)),
+                ("job".into(), Json::str(testmail::JOB)),
+                ("tag".into(), Json::str(&tag)),
+                ("from".into(), Json::str(&from)),
+                ("to".into(), Json::str(&to)),
+            ])
+            .to_string(),
+        ),
+        Err(e) => err(500, &e.to_string()),
+    }
+}
+
+fn testmail_last() -> Response {
+    match msfe_core::testmail::last() {
+        Some(v) => Response::json(200, &v.to_string()),
+        None => err(404, "no test message sent yet"),
     }
 }

@@ -345,10 +345,11 @@ let jrnTimer=null;
 let cfgJobTimer=null; // Config-tab job poller (test message / selftest); cleared on every tab switch
 let dlvTimer=null; // Delivery-test run poller; cleared on every tab switch
 let dlvInboxTimer=null; // diagnostic inbox poller
+let dlvMailTimer=null; // outbound test-message job poller
 $('#tabs').addEventListener('click',e=>{
   const b=e.target.closest('button');if(!b)return;
   clearInterval(logTimer);logTimer=null;
-  clearInterval(cfgJobTimer);clearInterval(dlvTimer);dlvTimer=null;clearInterval(dlvInboxTimer);dlvInboxTimer=null;clearInterval(jrnTimer);jrnTimer=null;
+  clearInterval(cfgJobTimer);clearInterval(dlvTimer);dlvTimer=null;clearInterval(dlvInboxTimer);dlvInboxTimer=null;clearInterval(dlvMailTimer);dlvMailTimer=null;clearInterval(jrnTimer);jrnTimer=null;
   clearInterval(msgTimer);msgTimer=null;
   clearInterval(dashTimer);dashTimer=null;
   document.querySelectorAll('#tabs button').forEach(x=>x.setAttribute('aria-selected',x===b));
@@ -1873,7 +1874,7 @@ function deliveryRenderer(into){
   }
   const catMeta={};
   function cat(c){
-    if(!catMeta[c.category]){const titles={dns:'DNS',spf:'SPF',dkim:'DKIM',dmarc:'DMARC',mailservers:'Mail servers',transport:'Transport security',reputation:'Reputation',account:'Account',routing:'Routing',outbound:'Outbound identity',services:'Services and network',limits:'Limits and filtering',logs:'Logs and queues',abuse:'Abuse and reputation',message:'Message',bounce:'Bounce',inbox:'Diagnostic inbox',meta:'About this test'};const order=Object.keys(titles);catMeta[c.category]={id:c.category,title:titles[c.category]||c.category,order:order.indexOf(c.category)};}
+    if(!catMeta[c.category]){const titles={dns:'DNS',spf:'SPF',dkim:'DKIM',dmarc:'DMARC',mailservers:'Mail servers',transport:'Transport security',reputation:'Reputation',account:'Account',routing:'Routing',outbound:'Outbound identity',services:'Services and network',limits:'Limits and filtering',logs:'Logs and queues',abuse:'Abuse and reputation',message:'Message',bounce:'Bounce',inbox:'Diagnostic inbox',testmail:'Test message',meta:'About this test'};const order=Object.keys(titles);catMeta[c.category]={id:c.category,title:titles[c.category]||c.category,order:order.indexOf(c.category)};}
     return catMeta[c.category];
   }
   return {
@@ -2071,6 +2072,52 @@ async function renderDelivery(){
     };
     stopBtn.onclick=async()=>{if(!ibToken)return;await api('/api/delivery/inbox/remove',{method:'POST',body:{token:ibToken}});clearInterval(dlvInboxTimer);dlvInboxTimer=null;ibToken=null;cd.textContent='stopped';stopBtn.style.display='none';};
   }
+
+  // ---- outbound test message ---------------------------------------------------
+  // A real message from a hosted address, followed through Exim's log by a
+  // background job (a delivery can take minutes of retries).
+  const tm=el('details',{class:'card'},el('summary',{},'Send a test message — follow it to the remote server'));v.append(tm);
+  const tmFrom=el('input',{type:'email',placeholder:'from (an address hosted here)',style:'max-width:18rem'});
+  const tmTo=el('input',{type:'email',placeholder:'to (your Gmail, Outlook, …)',style:'max-width:18rem'});
+  const tmBtn=el('button',{class:'act'},'Send');
+  const tmStatus=el('span',{class:'muted',style:'font-size:.8rem'});
+  const tmLog=el('pre',{class:'log',style:'display:none;max-height:12rem'});
+  const tmOut=el('div');
+  const tmRenderer=deliveryRenderer(tmOut);
+  tm.append(el('div',{class:'muted',style:'font-size:.8rem;margin:.4rem 0'},'Sends one real message (subject "MSFE-NG delivery test <tag>") from a local address to an external mailbox through this server\'s Exim and reports what the remote server answered: accepted (with the TLS used), refused (the reason classified: Gmail, Microsoft, Yahoo, blocklists…), or still deferred. Then look where it landed on the receiving side.'),
+    el('div',{class:'ctl'},tmFrom,tmTo,tmBtn,tmStatus),tmLog,tmOut);
+  addr.addEventListener('change',()=>{if(!tmFrom.value&&hostedInfo)tmFrom.value=addr.value.trim();});
+  async function tmShowLast(){
+    const r=await api('/api/delivery/testmail/last');
+    if(!r||r.error)return;
+    tmRenderer.reset();tmRenderer.add(r.checks||[]);
+    tmStatus.textContent=`${r.from} → ${r.to} · tag ${r.tag}${r.id?' · Exim id '+r.id:''} · ${fmtTime(r.finished)}`;
+  }
+  function tmFollow(){
+    clearInterval(dlvMailTimer);
+    const tick=async()=>{
+      const s=await api('/api/jobs/delivery-testmail');
+      if(!s||s.error){return;}
+      tmLog.style.display='';tmLog.textContent=s.log||'(starting…)';
+      if(s.running){tmStatus.textContent='following the message…';return;}
+      clearInterval(dlvMailTimer);dlvMailTimer=null;tmBtn.disabled=false;
+      tmShowLast();
+    };
+    tick();dlvMailTimer=setInterval(tick,2000);
+  }
+  tmBtn.onclick=()=>{
+    const f=tmFrom.value.trim(),t=tmTo.value.trim();
+    if(!f||!t){toast('From (hosted here) and To are needed');return;}
+    const m=modal('Send a test message?');
+    m.body.append(el('p',{},`A real message will be sent from ${f} to ${t} through this server. The recipient sees a short note with a tag; nothing else leaves.`));
+    const go=el('button',{class:'act'},'Send it');
+    go.onclick=async()=>{m.close();tmBtn.disabled=true;tmRenderer.reset();tmStatus.textContent='submitting…';
+      const r=await api('/api/delivery/testmail',{method:'POST',body:{from:f,to:t,confirm:true}});
+      if(!r||r.error){tmBtn.disabled=false;tmStatus.textContent='';toast(r&&r.error||'cannot send');return;}
+      tmStatus.textContent=`sent · tag ${r.tag} · following…`;tmFollow();};
+    m.body.append(el('div',{class:'ctl',style:'margin-top:.6rem'},go,Object.assign(el('button',{class:'act plain'},'Cancel'),{onclick:()=>m.close()})));
+  };
+  api('/api/jobs/delivery-testmail').then(s=>{if(s&&s.running){tmBtn.disabled=true;tm.open=true;tmFollow();}else if(s&&s.known)tmShowLast();}).catch(()=>{});
 
   // ---- recent runs ------------------------------------------------------------
   const rc=el('details',{class:'card'},el('summary',{},'Recent tests'));v.append(rc);

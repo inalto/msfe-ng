@@ -114,6 +114,7 @@ pub enum Category {
     Message,
     Bounce,
     Inbox,
+    TestMail,
     Meta,
 }
 
@@ -137,6 +138,7 @@ impl Category {
             Category::Message => "message",
             Category::Bounce => "bounce",
             Category::Inbox => "inbox",
+            Category::TestMail => "testmail",
             Category::Meta => "meta",
         }
     }
@@ -160,6 +162,7 @@ impl Category {
             Category::Message => "Message",
             Category::Bounce => "Bounce",
             Category::Inbox => "Diagnostic inbox",
+            Category::TestMail => "Test message",
             Category::Meta => "About this test",
         }
     }
@@ -182,6 +185,7 @@ impl Category {
             "message" => Category::Message,
             "bounce" => Category::Bounce,
             "inbox" => Category::Inbox,
+            "testmail" => Category::TestMail,
             _ => Category::Meta,
         }
     }

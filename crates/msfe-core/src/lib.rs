@@ -75,6 +75,7 @@ pub mod spf;
 pub mod stats;
 pub mod sync;
 pub mod telegram;
+pub mod testmail;
 pub mod tlsprobe;
 pub mod tschecks;
 pub mod upgrade;
