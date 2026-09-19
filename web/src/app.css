@@ -626,6 +626,9 @@
   .kv input.flash {
     box-shadow: 0 0 0 2px var(--warning);
   }
+  .tbl tr.flash td {
+    background: rgba(217, 138, 11, 0.16);
+  }
   .kv .ktags {
     display: flex;
     gap: 0.3rem;
@@ -731,6 +734,67 @@
   .hlist button[aria-selected="true"] {
     background: var(--accent-weak);
     color: var(--accent);
+  }
+  details.tests > summary {
+    cursor: pointer;
+    font-weight: 650;
+    font-size: 0.9rem;
+  }
+  details.tests > summary.bad {
+    color: var(--critical);
+  }
+  details.tests > summary.warnish {
+    color: var(--warning);
+  }
+  .chip {
+    display: inline-block;
+    padding: 0.1rem 0.55rem;
+    border-radius: 999px;
+    font-size: 0.74rem;
+    font-weight: 600;
+    border: 1px solid var(--line);
+    background: var(--surface-2);
+  }
+  .chip.fail {
+    color: var(--critical);
+    border-color: var(--critical);
+  }
+  .chip.warn {
+    color: var(--warning);
+    border-color: var(--warning);
+  }
+  .chip.ok {
+    color: var(--good);
+    border-color: var(--good);
+  }
+  table.findings td {
+    font-size: 0.8rem;
+  }
+  table.findings .dot {
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--muted);
+  }
+  table.findings .dot.fail {
+    background: var(--critical);
+  }
+  table.findings .dot.warn {
+    background: var(--warning);
+  }
+  table.findings .dot.ok {
+    background: var(--good);
+  }
+  .linkbtn {
+    border: 0;
+    background: none;
+    padding: 0;
+    color: var(--accent);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    cursor: pointer;
+    font-size: 0.78rem;
   }
   details.maint > summary {
     cursor: pointer;

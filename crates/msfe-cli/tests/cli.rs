@@ -166,3 +166,30 @@ fn doctor_fix_reports_nothing_to_fix_without_an_engine() {
     assert_eq!(out.status.code(), Some(2));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn conf_test_validates_its_arguments() {
+    let d = tmp("conftest");
+    let out = msfe_ng(&d, &["conf", "test", "--bogus"]);
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--bogus") && err.contains("usage:"), "{err}");
+    let out = msfe_ng(&d, &["conf"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("conf test"));
+    // --with needs id=file, and the file must exist
+    let out = msfe_ng(&d, &["conf", "test", "--with", "nonsense"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("<id>=<file>"));
+    let out = msfe_ng(
+        &d,
+        &[
+            "conf",
+            "test",
+            "--with",
+            "ms:MailScanner.conf=/nonexistent/x",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("cannot read"));
+}

@@ -28,6 +28,8 @@ pub fn handle(
         ("GET", "/api/conf/history") => history(req, cfg, config_file),
         ("GET", "/api/conf/history/view") => history_view(req, cfg, config_file),
         ("POST", "/api/conf/restore") => restore(req, cfg, config_file),
+        ("POST", "/api/conf/test") => test(req, cfg, config_file),
+        ("GET", "/api/conf/test/last") => test_last(cfg),
         _ => Response::json(404, r#"{"error":"not found"}"#),
     }
 }
@@ -401,6 +403,76 @@ fn rows_to_text(kind: Kind, current: &str, rows: &[Json]) -> Result<String, Stri
     }
 }
 
+/// The candidate text an edit describes: `content` verbatim, `changes`
+/// applied onto the file, or `rows` rebuilt into it.
+fn candidate_text(e: &Entry, v: &Json) -> Result<String, Response> {
+    let current = std::fs::read_to_string(&e.path).unwrap_or_default();
+    if let Some(c) = v.get("content").and_then(Json::as_str) {
+        Ok(c.to_string())
+    } else if let Some(Json::Object(f)) = v.get("changes") {
+        let changes: Vec<(String, String)> = f
+            .iter()
+            .filter_map(|(k, val)| val.as_str().map(|s| (k.clone(), s.to_string())))
+            .collect();
+        confsave::render_changes(e, &current, &changes)
+            .ok_or_else(|| err(400, "not a key/value file"))
+    } else if let Some(rows) = v.get("rows").and_then(Json::as_array) {
+        rows_to_text(e.kind, &current, rows).map_err(|m| err(400, &m))
+    } else {
+        Err(err(400, "content, changes or rows required"))
+    }
+}
+
+/// `POST /api/conf/test`: the tester over the live tree, or over a staged
+/// copy carrying the unsaved `edits`.
+fn test(req: &Request, cfg: &Config, config_file: &Path) -> Response {
+    use msfe_core::conftest::{self, Parts, PendingEdit};
+    let v = match body(req) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let mut edits = Vec::new();
+    for ev in v.get("edits").and_then(Json::as_array).unwrap_or(&[]) {
+        let e = match resolve(&ev.str_field("id"), cfg, config_file) {
+            Ok(e) => e,
+            Err(r) => return r,
+        };
+        match candidate_text(&e, ev) {
+            Ok(new_text) => edits.push(PendingEdit { id: e.id, new_text }),
+            Err(r) => return r,
+        }
+    }
+    let flag = |k: &str, d: bool| {
+        v.get("parts")
+            .and_then(|p| p.get(k))
+            .map(|b| !matches!(b, Json::Bool(false)))
+            .unwrap_or(d)
+    };
+    let parts = Parts {
+        ms_lint: flag("ms_lint", true),
+        sa_lint: flag("sa_lint", true),
+        checks: flag("checks", true),
+    };
+    match conftest::run(cfg, config_file, &edits, parts) {
+        Ok(r) => Response::json(200, &r.to_json().to_string()),
+        Err(e) => err(500, &format!("test failed: {e}")),
+    }
+}
+
+fn test_last(cfg: &Config) -> Response {
+    match msfe_core::conftest::last(cfg) {
+        Some(r) => {
+            let mut obj = match r.to_json() {
+                Json::Object(f) => f,
+                _ => Vec::new(),
+            };
+            obj.insert(0, ("known".into(), Json::Bool(true)));
+            Response::json(200, &Json::Object(obj).to_string())
+        }
+        None => Response::json(200, r#"{"known":false}"#),
+    }
+}
+
 fn save(req: &Request, cfg: &Config, config_file: &Path) -> Response {
     let v = match body(req) {
         Ok(v) => v,
@@ -410,25 +482,9 @@ fn save(req: &Request, cfg: &Config, config_file: &Path) -> Response {
         Ok(e) => e,
         Err(r) => return r,
     };
-    let current = std::fs::read_to_string(&e.path).unwrap_or_default();
-    let new_text = if let Some(c) = v.get("content").and_then(Json::as_str) {
-        c.to_string()
-    } else if let Some(Json::Object(f)) = v.get("changes") {
-        let changes: Vec<(String, String)> = f
-            .iter()
-            .filter_map(|(k, val)| val.as_str().map(|s| (k.clone(), s.to_string())))
-            .collect();
-        match confsave::render_changes(&e, &current, &changes) {
-            Some(t) => t,
-            None => return err(400, "not a key/value file"),
-        }
-    } else if let Some(rows) = v.get("rows").and_then(Json::as_array) {
-        match rows_to_text(e.kind, &current, rows) {
-            Ok(t) => t,
-            Err(m) => return err(400, &m),
-        }
-    } else {
-        return err(400, "content, changes or rows required");
+    let new_text = match candidate_text(&e, &v) {
+        Ok(t) => t,
+        Err(r) => return r,
     };
     match confsave::save(
         cfg,

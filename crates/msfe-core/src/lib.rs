@@ -10,10 +10,12 @@
 
 pub mod civil;
 pub mod confcatalog;
+pub mod confcheck;
 pub mod conffile;
 pub mod config;
 pub mod confsave;
 pub mod confstage;
+pub mod conftest;
 pub mod csf;
 pub mod db;
 pub mod dbtools;

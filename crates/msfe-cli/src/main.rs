@@ -44,6 +44,8 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
         ("upgrade", _) => Some(&["--check"]),
         ("doctor", _) => Some(&["--fix"]),
         ("resolver", _) => Some(NONE),
+        ("conf", Some("test")) => Some(&["--no-lint", "--json", "--with"]),
+        ("conf", _) => Some(NONE),
         _ => None,
     }
 }
@@ -69,6 +71,7 @@ fn usage_of(cmd: &str) -> &'static str {
         "upgrade" => "msfe-ng upgrade [--check]",
         "doctor" => "msfe-ng doctor [--fix]",
         "resolver" => "msfe-ng resolver <status|install>",
+        "conf" => "msfe-ng conf test [--no-lint] [--json] [--with <id>=<file>]...",
         _ => "msfe-ng help",
     }
 }
@@ -112,6 +115,7 @@ fn main() -> ExitCode {
         "mailscanner" => cmd_mailscanner(args.get(1).map(String::as_str)),
         "upgrade" => cmd_upgrade(args.iter().any(|a| a == "--check")),
         "resolver" => cmd_resolver(args.get(1).map(String::as_str)),
+        "conf" => cmd_conf(sub, rest),
         "sync" => cmd_sync(args.get(1).map(String::as_str)),
         "spambox" => cmd_spambox(args.get(1).map(String::as_str)),
         "selftest" => cmd_selftest(),
@@ -999,6 +1003,89 @@ fn cmd_engine(sub: Option<&str>) -> ExitCode {
 /// Structured rules tooling: `lint` parses every managed on-disk ruleset with
 /// the tolerant parser and reports lines that MailScanner may misread; `adopt`
 /// absorbs existing on-disk rules into the custom store ("borrow" them).
+/// `conf test`: MailScanner --lint, spamassassin --lint and the cross-file
+/// checks as one list of findings; `--with ms:<rel>=<file>` tests a candidate
+/// on a staged copy instead of the live tree. Exit 1 on any failure.
+fn cmd_conf(sub: Option<&str>, rest: &[String]) -> ExitCode {
+    use msfe_core::conftest::{self, Level, Parts, PendingEdit};
+    if sub != Some("test") {
+        eprintln!("usage: {}", usage_of("conf"));
+        return ExitCode::from(2);
+    }
+    let no_lint = rest.iter().any(|a| a == "--no-lint");
+    let json = rest.iter().any(|a| a == "--json");
+    let mut edits = Vec::new();
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        if a != "--with" {
+            continue;
+        }
+        let Some((id, file)) = it.next().and_then(|s| s.split_once('=')) else {
+            eprintln!("msfe-ng conf test: --with takes <id>=<file>, e.g. --with ms:MailScanner.conf=/tmp/candidate.conf");
+            return ExitCode::from(2);
+        };
+        match std::fs::read_to_string(file) {
+            Ok(new_text) => edits.push(PendingEdit {
+                id: id.to_string(),
+                new_text,
+            }),
+            Err(e) => {
+                eprintln!("msfe-ng conf test: cannot read {file}: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let cfg = Config::load(&config_path());
+    let parts = Parts {
+        ms_lint: !no_lint,
+        sa_lint: !no_lint,
+        checks: true,
+    };
+    let r = match conftest::run(&cfg, &config_path(), &edits, parts) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("msfe-ng conf test: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let (fail, warn, ok) = r.summary();
+    if json {
+        println!("{}", r.to_json());
+    } else {
+        for f in &r.findings {
+            let mut place = f.file.clone().unwrap_or_default();
+            if let Some(n) = f.line {
+                place.push_str(&format!(":{n}"));
+            }
+            if let Some(k) = &f.key {
+                if !place.is_empty() {
+                    place.push(' ');
+                }
+                place.push_str(&format!("[{k}]"));
+            }
+            println!(
+                "{:<4} {:<12} {}{}{}",
+                f.level.as_str().to_uppercase(),
+                f.source.as_str(),
+                place,
+                if place.is_empty() { "" } else { "  " },
+                f.message
+            );
+        }
+        println!(
+            "
+{} scope: {fail} failed, {warn} warning(s), {ok} ok ({:.1} s)",
+            r.scope,
+            r.duration_ms as f64 / 1000.0
+        );
+    }
+    if fail > 0 || r.findings.iter().any(|f| f.level == Level::Fail) {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
 fn cmd_rules(sub: Option<&str>) -> ExitCode {
     use msfe_core::rulefile;
     if sub == Some("adopt") {
@@ -1425,6 +1512,8 @@ COMMANDS:
     sync --dry-run      Show the rule files that would be written
     spambox <enable|disable|status>   Manage the SpamBox Exim fragment
     selftest            Send GTUBE/EICAR/clean test mail through the MTA
+    conf test           Test the MailScanner configuration: lint + cross-file checks
+                        (--with ms:<file>=<candidate> tests an edit on a staged copy)
     digest [--dry-run]  Email quarantine digests to digest-enabled domains
     housekeeping        Prune old mail-log rows (cleanmysql retention)
     monitor [--dry-run] Auto-clean the delivery queue, fix misfiled spool files, send Telegram alerts (cron)

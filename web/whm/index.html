@@ -1991,7 +1991,10 @@ function tableEditor(d){
     hosts.forEach((h,i)=>{if(i===0&&tr){tr.querySelector('input').value=h;}else{const nr=rowFor({host:h});(tr||table).after?tr.after(nr):table.append(nr);}});
     dirty=true;
   });
-  return {root,body(){
+  return {root,focusLine(n){
+    const tr=table.querySelector(`tr[data-line="${n}"]`)||[...table.querySelectorAll('tr.unparsed')].find(r=>r.textContent.includes('line '+n));
+    if(!tr)return;tr.scrollIntoView({block:'center'});tr.classList.add('flash');setTimeout(()=>tr.classList.remove('flash'),1600);const f=tr.querySelector('input,select');if(f)f.focus();
+  },body(){
     if(!dirty)return null;
     const rows=[...table.querySelectorAll('tr.crow')].map(tr=>{
       const o={};if(tr.dataset.line)o.line=+tr.dataset.line;
@@ -2035,14 +2038,83 @@ function renderSaveReport(r){
   return box;
 }
 
+// The tester's findings: chips, a table with deep links into the editor,
+// transcripts behind a toggle.
+function renderTestReport(r,openFile){
+  const box=el('div',{class:'treport'});
+  const s=r.summary||{fail:0,warn:0,ok:0};
+  const when=r.started?fmtTime(r.started):'';
+  box.append(el('div',{class:'ctl',style:'gap:.5rem;margin-bottom:.5rem'},
+    el('span',{class:'chip fail'},`${s.fail} fail`),el('span',{class:'chip warn'},`${s.warn} warn`),el('span',{class:'chip ok'},`${s.ok} ok`),
+    el('span',{class:'muted',style:'font-size:.78rem'},`${r.scope==='staged'?'with unsaved changes':'live configuration'}${when?' · '+when:''}${r.duration_ms?' · '+(r.duration_ms/1000).toFixed(1)+' s':''}`)));
+  const table=el('table',{class:'findings'});
+  table.append(el('tr',{},...['','Source','File','Setting','Finding'].map(h=>el('th',{},h))));
+  (r.findings||[]).forEach(f=>{
+    const tr=el('tr',{class:'lvl-'+f.level});
+    const fileCell=el('td',{});
+    if(f.file&&/^(ms|msfe):/.test(f.file)){const b=el('button',{class:'linkbtn mono',title:'Open in the editor'},f.file.replace(/^ms:/,'')+(f.line?':'+f.line:''));b.onclick=()=>openFile(f.file,f.key,f.line);fileCell.append(b);}
+    else if(f.file)fileCell.append(el('span',{class:'mono muted'},f.file));
+    tr.append(el('td',{},el('span',{class:'dot '+f.level,title:f.level})),el('td',{class:'muted'},f.source),fileCell,el('td',{class:'mono',style:'font-size:.76rem'},f.key||''),el('td',{},f.message));
+    table.append(tr);
+  });
+  if(!(r.findings||[]).length)table.append(el('tr',{},el('td',{colspan:'5',class:'muted'},'No findings.')));
+  box.append(table);
+  const tr=r.transcripts||{};
+  if(Object.keys(tr).length){
+    const det=el('details',{},el('summary',{class:'muted',style:'cursor:pointer;margin-top:.5rem'},'Raw transcripts'));
+    Object.entries(tr).forEach(([k,txt])=>{if(txt)det.append(el('div',{class:'muted',style:'font-size:.78rem;margin-top:.4rem'},k),el('pre',{class:'log'},txt));});
+    box.append(det);
+  }
+  return box;
+}
+
 async function renderConfig(){
   const v=$('#view');v.innerHTML='';
   const bar=el('div',{class:'ctl cfgbar'});
   const pendingNote=el('div',{class:'note warn',style:'display:none'});
+  const testCard=el('details',{class:'card tests'});
+  const testSummary=el('summary',{},'Configuration test');
+  const testBody=el('div',{style:'margin-top:.6rem'});
+  testCard.append(testSummary,testBody);
   const wrap=el('div',{class:'cfg2'});
   const tree=el('aside',{class:'tree'});
   const ed=el('section',{class:'card editor'});
-  wrap.append(tree,ed);v.append(bar,pendingNote,wrap);
+  wrap.append(tree,ed);v.append(bar,pendingNote,testCard,wrap);
+
+  // ---- tester ---------------------------------------------------------------
+  const testBtn=el('button',{class:'act',title:'MailScanner --lint, spamassassin --lint and MSFE-NG\'s cross-file checks over the configuration on disk'},'Test configuration');
+  const testNote=el('span',{class:'muted',style:'font-size:.78rem'});
+  bar.append(testBtn,testNote);
+  async function openFinding(id,key,line){
+    // the file already open (maybe with the very edits under test): focus in place
+    if(!cur||cur.id!==id){await open(id,{force:false});if(!cur||cur.id!==id)return;}
+    if(key&&editor&&editor.focusKey)editor.focusKey(key);
+    else if(line&&editor&&editor.focusLine)editor.focusLine(line);
+    else if(line&&mode!=='raw'&&!dirty()){mode='raw';drawEditor();editor.focusLine&&editor.focusLine(line);}
+    ed.scrollIntoView({block:'start',behavior:'smooth'});
+  }
+  function showTest(r){
+    testBody.innerHTML='';testBody.append(renderTestReport(r,openFinding));
+    const s=r.summary||{};
+    testSummary.textContent=`Configuration test — ${s.fail?s.fail+' problem(s)':'no problems'}${s.warn?', '+s.warn+' warning(s)':''}`;
+    testSummary.classList.toggle('bad',!!s.fail);testSummary.classList.toggle('warnish',!s.fail&&!!s.warn);
+    testCard.open=true;testCard.scrollIntoView({block:'nearest',behavior:'smooth'});
+  }
+  async function runTest(edits){
+    testBtn.disabled=true;
+    testBody.innerHTML='';testBody.append(el('div',{class:'note'},(edits&&edits.length?'Testing your unsaved changes on a staged copy':'Testing the live configuration')+' — MailScanner --lint runs a real test batch, usually 5–20 s…'));
+    testCard.open=true;testSummary.textContent='Configuration test — running…';
+    const r=await api('/api/conf/test',{method:'POST',body:{edits:edits||[]}});
+    testBtn.disabled=false;
+    if(!r||r.error){testBody.innerHTML='';testBody.append(el('div',{class:'note bad'},(r&&r.error)||'test failed'));return;}
+    showTest(r);
+    toast(r.summary&&r.summary.fail?`${r.summary.fail} problem(s) found`:'No problems found');
+  }
+  testBtn.onclick=()=>runTest([]);
+  api('/api/conf/test/last').then(r=>{
+    if(r&&r.known){testBody.append(renderTestReport(r,openFinding));const s=r.summary||{};testSummary.textContent=`Configuration test — last run ${fmtTime(r.started)}: ${s.fail?s.fail+' problem(s)':'no problems'}${s.warn?', '+s.warn+' warning(s)':''}`;testSummary.classList.toggle('bad',!!s.fail);}
+    else testSummary.textContent='Configuration test — not run yet';
+  });
 
   const state={files:[],pending:[],roots:[]};
   let cur=null,editor=null,mode='form';
@@ -2144,12 +2216,14 @@ async function renderConfig(){
     const saveBtn=el('button',{class:'act'},'Save');
     const discard=el('button',{class:'act plain'},'Discard');
     const histBtn=el('button',{class:'act plain'},'History'+(d.history?` (${d.history})`:''));
+    const testMine=el('button',{class:'act plain',title:'Run the configuration test on a staged copy that includes what you changed here — nothing is saved'},'Test with my changes');
+    testMine.onclick=()=>{const b=editor.body();if(!b){toast('Nothing changed — use "Test configuration" for the files on disk');return;}runTest([{id:d.id,...b}]);};
     const skipLint=el('input',{type:'checkbox'});const skipReload=el('input',{type:'checkbox'});
     const opts=el('span',{class:'opts muted'});
     if(d.validator==='mailscanner-lint'||d.validator==='mailscanner-lint-after'||d.validator==='spamassassin-lint')
       opts.append(el('label',{title:'Skip the '+(d.validator.startsWith('spam')?'spamassassin --lint':'MailScanner --lint')+' check (5–20 s). Only the syntax check runs.'},skipLint,' save without lint'));
     if(d.reload!=='none')opts.append(el('label',{title:RELOAD_HINT[d.reload]},skipReload,' apply without '+d.reload));
-    ed.append(el('div',{class:'ctl etools'},modeBtn,saveBtn,discard,histBtn,opts));
+    ed.append(el('div',{class:'ctl etools'},modeBtn,saveBtn,discard,histBtn,d.root==='ms'?testMine:'',opts));
     const body=el('div',{class:'ebody'});ed.append(body);
     const result=el('div',{class:'eresult'});ed.append(result);
     if(mode==='form'&&(d.kind==='keyvalue'||d.kind==='toml'))editor=kvEditor(d);
