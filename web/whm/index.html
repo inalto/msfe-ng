@@ -1930,7 +1930,9 @@ async function renderDelivery(){
   const toolNote=[];
   if(tools&&!tools.error){
     if(!tools.openssl||!tools.openssl.present)toolNote.push('openssl missing: TLS checks will be unknown');
-    if(!(tools.resolver&&tools.resolver.validating))toolNote.push('no validating resolver on this host: DNSSEC and some blocklists report unknown (Service → Private DNS resolver)');
+    if(!(tools.resolver&&tools.resolver.validating))toolNote.push('no validating resolver on this host: Spamhaus, URIBL and DNSWL refuse shared resolvers (their rows report unknown) and DNSSEC needs a validator (Service → Private DNS resolver → Install)');
+    if(!(tools.delv&&tools.delv.present)&&!(tools.unbound_host&&tools.unbound_host.present))toolNote.push('neither delv (bind-utils) nor unbound-host is installed: DNSSEC and DANE chains cannot be verified independently');
+    if(!(tools.curl&&tools.curl.present))toolNote.push('curl missing: MTA-STS policies are not fetched');
     if(tools.resolver&&!tools.resolver.ipv6)toolNote.push('this host has no IPv6: IPv6 delivery paths are not probed');
   }
   if(toolNote.length)ic.append(el('div',{class:'note warn',style:'font-size:.78rem'},toolNote.join(' · ')));

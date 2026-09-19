@@ -82,6 +82,13 @@ impl Results {
         entries.push((key.to_string(), value));
         g.insert(k.to_string(), Json::Object(entries));
     }
+    /// One entry of an object fact.
+    pub fn fact_entry(&self, k: &str, key: &str) -> Option<Json> {
+        match self.fact(k) {
+            Some(Json::Object(f)) => f.into_iter().find(|(h, _)| h == key).map(|(_, v)| v),
+            _ => None,
+        }
+    }
     pub fn fact(&self, k: &str) -> Option<Json> {
         self.facts
             .lock()
@@ -322,6 +329,7 @@ pub fn plan(_inputs: &Inputs) -> Vec<Task> {
     tasks.extend(crate::authchecks::tasks());
     tasks.extend(crate::mxchecks::tasks());
     tasks.extend(crate::tschecks::tasks());
+    tasks.extend(crate::repchecks::tasks());
     tasks.push(crate::dnschecks::meta_task());
     tasks
 }
