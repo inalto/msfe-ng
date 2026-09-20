@@ -322,21 +322,27 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
     // records those as "too large" reports.
     if let Some(limit) = mailscanner::get_directive(&conf, "Max Spam Check Size") {
         let bytes = engine::parse_ms_size(limit).unwrap_or(u64::MAX);
-        let (skipped, total) = db::query(cfg, &skipped_over_limit_sql(bytes))
+        let stats = db::query(cfg, &spam_check_size_sql(bytes))
             .ok()
             .and_then(|rows| rows.into_iter().next())
             .map(|r| {
                 let n = |i: usize| r.get(i).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-                (n(0), n(1))
+                SizeStats {
+                    skipped: n(0),
+                    total: n(1),
+                    over: (0..SPAM_CHECK_SIZE_LADDER.len())
+                        .map(|i| n(i + 2))
+                        .collect(),
+                }
             })
-            .unwrap_or((0, 0));
-        let (ok, detail) = spam_check_size_verdict(limit, skipped, total);
+            .unwrap_or_default();
+        let (ok, detail) = spam_check_size_verdict(limit, &stats);
         out.push(check(
             "large messages get spam-checked",
             ok,
             Level::Warn,
             detail,
-            &spam_check_size_fix(limit),
+            &spam_check_size_fix(limit, &stats),
         ));
     }
     // Misplaced spool files are invisible to delivery: Exim lists them but
@@ -1165,27 +1171,100 @@ fn dnsbl_check(ms_conf: &str, conf_path: &Path) -> Check {
     check("DNS blocklists answering", ok, Level::Warn, detail, &fix)
 }
 
-/// 30-day count of mail skipped as too large that the current limit
-/// (`bytes`) would still skip, plus the total.
-pub fn skipped_over_limit_sql(bytes: u64) -> String {
-    format!(
-        "SELECT COALESCE(SUM(spamreport LIKE '%too large%' AND size > {bytes}),0), COUNT(*) \
-         FROM maillog WHERE msg_ts >= (NOW() - INTERVAL 30 DAY)"
-    )
-}
+/// Candidate `Max Spam Check Size` values the doctor can suggest.
+pub const SPAM_CHECK_SIZE_LADDER: &[(&str, u64)] = &[
+    ("1M", 1_000_000),
+    ("2M", 2_000_000),
+    ("3M", 3_000_000),
+    ("5M", 5_000_000),
+    ("10M", 10_000_000),
+    ("20M", 20_000_000),
+    ("50M", 50_000_000),
+];
 
 /// Below this, `Max Spam Check Size` is the stock default that skips routine
 /// HTML mail; `engine configure` raises it to 2M.
 const STOCK_SPAM_CHECK_SIZE: u64 = 200_000;
 
-/// `(ok, detail)` for `Max Spam Check Size`: `skipped` is the 30-day count
-/// of mail the current limit would still skip; rulesets are the admin's
-/// business. At the stock size a single skipped message is worth the
-/// mechanical fix. Above it, mail over the limit is attachments rather than
-/// newsletters, and skipping a message or two a month is the trade-off the
-/// limit exists for — only a share of 1 % or more is flagged, so the check
-/// can actually go green after the limit is raised.
-pub fn spam_check_size_verdict(limit: &str, skipped: u64, total: u64) -> (bool, String) {
+/// The share of a month's mail that may go unscored as too large before the
+/// doctor objects (per cent).
+const SPAM_CHECK_SIZE_TOLERANCE_PCT: u64 = 1;
+
+/// Mail sizes over the last 30 days, as the doctor's one query returns them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SizeStats {
+    /// Messages recorded "too large" that the current limit would still skip.
+    pub skipped: u64,
+    pub total: u64,
+    /// Messages over each rung of [`SPAM_CHECK_SIZE_LADDER`], in order.
+    pub over: Vec<u64>,
+}
+
+/// One row: skipped-and-still-over-`bytes`, total, then a count over each
+/// ladder rung — the size distribution the suggestion is read from.
+pub fn spam_check_size_sql(bytes: u64) -> String {
+    let rungs = SPAM_CHECK_SIZE_LADDER
+        .iter()
+        .map(|(_, b)| format!("COALESCE(SUM(size > {b}),0)"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "SELECT COALESCE(SUM(spamreport LIKE '%too large%' AND size > {bytes}),0), COUNT(*), {rungs} \
+         FROM maillog WHERE msg_ts >= (NOW() - INTERVAL 30 DAY)"
+    )
+}
+
+fn within_tolerance(over: u64, total: u64) -> bool {
+    over * 100 < total * SPAM_CHECK_SIZE_TOLERANCE_PCT
+}
+
+fn pct(n: u64, total: u64) -> String {
+    if total == 0 {
+        return "0 %".into();
+    }
+    format!("{:.1} %", n as f64 * 100.0 / total as f64)
+}
+
+/// The smallest ladder rung that leaves under the tolerated share of the
+/// month's mail over it, with that count — or the top rung when nothing on
+/// the ladder is enough. `None` without data.
+pub fn suggest_spam_check_size(stats: &SizeStats) -> Option<(&'static str, u64)> {
+    if stats.total == 0 || stats.over.len() != SPAM_CHECK_SIZE_LADDER.len() {
+        return None;
+    }
+    SPAM_CHECK_SIZE_LADDER
+        .iter()
+        .zip(&stats.over)
+        .find(|(_, &over)| within_tolerance(over, stats.total))
+        .or_else(|| SPAM_CHECK_SIZE_LADDER.iter().zip(&stats.over).next_back())
+        .map(|((name, _), &over)| (*name, over))
+}
+
+/// "5M would cover 99.4 %" — or an honest note when the ladder runs out.
+fn coverage_hint(stats: &SizeStats) -> String {
+    match suggest_spam_check_size(stats) {
+        Some((name, over)) if within_tolerance(over, stats.total) => {
+            format!(
+                "; {name} would cover {}",
+                pct(stats.total - over, stats.total)
+            )
+        }
+        Some((name, over)) => format!(
+            "; even {name} leaves {} over it — a ruleset per domain may fit better",
+            pct(over, stats.total)
+        ),
+        None => String::new(),
+    }
+}
+
+/// `(ok, detail)` for `Max Spam Check Size`, judged on the last 30 days of
+/// mail; rulesets are the admin's business. At the stock size a single
+/// skipped message is worth the mechanical fix. Above it, mail over the
+/// limit is attachments rather than newsletters, and skipping a message or
+/// two a month is the trade-off the limit exists for — only a share of 1 %
+/// or more is flagged, and the detail names the smallest limit that gets
+/// under it, so the check can actually go green after the limit is raised.
+pub fn spam_check_size_verdict(limit: &str, stats: &SizeStats) -> (bool, String) {
     let Some(bytes) = engine::parse_ms_size(limit) else {
         return (
             true,
@@ -1193,36 +1272,62 @@ pub fn spam_check_size_verdict(limit: &str, skipped: u64, total: u64) -> (bool, 
         );
     };
     let limit = limit.trim();
+    let SizeStats { skipped, total, .. } = *stats;
     if skipped == 0 {
         return (
             true,
             format!("Max Spam Check Size = {limit}; no message in 30 days would be skipped as too large"),
         );
     }
-    if bytes > STOCK_SPAM_CHECK_SIZE && skipped * 100 < total {
+    if bytes > STOCK_SPAM_CHECK_SIZE && within_tolerance(skipped, total) {
         return (
             true,
-            format!("Max Spam Check Size = {limit}; {skipped} of {total} messages in 30 days were over it and went unscored — under 1 %, mail that size is attachments rather than spam"),
+            format!(
+                "Max Spam Check Size = {limit} covers {} of the last 30 days' mail ({skipped} of {total} over it, unscored — mail that size is attachments rather than spam)",
+                pct(total - skipped, total)
+            ),
         );
     }
+    let why = if bytes > STOCK_SPAM_CHECK_SIZE {
+        "1 % or more of the mail goes unscored"
+    } else {
+        "HTML mail with images routinely exceeds it"
+    };
     (
         false,
-        if bytes > STOCK_SPAM_CHECK_SIZE {
-            format!("{skipped} of {total} messages in 30 days skipped every spam check as too large (Max Spam Check Size = {limit}) — 1 % or more of the mail goes unscored")
-        } else {
-            format!("{skipped} of {total} messages in 30 days skipped every spam check as too large (Max Spam Check Size = {limit}) — HTML mail with images routinely exceeds it")
-        },
+        format!(
+            "{skipped} of {total} messages in 30 days ({}) skipped every spam check as too large (Max Spam Check Size = {limit}) — {why}{}",
+            pct(skipped, total),
+            coverage_hint(stats)
+        ),
     )
 }
 
 /// The fix hint for the size check: `engine configure` only raises the
-/// stock value; anything larger is the admin's choice to raise further.
-pub fn spam_check_size_fix(limit: &str) -> String {
+/// stock value to 2M; anything beyond is the admin's, so the suggested
+/// limit is named for them to set.
+pub fn spam_check_size_fix(limit: &str, stats: &SizeStats) -> String {
+    let suggested = suggest_spam_check_size(stats).map(|(name, _)| name);
+    let set = |name: &str| {
+        format!("set Max Spam Check Size = {name} in MailScanner.conf (Config tab) and restart MailScanner — SpamAssassin still reads only the first Max SpamAssassin Size of each message, so the cost is small")
+    };
     match engine::parse_ms_size(limit) {
         Some(b) if b <= STOCK_SPAM_CHECK_SIZE => {
-            "msfe-ng engine configure (raises the stock 200k limit to 2M), or set Max Spam Check Size in MailScanner.conf".into()
+            let base = "msfe-ng engine configure (raises the stock 200k limit to 2M)";
+            match suggested {
+                Some(name) if engine::parse_ms_size(name).unwrap_or(0) > 2_000_000 => {
+                    format!("{base}, then {}", set(name))
+                }
+                _ => format!("{base}, or set Max Spam Check Size in MailScanner.conf"),
+            }
         }
-        _ => "raise Max Spam Check Size in MailScanner.conf (e.g. 5M) and restart MailScanner — or leave it: mail this large is attachments, and scanning it costs time per message".into(),
+        _ => match suggested {
+            Some(name) => set(name),
+            None => {
+                "raise Max Spam Check Size in MailScanner.conf (e.g. 5M) and restart MailScanner"
+                    .into()
+            }
+        },
     }
 }
 
@@ -1782,37 +1887,74 @@ mod tests {
     // 200k → 2M the month's history must not keep the warning on.
     #[test]
     fn spam_check_size_verdict_counts_mail_still_over_the_limit() {
-        let (ok, d) = spam_check_size_verdict("200k", 52, 603);
+        // 30 days: 603 messages, 52 over 200k, 9 over 1M, 3 over 2M, 1 over 3M
+        let st = |skipped: u64| SizeStats {
+            skipped,
+            total: 603,
+            over: vec![9, 3, 1, 0, 0, 0, 0],
+        };
+        let (ok, d) = spam_check_size_verdict("200k", &st(52));
         assert!(!ok);
         assert!(
-            d.contains("52") && d.contains("603") && d.contains("200k"),
+            d.contains("52 of 603") && d.contains("8.6 %") && d.contains("200k"),
             "{d}"
         );
-        let (ok, d) = spam_check_size_verdict("2M", 0, 500);
+        assert!(d.contains("2M would cover 99.5 %"), "{d}");
+        let (ok, d) = spam_check_size_verdict("2M", &st(0));
         assert!(ok, "{d}");
         assert!(d.contains("2M"), "{d}");
-        assert!(spam_check_size_verdict("200k", 0, 10).0);
+        assert!(spam_check_size_verdict("200k", &st(0)).0);
         // a ruleset value cannot be judged here
-        assert!(spam_check_size_verdict("/etc/MailScanner/rules/size.rules", 3, 10).0);
+        assert!(spam_check_size_verdict("/etc/MailScanner/rules/size.rules", &st(3)).0);
         // A user's host: the limit already raised to 2M, 2 of 1527 messages
         // over it — mail that size is attachments, not spam; the check must
         // not stay red for a share nobody would act on.
-        let (ok, d) = spam_check_size_verdict("2M", 2, 1527);
+        let big = |skipped: u64, over: Vec<u64>| SizeStats {
+            skipped,
+            total: 1527,
+            over,
+        };
+        let (ok, d) = spam_check_size_verdict("2M", &big(2, vec![30, 2, 1, 0, 0, 0, 0]));
         assert!(ok, "{d}");
-        assert!(d.contains("2 of 1527") && d.contains("2M"), "{d}");
-        // ...but a real share over a raised limit is still worth a look
-        let (ok, d) = spam_check_size_verdict("2M", 40, 1527);
+        assert!(
+            d.contains("covers 99.9 %") && d.contains("2 of 1527"),
+            "{d}"
+        );
+        // ...but a real share over a raised limit is still worth a look, with
+        // the smallest rung that gets under 1 % named
+        let heavy = big(40, vec![80, 40, 20, 9, 2, 0, 0]);
+        let (ok, d) = spam_check_size_verdict("2M", &heavy);
         assert!(!ok, "{d}");
-        assert!(d.contains("40 of 1527"), "{d}");
+        assert!(d.contains("40 of 1527") && d.contains("2.6 %"), "{d}");
+        assert!(d.contains("5M would cover 99.4 %"), "{d}");
+        assert_eq!(suggest_spam_check_size(&heavy), Some(("5M", 9)));
+        // nothing on the ladder gets under 1 %: the top rung, honestly
+        let huge = big(400, vec![400, 400, 400, 400, 400, 400, 400]);
+        assert_eq!(suggest_spam_check_size(&huge), Some(("50M", 400)));
+        assert!(spam_check_size_verdict("2M", &huge).1.contains("even 50M"));
         // the stock limit fires on a single message: the fix is mechanical
-        assert!(!spam_check_size_verdict("200k", 1, 1527).0);
-        // the fix hint follows the limit
-        assert!(spam_check_size_fix("200k").contains("engine configure"));
-        assert!(!spam_check_size_fix("2M").contains("engine configure"));
-        assert!(spam_check_size_fix("2M").contains("Max Spam Check Size"));
+        assert!(!spam_check_size_verdict("200k", &big(1, vec![1, 0, 0, 0, 0, 0, 0])).0);
+        // the fix hint follows the limit and names the suggestion
+        let f = spam_check_size_fix("200k", &st(52));
+        assert!(f.starts_with("msfe-ng engine configure"), "{f}");
+        assert!(!f.contains("then set"), "2M is enough here: {f}");
+        let f = spam_check_size_fix("200k", &heavy);
+        assert!(
+            f.starts_with("msfe-ng engine configure")
+                && f.contains("then set Max Spam Check Size = 5M"),
+            "{f}"
+        );
+        let f = spam_check_size_fix("2M", &heavy);
+        assert!(
+            !f.contains("engine configure") && f.contains("Max Spam Check Size = 5M"),
+            "{f}"
+        );
         assert_eq!(
-            skipped_over_limit_sql(2_000_000),
-            "SELECT COALESCE(SUM(spamreport LIKE '%too large%' AND size > 2000000),0), COUNT(*) \
+            spam_check_size_sql(2_000_000),
+            "SELECT COALESCE(SUM(spamreport LIKE '%too large%' AND size > 2000000),0), COUNT(*), \
+             COALESCE(SUM(size > 1000000),0), COALESCE(SUM(size > 2000000),0), COALESCE(SUM(size > 3000000),0), \
+             COALESCE(SUM(size > 5000000),0), COALESCE(SUM(size > 10000000),0), COALESCE(SUM(size > 20000000),0), \
+             COALESCE(SUM(size > 50000000),0) \
              FROM maillog WHERE msg_ts >= (NOW() - INTERVAL 30 DAY)"
         );
     }
@@ -1980,7 +2122,14 @@ mod tests {
             name: "large messages get spam-checked",
             level: Level::Warn,
             detail: String::new(),
-            fix: Some(spam_check_size_fix(limit)),
+            fix: Some(spam_check_size_fix(
+                limit,
+                &SizeStats {
+                    skipped: 5,
+                    total: 100,
+                    over: vec![0; 7],
+                },
+            )),
         };
         assert_eq!(plan(&[size("200k")], true), vec![Fix::EngineConfigure]);
         assert!(plan(&[size("2M")], true).is_empty());

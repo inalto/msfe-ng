@@ -210,6 +210,14 @@
     font-size: 0.72rem;
     color: var(--muted);
   }
+  .rail .foot .links a {
+    color: var(--muted);
+    text-decoration: none;
+  }
+  .rail .foot .links a:hover {
+    color: var(--accent);
+    text-decoration: underline;
+  }
   .rail .health {
     display: flex;
     align-items: center;
@@ -267,6 +275,7 @@
     }
     .app.mini .rail .brand b,
     .app.mini .rail .foot .version,
+    .app.mini .rail .foot .links,
     .app.mini .rail .health span:last-child {
       display: none;
     }

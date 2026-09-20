@@ -2452,6 +2452,10 @@ COMMANDS:
 ENVIRONMENT:
     MSFE_NG_SOCKET      Daemon socket path (default: {DEFAULT_SOCKET_PATH})
     MSFE_NG_CONFIG      Config file (default: {DEFAULT_CONFIG_FILE})
-    MSFE_NG_MIGRATIONS  Migrations dir (default: {DEFAULT_MIGRATIONS_DIR})"
+    MSFE_NG_MIGRATIONS  Migrations dir (default: {DEFAULT_MIGRATIONS_DIR})
+
+PROJECT:
+    https://github.com/inalto/msfe-ng        source, releases, issues
+    https://github.com/inalto/msfe-ng/wiki   usage wiki"
     );
 }
