@@ -336,7 +336,7 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
             ok,
             Level::Warn,
             detail,
-            "msfe-ng engine configure (raises the stock 200k limit to 2M), or set Max Spam Check Size in MailScanner.conf",
+            &spam_check_size_fix(limit),
         ));
     }
     // Misplaced spool files are invisible to delivery: Exim lists them but
@@ -1174,27 +1174,56 @@ pub fn skipped_over_limit_sql(bytes: u64) -> String {
     )
 }
 
+/// Below this, `Max Spam Check Size` is the stock default that skips routine
+/// HTML mail; `engine configure` raises it to 2M.
+const STOCK_SPAM_CHECK_SIZE: u64 = 200_000;
+
 /// `(ok, detail)` for `Max Spam Check Size`: `skipped` is the 30-day count
 /// of mail the current limit would still skip; rulesets are the admin's
-/// business.
+/// business. At the stock size a single skipped message is worth the
+/// mechanical fix. Above it, mail over the limit is attachments rather than
+/// newsletters, and skipping a message or two a month is the trade-off the
+/// limit exists for — only a share of 1 % or more is flagged, so the check
+/// can actually go green after the limit is raised.
 pub fn spam_check_size_verdict(limit: &str, skipped: u64, total: u64) -> (bool, String) {
-    let bytes = engine::parse_ms_size(limit);
-    if skipped == 0 || bytes.is_none() {
+    let Some(bytes) = engine::parse_ms_size(limit) else {
         return (
             true,
-            format!(
-                "Max Spam Check Size = {}; no message in 30 days would be skipped as too large",
-                limit.trim()
-            ),
+            format!("Max Spam Check Size = {} (a ruleset)", limit.trim()),
+        );
+    };
+    let limit = limit.trim();
+    if skipped == 0 {
+        return (
+            true,
+            format!("Max Spam Check Size = {limit}; no message in 30 days would be skipped as too large"),
+        );
+    }
+    if bytes > STOCK_SPAM_CHECK_SIZE && skipped * 100 < total {
+        return (
+            true,
+            format!("Max Spam Check Size = {limit}; {skipped} of {total} messages in 30 days were over it and went unscored — under 1 %, mail that size is attachments rather than spam"),
         );
     }
     (
         false,
-        format!(
-            "{skipped} of {total} messages in 30 days skipped every spam check as too large (Max Spam Check Size = {}) — HTML mail with images routinely exceeds it",
-            limit.trim()
-        ),
+        if bytes > STOCK_SPAM_CHECK_SIZE {
+            format!("{skipped} of {total} messages in 30 days skipped every spam check as too large (Max Spam Check Size = {limit}) — 1 % or more of the mail goes unscored")
+        } else {
+            format!("{skipped} of {total} messages in 30 days skipped every spam check as too large (Max Spam Check Size = {limit}) — HTML mail with images routinely exceeds it")
+        },
     )
+}
+
+/// The fix hint for the size check: `engine configure` only raises the
+/// stock value; anything larger is the admin's choice to raise further.
+pub fn spam_check_size_fix(limit: &str) -> String {
+    match engine::parse_ms_size(limit) {
+        Some(b) if b <= STOCK_SPAM_CHECK_SIZE => {
+            "msfe-ng engine configure (raises the stock 200k limit to 2M), or set Max Spam Check Size in MailScanner.conf".into()
+        }
+        _ => "raise Max Spam Check Size in MailScanner.conf (e.g. 5M) and restart MailScanner — or leave it: mail this large is attachments, and scanning it costs time per message".into(),
+    }
 }
 
 /// `(ok, detail)` for the shared Bayes state dir: `state` is the configured
@@ -1344,10 +1373,18 @@ pub fn plan(checks: &[Check], engine_targets_exim: bool) -> Vec<Fix> {
             | "Razor reporting identity"
             | "Pyzor shared home"
             | "SpamAssassin envelope-sender header"
-            | "large messages get spam-checked"
             | "archive directory ready"
             | "quarantine writable by scan user"
                 if engine_targets_exim =>
+            {
+                Some(Fix::EngineConfigure)
+            }
+            // configure only raises the stock size; a raised limit is a decision
+            "large messages get spam-checked"
+                if engine_targets_exim
+                    && c.fix
+                        .as_deref()
+                        .is_some_and(|f| f.starts_with("msfe-ng engine configure")) =>
             {
                 Some(Fix::EngineConfigure)
             }
@@ -1757,6 +1794,22 @@ mod tests {
         assert!(spam_check_size_verdict("200k", 0, 10).0);
         // a ruleset value cannot be judged here
         assert!(spam_check_size_verdict("/etc/MailScanner/rules/size.rules", 3, 10).0);
+        // A user's host: the limit already raised to 2M, 2 of 1527 messages
+        // over it — mail that size is attachments, not spam; the check must
+        // not stay red for a share nobody would act on.
+        let (ok, d) = spam_check_size_verdict("2M", 2, 1527);
+        assert!(ok, "{d}");
+        assert!(d.contains("2 of 1527") && d.contains("2M"), "{d}");
+        // ...but a real share over a raised limit is still worth a look
+        let (ok, d) = spam_check_size_verdict("2M", 40, 1527);
+        assert!(!ok, "{d}");
+        assert!(d.contains("40 of 1527"), "{d}");
+        // the stock limit fires on a single message: the fix is mechanical
+        assert!(!spam_check_size_verdict("200k", 1, 1527).0);
+        // the fix hint follows the limit
+        assert!(spam_check_size_fix("200k").contains("engine configure"));
+        assert!(!spam_check_size_fix("2M").contains("engine configure"));
+        assert!(spam_check_size_fix("2M").contains("Max Spam Check Size"));
         assert_eq!(
             skipped_over_limit_sql(2_000_000),
             "SELECT COALESCE(SUM(spamreport LIKE '%too large%' AND size > 2000000),0), COUNT(*) \
@@ -1922,6 +1975,15 @@ mod tests {
             vec![Fix::LoggingModules, Fix::Sync, Fix::SpoolRepair]
         );
         assert!(plan(&[chk("logging perl modules", Level::Ok)], true).is_empty());
+        // the size check is configure's business only at the stock limit
+        let size = |limit: &str| Check {
+            name: "large messages get spam-checked",
+            level: Level::Warn,
+            detail: String::new(),
+            fix: Some(spam_check_size_fix(limit)),
+        };
+        assert_eq!(plan(&[size("200k")], true), vec![Fix::EngineConfigure]);
+        assert!(plan(&[size("2M")], true).is_empty());
     }
 
     #[test]

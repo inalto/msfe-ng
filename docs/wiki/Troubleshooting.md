@@ -243,8 +243,12 @@ account's own Apache SpamAssassin may still tag it — that is the
 stock-sized limit to `2M`; a larger or ruleset value set by hand is kept.
 SpamAssassin itself still only reads the first `Max SpamAssassin Size`
 (200k) of each message, so the cost is small. The doctor check *large
-messages get spam-checked* reports how many messages were skipped in the
-last 30 days.
+messages get spam-checked* reports how many messages of the last 30 days
+were over the limit. At the stock size a single one is a warning, since the
+fix is mechanical; once the limit is raised, mail over it is attachments
+rather than spam, so the check only warns when 1 % or more of the month's
+mail went unscored — a message or two is the trade-off the limit exists
+for, and the check stays green.
 
 ## Quarantine writes fail / gaps in the date directories
 
