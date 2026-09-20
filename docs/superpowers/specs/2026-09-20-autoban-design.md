@@ -135,7 +135,7 @@ prints `1d`, `2h`, `10m`. Helper `format_secs`/`parse_secs` (pure, tested).
 
 ## UI (`web/whm/index.html`)
 
-Settings tab card **Auto-ban spam sources (csf)**: a note when csf is absent;
+Config tab (Maintenance & tools) card **Auto-ban spam sources (csf)**: a note when csf is absent;
 two threshold rows (enabled, count, window value+unit, ban value+unit);
 **Match rules** table (enabled, field, match, pattern, block, ban, comment;
 add / edit / delete; **Test** shows matching recent messages); **Save**;

@@ -161,6 +161,49 @@ would go right now; **Clean now** runs the rules immediately; **Save rules**
 stores them for the cron. The last automatic run is summarised above the
 fields.
 
+## Auto-ban spam sources (csf)
+
+Every minute (`msfe-ng autoban run`, from `/etc/cron.d/msfe-ng`) the sources
+of newly logged spam are banned temporarily in ConfigServer Firewall (`csf
+-td`) when a rule fires. Everything ships **off**.
+
+**Thresholds** — one row for high-scoring spam, one for spam: enabled,
+**messages** (count 1 = ban on the first message), **within** a window and
+**ban for** a duration, both as a number plus seconds / minutes / hours /
+days. Defaults: high spam 1 in 10 minutes → 1 day; spam 3 in 1 hour → 2 hours.
+**Save thresholds** stores them as `autoban_*` keys in `config.toml`.
+
+**Match rules** — block and/or ban by content. Each rule has a **field**
+(Subject, From address, To/Cc, Body text, or any header by name), a
+**match** (*contains*, a literal matched case-insensitively, or *regex*, a
+Perl regex exactly as SpamAssassin reads it — `/…/i` is added when you give
+no delimiters), the **pattern**, **Block delivery**, **Ban the source for**
+a duration, and a comment. Rules become SpamAssassin rules named
+`MSFE_MATCH_<id>` in `/etc/mail/spamassassin/msfe-ng-match.cf` (written on
+every sync): a blocking rule scores **100**, so the message follows the
+domain's high-spam action — quarantined by default, deleted if the policy
+says so — and is never delivered; a ban-only rule scores 0.01, which tags
+the message in the log without changing its verdict. The pattern is
+validated with the engine's own perl when you save (a bad regex is refused
+with perl's message) and the site config is linted afterwards; **Test
+against recent mail** shows which of the last 200 subjects or senders would
+match. Whitelisted mail skips SpamAssassin, so match rules never touch it.
+
+**Never banned**, whatever the rules: your own, loopback and private
+addresses; anything in `csf.allow` or `csf.ignore`; an address csf already
+denies (permanently or temporarily); an address that also delivered *clean*
+mail inside the window — a shared provider IP (Gmail, Microsoft, a relay)
+with one false positive stays reachable; and an address this engine banned
+within the window. At most 100 bans per run; the rest re-trigger on their
+next message. Every ban is a row in the `autoban` table (**Recent
+auto-bans**, with *unban*) and, with Telegram configured and the box
+ticked, a Telegram line. **Dry run now** shows what the current settings
+would ban right now, without banning.
+
+CLI: `msfe-ng autoban status`, `msfe-ng autoban run [--dry-run]`, `msfe-ng
+autoban rules`. The doctor warns when rules are enabled without csf and
+when the SpamAssassin file behind the rules is stale (`--fix` syncs).
+
 ## Telegram alerts
 
 Create a bot with @BotFather and paste its **token** (never shown again once saved —

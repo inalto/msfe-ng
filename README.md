@@ -82,6 +82,11 @@ per tab of the admin UI, plus the end-user panel, CLI and troubleshooting.
 - **Monitoring & alerts** — a 5-minute monitor cron applies the auto-clean
   rules and sends **Telegram alerts**: queue growth, stuck scanning queue, and
   per-account outbound sending bursts (compromised-account detection).
+- **Auto-ban** — temporary csf bans for spam sources per severity threshold
+  (count in a window, ban duration), and **match rules** by subject, sender,
+  header or body that block delivery and ban the source — created from the
+  Config tab or straight from a message row; safeguards keep shared provider
+  IPs out of the firewall.
 - **Delivery test** — a deliverability diagnostic for any address: DNS,
   DNSSEC and name-server agreement, SPF/DKIM/DMARC, the MX hosts and their
   TLS, MTA-STS/TLS-RPT/DANE/BIMI, blocklists — pass/warning/fail/unknown

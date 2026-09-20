@@ -199,7 +199,7 @@ pub fn pattern_to_regex(matcher: &str, pattern: &str) -> Result<String, String> 
 /// still yields the banner, so the file is always ours to overwrite.
 pub fn sa_rules_text(rules: &[MatchRule]) -> String {
     let mut out = String::from(
-        "# Managed by MSFE-NG (Settings → Auto-ban → Match rules); edits are overwritten on sync.\n",
+        "# Managed by MSFE-NG (Config → Auto-ban → Match rules); edits are overwritten on sync.\n",
     );
     for r in rules.iter().filter(|r| r.enabled) {
         let Ok(re) = pattern_to_regex(&r.matcher, &r.pattern) else {
@@ -966,7 +966,7 @@ mod tests {
         let text = sa_rules_text(&[a, b, off, h]);
         assert_eq!(
             text,
-            "# Managed by MSFE-NG (Settings → Auto-ban → Match rules); edits are overwritten on sync.\n\
+            "# Managed by MSFE-NG (Config → Auto-ban → Match rules); edits are overwritten on sync.\n\
              \nheader MSFE_MATCH_3 Subject =~ /account\\ suspended/i\ndescribe MSFE_MATCH_3 suspension wave\nscore MSFE_MATCH_3 100\n\
              \nheader MSFE_MATCH_4 From =~ /@spammy\\.example$/i\ndescribe MSFE_MATCH_4 from regex @spammy\\.example$\nscore MSFE_MATCH_4 0.01\n\
              \nheader MSFE_MATCH_6 X-Mailer =~ /MassMail/i\ndescribe MSFE_MATCH_6 header:X-Mailer contains MassMail\nscore MSFE_MATCH_6 100\n"

@@ -21,6 +21,6 @@ PATH=/usr/bin:/bin:/opt/msfe-ng/bin
 */5 * * * * root /opt/msfe-ng/bin/msfe-ng monitor >/dev/null 2>&1
 
 # Auto-ban: temporary csf bans for spam sources per the autoban_* thresholds
-# and the match rules (Settings → Auto-ban). Off until enabled in the UI; a
+# and the match rules (Config → Auto-ban). Off until enabled in the UI; a
 # no-op in milliseconds while nothing is enabled.
 * * * * * root /opt/msfe-ng/bin/msfe-ng autoban run >/dev/null 2>&1

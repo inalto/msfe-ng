@@ -59,6 +59,17 @@ perl cannot load; while cPanel's spamd is off (`/etc/spamddisable`) `doctor
 key=spamassassin_plugin_<Name> value=0`, otherwise the command is left to
 you.
 
+## An auto-ban hit a legitimate sender
+
+Open Config → *Auto-ban spam sources* → **Recent auto-bans** and click
+**unban** (or `csf -tr <ip>`); the row tells you which rule fired. A
+threshold that bans on the first message is fast and blunt: the clean-mail
+safeguard protects an IP only when it also delivered clean mail *inside the
+window*, so a shared relay whose only recent message scored as spam is not
+protected by it. Raise the count, shorten the ban, or add the address to
+`csf.allow` (never banned again). Match rules are checked with **Test
+against recent mail** before saving for exactly this reason.
+
 ## A configuration change did not take effect
 
 MailScanner reads `MailScanner.conf`, `spamassassin.conf`, `spam.lists.conf`,

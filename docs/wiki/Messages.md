@@ -66,6 +66,16 @@ for that address: it opens the tab with the address filled in and starts the
 run at once, with the server audit included when the domain is hosted here —
 the quickest way from "this message did not arrive" to the report.
 
+## Ban rule from a message
+
+Each row has a **ban rule** link next to the subject, and the message view a
+**Ban rule…** button. Pick what to act on: *Subject contains ⟨this
+subject⟩* or *From address ⟨this sender⟩* opens the match-rule editor
+prefilled (block delivery on, ban the source for a day — change anything,
+test it against recent mail, save: it is live after the reload); *Ban the
+client IP now* opens the client-IP modal for a one-off csf block. See
+[Config](Config), *Auto-ban spam sources*.
+
 ## Sender modal
 
 Click any **From** address: 30-day history for that address and its whole

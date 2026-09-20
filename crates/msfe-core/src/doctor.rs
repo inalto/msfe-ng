@@ -583,7 +583,7 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
                 (true, true) => "auto-ban rules enabled and csf is installed".into(),
                 (true, false) => "auto-ban rules are enabled but csf is not installed — nothing can be banned".into(),
             },
-            "install ConfigServer Firewall (csf), or turn the auto-ban rules off in Settings → Auto-ban",
+            "install ConfigServer Firewall (csf), or turn the auto-ban rules off in Config → Auto-ban",
         ));
         // the SpamAssassin file must say what the rules say
         if let Some(site) = mailscanner::get_directive(&conf, "SpamAssassin Site Rules Dir")
