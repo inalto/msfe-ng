@@ -568,6 +568,55 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
         .url(crate::legacy_decommission::WIKI_URL),
     );
 
+    // ---- auto-ban ---------------------------------------------------------
+    {
+        let rules = crate::autoban::Rules::from_config(cfg);
+        let matches = crate::autoban::load_match_rules(&crate::sync::policy_dir(config_file));
+        let banning = rules.any_enabled() || crate::autoban::any_ban_rule(&matches);
+        let csf_ok = crate::csf::available();
+        out.push(check(
+            "auto-ban firewall",
+            !banning || csf_ok,
+            Level::Warn,
+            match (banning, csf_ok) {
+                (false, _) => "no auto-ban rule is enabled".into(),
+                (true, true) => "auto-ban rules enabled and csf is installed".into(),
+                (true, false) => "auto-ban rules are enabled but csf is not installed — nothing can be banned".into(),
+            },
+            "install ConfigServer Firewall (csf), or turn the auto-ban rules off in Settings → Auto-ban",
+        ));
+        // the SpamAssassin file must say what the rules say
+        if let Some(site) = mailscanner::get_directive(&conf, "SpamAssassin Site Rules Dir")
+            .map(str::trim)
+            .filter(|v| v.starts_with('/'))
+            .map(Path::new)
+            .filter(|p| p.is_dir())
+        {
+            let on_disk =
+                std::fs::read_to_string(site.join(crate::sync::MATCH_CF)).unwrap_or_default();
+            let expected = crate::autoban::sa_rules_text(&matches);
+            let active = matches.iter().filter(|m| m.enabled).count();
+            out.push(check(
+                "auto-ban match rules on disk",
+                on_disk == expected,
+                Level::Warn,
+                if on_disk == expected {
+                    format!(
+                        "{} rule(s) live in {}",
+                        active,
+                        site.join(crate::sync::MATCH_CF).display()
+                    )
+                } else {
+                    format!(
+                        "{} does not match the saved rules — sync has not run since they changed",
+                        site.join(crate::sync::MATCH_CF).display()
+                    )
+                },
+                "msfe-ng sync (or msfe-ng doctor --fix)",
+            ));
+        }
+    }
+
     // ---- message bodies (archive) ----------------------------------------
     let (settings, _, _) = crate::sync::load_policy(&crate::sync::policy_dir(config_file));
     let archive_on = settings
@@ -1617,7 +1666,7 @@ pub fn plan(checks: &[Check], engine_targets_exim: bool) -> Vec<Fix> {
                 Some(Fix::EngineConfigure)
             }
             "phishing site lists updating" if engine_targets_exim => Some(Fix::PhishingUpdate),
-            "message archive configured" => Some(Fix::Sync),
+            "message archive configured" | "auto-ban match rules on disk" => Some(Fix::Sync),
             "spool files correctly placed" => Some(Fix::SpoolRepair),
             "MailScanner running" if wired && latch_on => Some(Fix::Start),
             "local DNS resolver answering" => Some(Fix::ResolverStart),
@@ -2304,6 +2353,11 @@ mod tests {
             plan(&[chk("SpamAssassin upstream rules", Level::Fail)], false),
             vec![Fix::SaUpdate]
         );
+        assert_eq!(
+            plan(&[chk("auto-ban match rules on disk", Level::Warn)], false),
+            vec![Fix::Sync]
+        );
+        assert!(plan(&[chk("auto-ban firewall", Level::Warn)], true).is_empty());
         // cPanel's plugins are switched off only when its spamd is off
         let plug = |fix: &str| Check {
             name: "cPanel SpamAssassin plugins load",

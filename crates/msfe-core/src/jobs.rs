@@ -38,6 +38,11 @@ pub struct JobStatus {
     pub log_tail: String,
 }
 
+/// The jobs directory, for other single-instance guards (the auto-ban run).
+pub fn jobs_dir() -> PathBuf {
+    dir()
+}
+
 fn paths(name: &str) -> (PathBuf, PathBuf, PathBuf) {
     let d = dir();
     (
@@ -51,7 +56,8 @@ fn script_path(name: &str) -> PathBuf {
     dir().join(format!("{name}.sh"))
 }
 
-fn pid_alive(pid_file: &Path) -> bool {
+/// Does the pid in `pid_file` name a live process?
+pub fn pid_alive(pid_file: &Path) -> bool {
     std::fs::read_to_string(pid_file)
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())

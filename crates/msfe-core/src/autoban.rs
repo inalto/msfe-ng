@@ -485,9 +485,9 @@ pub fn evaluate(rows: &[Row], rules: &Rules, matches: &[MatchRule], now: u64) ->
 /// `maillog` rows since `since_id`, never older than `window_secs`, bounded.
 pub fn rows_sql(since_id: u64, window_secs: u64) -> String {
     format!(
-        "SELECT id, UNIX_TIMESTAMP(msg_ts), clientip, isspam, ishighspam, spamreport FROM maillog \
-         WHERE id > {since_id} AND msg_ts >= (NOW() - INTERVAL {window_secs} SECOND) AND clientip <> '' \
-         ORDER BY id LIMIT 20000"
+        "SELECT row_id, UNIX_TIMESTAMP(msg_ts), clientip, isspam, ishighspam, spamreport FROM maillog \
+         WHERE row_id > {since_id} AND msg_ts >= (NOW() - INTERVAL {window_secs} SECOND) AND clientip <> '' \
+         ORDER BY row_id LIMIT 20000"
     )
 }
 
@@ -522,6 +522,32 @@ fn parse_row(r: &[String]) -> Option<Row> {
     })
 }
 
+/// Bans per run, so the minute cron stays bounded on a first run over a
+/// wide window; the rest re-trigger on their next message.
+pub const MAX_BANS_PER_RUN: usize = 100;
+
+/// A pid file so overlapping minute crons never process the same rows.
+struct RunGuard(PathBuf);
+
+impl RunGuard {
+    fn acquire() -> Result<RunGuard, String> {
+        let dir = crate::jobs::jobs_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let pid = dir.join("autoban.pid");
+        if crate::jobs::pid_alive(&pid) {
+            return Err("another auto-ban run is still going".into());
+        }
+        std::fs::write(&pid, format!("{}\n", std::process::id())).map_err(|e| e.to_string())?;
+        Ok(RunGuard(pid))
+    }
+}
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// One pass: read, decide, ban, record. Never advances the cursor on a dry
 /// run.
 pub fn run(cfg: &Config, config_file: &Path, dry_run: bool) -> Report {
@@ -536,6 +562,17 @@ pub fn run(cfg: &Config, config_file: &Path, dry_run: bool) -> Report {
         rep.transcript.push("auto-ban: nothing enabled".into());
         return rep;
     }
+    let _guard = if dry_run {
+        None
+    } else {
+        match RunGuard::acquire() {
+            Ok(g) => Some(g),
+            Err(e) => {
+                rep.transcript.push(format!("auto-ban: {e}"));
+                return rep;
+            }
+        }
+    };
     if !cfg.db_configured() {
         rep.transcript
             .push("auto-ban: database not configured — nothing to read".into());
@@ -584,15 +621,24 @@ pub fn run(cfg: &Config, config_file: &Path, dry_run: bool) -> Report {
                 .push((c.ip.clone(), "csf is not installed".into()));
             continue;
         }
-        let known = csf::lookup(&c.ip);
-        if known.contains("csf.allow") || known.contains("csf.ignore") {
-            rep.skipped
-                .push((c.ip.clone(), "listed in csf.allow / csf.ignore".into()));
-            continue;
+        match csf::list_state(&c.ip) {
+            csf::ListState::Allowed => {
+                rep.skipped
+                    .push((c.ip.clone(), "listed in csf.allow / csf.ignore".into()));
+                continue;
+            }
+            csf::ListState::Denied => {
+                rep.skipped
+                    .push((c.ip.clone(), "already denied by csf".into()));
+                continue;
+            }
+            csf::ListState::Unlisted => {}
         }
-        if known.contains("csf.deny") || known.contains("Temporary Blocks") {
-            rep.skipped
-                .push((c.ip.clone(), "already denied by csf".into()));
+        if rep.banned.len() >= MAX_BANS_PER_RUN {
+            rep.skipped.push((
+                c.ip.clone(),
+                format!("over {MAX_BANS_PER_RUN} bans in one run — next run"),
+            ));
             continue;
         }
         if dry_run {
@@ -782,7 +828,7 @@ pub fn test_pattern(
     let rows = db::query(
         cfg,
         &format!(
-            "SELECT id, {column} FROM maillog ORDER BY id DESC LIMIT {}",
+            "SELECT row_id, {column} FROM maillog ORDER BY row_id DESC LIMIT {}",
             limit.clamp(1, 2000)
         ),
     )
@@ -1108,9 +1154,9 @@ mod tests {
         assert!(evaluate(&rows, &r, &[], now).is_empty());
         assert_eq!(
             rows_sql(42, 3_600),
-            "SELECT id, UNIX_TIMESTAMP(msg_ts), clientip, isspam, ishighspam, spamreport FROM maillog \
-             WHERE id > 42 AND msg_ts >= (NOW() - INTERVAL 3600 SECOND) AND clientip <> '' \
-             ORDER BY id LIMIT 20000"
+            "SELECT row_id, UNIX_TIMESTAMP(msg_ts), clientip, isspam, ishighspam, spamreport FROM maillog \
+             WHERE row_id > 42 AND msg_ts >= (NOW() - INTERVAL 3600 SECOND) AND clientip <> '' \
+             ORDER BY row_id LIMIT 20000"
         );
     }
 

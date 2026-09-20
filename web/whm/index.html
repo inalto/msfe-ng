@@ -108,6 +108,156 @@ function modal(title){
   return {body,close};
 }
 
+// ---- auto-ban: durations, thresholds, match rules -----------------------------
+const AB_UNITS=[['s','seconds',1],['m','minutes',60],['h','hours',3600],['d','days',86400]];
+function abSplit(secs){secs=+secs||0;for(const [u,,n] of [...AB_UNITS].reverse()){if(secs>0&&secs%n===0)return [secs/n,u];}return [secs,'s'];}
+function abSecs(value,unit){const f=AB_UNITS.find(x=>x[0]===unit);return Math.max(0,Math.round(+value||0))*(f?f[2]:1);}
+function abFmt(secs){const [v,u]=abSplit(secs);return v+u;}
+// a number + unit pair; returns {wrap, secs()}
+function abDuration(secs,min){
+  const [v,u]=abSplit(secs);
+  const num=el('input',{type:'number',min:String(min||0),step:'1',value:String(v),style:'width:5.5rem'});
+  const unit=el('select');AB_UNITS.forEach(([k,label])=>unit.append(el('option',{value:k,...(k===u?{selected:'selected'}:{})},label)));
+  return {wrap:el('span',{style:'white-space:nowrap'},num,' ',unit),secs:()=>abSecs(num.value,unit.value),set:(s)=>{const [v2,u2]=abSplit(s);num.value=v2;unit.value=u2;}};
+}
+const AB_FIELDS=[['subject','Subject'],['from','From address'],['to','To / Cc'],['body','Body text'],['header','Header…']];
+// the match-rule form; `rule` is a plain object (id 0 = new); returns {wrap, read()}
+function abRuleForm(rule){
+  rule=rule||{};
+  const isHdr=(rule.field||'').startsWith('header:');
+  const enabled=el('input',{type:'checkbox',...(rule.enabled!==false?{checked:'checked'}:{})});
+  const field=el('select');AB_FIELDS.forEach(([k,label])=>field.append(el('option',{value:k,...((isHdr?'header':rule.field||'subject')===k?{selected:'selected'}:{})},label)));
+  const hname=el('input',{type:'text',placeholder:'X-Mailer',value:isHdr?rule.field.slice(7):'',style:'width:9rem;display:'+(isHdr?'':'none')});
+  field.onchange=()=>{hname.style.display=field.value==='header'?'':'none';};
+  const matcher=el('select');[['contains','contains (literal, case-insensitive)'],['regex','regex (Perl, as SpamAssassin reads it)']].forEach(([k,label])=>matcher.append(el('option',{value:k,...((rule.matcher||'contains')===k?{selected:'selected'}:{})},label)));
+  const pattern=el('input',{type:'text',value:rule.pattern||'',placeholder:'text or /regex/i',style:'width:100%'});
+  const block=el('input',{type:'checkbox',...(rule.block!==false?{checked:'checked'}:{})});
+  const banOn=el('input',{type:'checkbox',...((rule.ban_secs||0)>0?{checked:'checked'}:{})});
+  const ban=abDuration((rule.ban_secs||0)>0?rule.ban_secs:86400,1);
+  const comment=el('input',{type:'text',value:rule.comment||'',placeholder:'why (shown in the ban history)',style:'width:100%'});
+  const testOut=el('div',{class:'muted',style:'font-size:.8rem;margin-top:.25rem;white-space:pre-wrap'});
+  const testBtn=el('button',{class:'act plain'},'Test against recent mail');
+  testBtn.onclick=async()=>{
+    testBtn.disabled=true;testOut.textContent='Testing…';
+    const r=await api('/api/autoban/test',{method:'POST',body:{field:readField(),matcher:matcher.value,pattern:pattern.value}});
+    testBtn.disabled=false;
+    if(!r||r.error){testOut.textContent='✗ '+((r&&r.error)||'failed');return;}
+    const f=readField();
+    testOut.textContent=`regex ${r.regex}\n`+(['subject','from','to'].includes(f)?`${r.matches.length} of the last ${r.checked} messages match`+(r.matches.length?':\n'+r.matches.slice(0,15).map(m=>'  '+m.value).join('\n')+(r.matches.length>15?'\n  …':''):''):'pattern is valid (the log holds no bodies or other headers to test against)');
+  };
+  function readField(){return field.value==='header'?'header:'+hname.value.trim():field.value;}
+  const grid=el('div',{class:'grid2'},
+    el('label',{class:'field'},'Enabled ',enabled),
+    el('label',{class:'field'},'Field ',el('span',{},field,' ',hname)),
+    el('label',{class:'field'},'Match ',matcher),
+    el('label',{class:'field',style:'grid-column:1/-1'},'Pattern ',pattern),
+    el('label',{class:'field'},'Block delivery ',block,el('span',{class:'muted',style:'font-size:.75rem'},' (score 100 → the domain\u2019s high-spam action)')),
+    el('label',{class:'field'},'Ban the source ',banOn,' for ',ban.wrap),
+    el('label',{class:'field',style:'grid-column:1/-1'},'Comment ',comment));
+  const wrap=el('div',{},grid,el('div',{class:'ctl'},testBtn),testOut);
+  return {wrap,read:()=>({id:rule.id||0,enabled:enabled.checked,field:readField(),matcher:matcher.value,pattern:pattern.value,block:block.checked,ban_secs:banOn.checked?ban.secs():0,comment:comment.value,created:rule.created||''})};
+}
+// Edit one rule (new or existing) in a modal and save the whole list.
+async function banRuleEditor(rule,onSaved){
+  const st=await api('/api/autoban');
+  if(!st||st.error){toast('cannot load the auto-ban settings');return;}
+  const m=modal(rule&&rule.id?'Edit match rule #'+rule.id:'New match rule');
+  if(!st.csf_available)m.body.append(el('div',{class:'note bad'},'csf is not installed on this server: a rule can block delivery, but nothing can be banned.'));
+  const form=abRuleForm(rule);
+  const err=el('div',{class:'note bad',style:'display:none'});
+  const save=el('button',{class:'act'},'Save & apply');
+  save.onclick=async()=>{
+    const r=form.read();
+    const rules=st.rules.filter(x=>x.id!==r.id);rules.push(r);
+    save.disabled=true;err.style.display='none';
+    const res=await api('/api/autoban/rules',{method:'PUT',body:{rules}});
+    save.disabled=false;
+    if(!res||res.error){err.textContent=(res&&res.error)||'save failed';err.style.display='';return;}
+    toast(res.changed?'Rule saved — MailScanner reloaded':'Rule saved');
+    m.close();if(onSaved)onSaved(res);
+  };
+  m.body.append(form.wrap,err,el('div',{class:'ctl'},save));
+}
+// From a message: a rule prefilled with its subject / sender, or a one-off csf ban of its client IP.
+function banRuleFromMessage(msg){
+  const m=modal('Ban rule from this message');
+  const opts=[];
+  if(msg.subject)opts.push(['subject','Subject contains: '+msg.subject]);
+  if(msg.from)opts.push(['from','From address: '+msg.from]);
+  if(msg.clientip)opts.push(['ip','Ban the client IP now: '+msg.clientip+' (csf, one-off)']);
+  if(!opts.length){m.body.append(el('div',{class:'empty'},'Nothing usable in this message.'));return;}
+  const sel=el('select');opts.forEach(([k,label])=>sel.append(el('option',{value:k},label)));
+  const go=el('button',{class:'act'},'Continue');
+  go.onclick=()=>{
+    const k=sel.value;m.close();
+    if(k==='ip'){showIp(msg.clientip);return;}
+    banRuleEditor({id:0,enabled:true,field:k,matcher:'contains',pattern:k==='subject'?msg.subject:msg.from,block:true,ban_secs:86400,comment:''});
+  };
+  m.body.append(el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.85rem'},'A match rule blocks every message that matches (it follows the domain\u2019s high-spam action) and can ban the sending IP; edit the details on the next screen.'),sel,el('div',{class:'ctl'},go));
+}
+function renderAutobanCard(card,cconf){
+  const holder=el('div',{});card.append(holder);
+  async function draw(){
+    holder.innerHTML='';
+    const st=await api('/api/autoban');
+    if(!st||st.error){holder.append(el('div',{class:'empty'},'cannot load the auto-ban settings'));return;}
+    if(!st.csf_available)holder.append(el('div',{class:'note bad'},'csf is not installed on this server — rules can be saved, but nothing is banned until it is.'));
+    if(!st.db_configured)holder.append(el('div',{class:'note bad'},'The database is not configured: there is no log to read spam sources from.'));
+    // thresholds
+    const th=el('table');
+    th.append(el('tr',{},el('th',{},''),el('th',{},'Enabled'),el('th',{},'Messages'),el('th',{},'within'),el('th',{},'ban for')));
+    const rows={};
+    for(const [k,label] of [['high','High-scoring spam'],['spam','Spam']]){
+      const t=st.thresholds[k];
+      const en=el('input',{type:'checkbox',...(t.enabled?{checked:'checked'}:{})});
+      const cnt=el('input',{type:'number',min:'1',step:'1',value:String(t.count),style:'width:5rem'});
+      const win=abDuration(t.window_secs,1),ban=abDuration(t.ban_secs,1);
+      rows[k]={en,cnt,win,ban};
+      th.append(el('tr',{},el('td',{},label),el('td',{},en),el('td',{},cnt),el('td',{},win.wrap),el('td',{},ban.wrap)));
+    }
+    const tg=el('label',{class:'field'},el('input',{type:'checkbox',...(st.telegram?{checked:'checked'}:{})}),' Telegram line per ban'+(st.telegram_configured?'':' (Telegram not configured)'));
+    const saveTh=el('button',{class:'act'},'Save thresholds');
+    saveTh.onclick=async()=>{
+      const changes={};
+      for(const k of ['high','spam']){const r=rows[k];changes[`autoban_${k}_enabled`]=r.en.checked?'true':'false';changes[`autoban_${k}_count`]=String(Math.max(1,+r.cnt.value||1));changes[`autoban_${k}_window_secs`]=String(Math.max(1,r.win.secs()));changes[`autoban_${k}_ban_secs`]=String(Math.max(60,r.ban.secs()));}
+      changes.autoban_telegram=tg.querySelector('input').checked?'true':'false';
+      const r=await api('/api/service/conf/apply',{method:'POST',body:{which:'msfe',changes}});
+      toast(r&&r.ok?'Thresholds saved — the minute cron applies them':'Save failed');
+      draw();
+    };
+    holder.append(el('h3',{style:'font-size:.95rem;margin:.6rem 0 .3rem'},'Thresholds'),th,tg,el('div',{class:'ctl'},saveTh));
+    // match rules
+    const rt=el('table');
+    rt.append(el('tr',{},el('th',{},'#'),el('th',{},'On'),el('th',{},'Field'),el('th',{},'Pattern'),el('th',{},'Block'),el('th',{},'Ban'),el('th',{},'Comment'),el('th',{},'')));
+    if(!st.rules.length)rt.append(el('tr',{},el('td',{colspan:'8',class:'muted'},'No match rules yet — add one, or use “Ban rule…” on a message.')));
+    st.rules.forEach(r=>{
+      const edit=el('a',{class:'iplink'},'edit');edit.onclick=()=>banRuleEditor(r,draw);
+      const del=el('a',{class:'iplink',style:'margin-left:.5rem;color:var(--critical)'},'delete');
+      del.onclick=async()=>{if(!confirm(`Delete match rule #${r.id}?`))return;const res=await api('/api/autoban/rules',{method:'PUT',body:{rules:st.rules.filter(x=>x.id!==r.id)}});toast(res&&res.ok?'Rule deleted':(res&&res.error)||'failed');draw();};
+      rt.append(el('tr',{},el('td',{},'#'+r.id),el('td',{},r.enabled?'✓':'—'),el('td',{},r.field+' '+r.matcher),el('td',{style:'word-break:break-all'},el('code',{},r.pattern)),el('td',{},r.block?'✓':'—'),el('td',{},r.ban_secs?abFmt(r.ban_secs):'—'),el('td',{class:'muted'},r.comment||''),el('td',{style:'white-space:nowrap'},edit,del)));
+    });
+    const add=el('button',{class:'act plain'},'Add match rule');add.onclick=()=>banRuleEditor({id:0,enabled:true,field:'subject',matcher:'contains',pattern:'',block:true,ban_secs:86400,comment:''},draw);
+    holder.append(el('h3',{style:'font-size:.95rem;margin:.9rem 0 .3rem'},'Match rules'),rt,el('div',{class:'ctl'},add));
+    // dry run + history
+    const out=el('pre',{class:'log',style:'display:none;max-height:14rem'});
+    const dry=el('button',{class:'act plain'},'Dry run now');
+    dry.onclick=async()=>{dry.disabled=true;out.style.display='';out.textContent='Checking the log…';const r=await api('/api/autoban/run',{method:'POST',body:{dry_run:true}});dry.disabled=false;out.textContent=(r&&r.transcript||[r&&r.error||'no response']).join('\n');};
+    const last=st.last_run?new Date((+st.last_run)*1000).toLocaleString():'never';
+    holder.append(el('h3',{style:'font-size:.95rem;margin:.9rem 0 .3rem'},'Recent auto-bans'),el('div',{class:'muted',style:'font-size:.8rem'},'Last run: '+last),el('div',{class:'ctl'},dry),out);
+    const hist=await api('/api/autoban/history?limit=50');
+    const ht=el('table');
+    ht.append(el('tr',{},el('th',{},'When'),el('th',{},'IP'),el('th',{},'Why'),el('th',{},'For'),el('th',{},'Expires'),el('th',{},'')));
+    if(!hist||!hist.length)ht.append(el('tr',{},el('td',{colspan:'6',class:'muted'},'No auto-bans yet.')));
+    (hist||[]).forEach(b=>{
+      const un=el('a',{class:'iplink'},'unban');
+      un.onclick=async()=>{const r=await api('/api/ip/unban',{method:'POST',body:{target:b.ip}});toast(r&&r.ok?b.ip+' unbanned':'failed');};
+      ht.append(el('tr',{},el('td',{class:'muted',style:'white-space:nowrap'},b.banned_at),el('td',{},ipLink(b.ip)),el('td',{},b.detail.replace(/^MSFE-NG auto-ban: /,'')),el('td',{},abFmt(b.seconds)),el('td',{class:'muted'},b.expires_at),el('td',{},un)));
+    });
+    holder.append(ht);
+  }
+  draw();
+}
+
 // ---- message tools: daily summary, Bayes status, SpamAssassin lint ----------
 async function showDailySummary(){
   const m=modal('Daily summary');
@@ -722,7 +872,7 @@ async function renderMessages(){
         el('td',{class:'num'},m.score||'0'),
         el('td',{},el('div',{},senderLink(m.from)),el('div',{class:'muted'},m.to,' ',deliveryTestLink(m.to))),
         el('td',{style:'white-space:nowrap'},m.clientip?ipLink(m.clientip):''),
-        el('td',{},m.subject),
+        el('td',{},m.subject,' ',Object.assign(el('a',{class:'iplink',title:'Block messages like this one and/or ban their source'},'ban rule'),{onclick:e=>{e.stopPropagation();banRuleFromMessage(m);}})),
         el('td',{class:'num'},fmtSize(m.size)),
         el('td',{},badgeFor(m,true)));
       tr.onclick=()=>showDetail(m.id);
@@ -741,11 +891,13 @@ async function renderMessages(){
 async function renderMessageView(id){
   const v=$('#view');v.innerHTML='';
   const back=Object.assign(el('button',{class:'act plain'},'← Back to messages'),{onclick:()=>{location.hash='';renderMessages();}});
-  v.append(el('div',{class:'ctl'},back));
+  const banBtn=el('button',{class:'act plain',style:'display:none'},'Ban rule…');
+  v.append(el('div',{class:'ctl'},back,banBtn));
   const card=el('div',{class:'card'},el('h2',{},'Message '+id),el('div',{class:'muted'},'Loading…'));v.append(card);
   const d=await api('/api/messages/detail?id='+encodeURIComponent(id));
   card.innerHTML='';
   if(!d||!d.available){card.append(el('div',{class:'empty'},'No detail available (the message may have aged out of the log).'));return;}
+  banBtn.style.display='';banBtn.onclick=()=>banRuleFromMessage({subject:d.subject,from:d.from,clientip:d.clientip});
 
   let lbl='Clean';
   if(d.virus||d.nameinfected||d.otherinfected)lbl='Infected';
@@ -3005,6 +3157,15 @@ async function renderConfig(){
     toast(r&&r.ok?'Rules saved — the 5-minute monitor applies them automatically':'Save failed');
   };
   cc.append(lastInfo,cgrid,el('div',{class:'ctl'},cSave,cPrev,cRun),cleanOut);
+
+  // Auto-ban of spam sources in csf: thresholds per severity, match rules,
+  // dry run, history. Thresholds are config keys (conf/apply); the match
+  // rules go through /api/autoban/rules (validated by the engine's perl).
+  const ab=el('div',{class:'card'},el('h2',{},'Auto-ban spam sources (csf)'),
+    el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},
+      'Every minute, the sources of newly logged spam are banned temporarily in csf (csf -td) when a rule below fires. Count 1 bans on the first message. Never banned: your own and private addresses, anything in csf.allow, an IP already denied, and an IP that also delivered clean mail in the same window (a shared provider with one false positive). Match rules also block delivery: a blocking rule scores 100, so the message follows the domain\u2019s high-spam action and is never delivered.'));
+  maint.append(ab);
+  renderAutobanCard(ab,cconf);
 
   // Telegram alerts: bot credentials + thresholds + test button
   const tc=el('div',{class:'card'},el('h2',{},'Telegram alerts'),

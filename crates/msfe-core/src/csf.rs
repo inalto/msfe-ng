@@ -15,6 +15,116 @@ fn csf_path() -> String {
     std::env::var("MSFE_NG_CSF_BIN").unwrap_or_else(|_| CSF_BIN.to_string())
 }
 
+// ---- csf's own lists, read from its files -----------------------------------
+//
+// `csf -g` walks iptables and takes ~13 s on a host with a long csf.deny —
+// not for a minute cron. The lists themselves are plain files: one entry per
+// line (`ip`, `ip/cidr`, `ip # comment`, `Include /other/file`) and, for
+// temporary blocks, `time|ip|port|inout|timeout|message`.
+
+/// Where csf keeps its lists (`/etc/csf` and `/var/lib/csf`; tests point
+/// `MSFE_NG_CSF_ROOT` at a fixture).
+fn csf_root() -> std::path::PathBuf {
+    std::env::var("MSFE_NG_CSF_ROOT")
+        .unwrap_or_else(|_| "/".to_string())
+        .into()
+}
+
+/// What csf's lists say about `ip`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListState {
+    /// csf.allow or csf.ignore: never to be blocked.
+    Allowed,
+    /// csf.deny or a temporary block: already blocked.
+    Denied,
+    Unlisted,
+}
+
+/// Entries of a csf list file, `Include`s followed (one level, relative to
+/// the root), comments stripped.
+fn list_entries(root: &std::path::Path, file: &str, depth: u8) -> Vec<String> {
+    let path = root.join(file.trim_start_matches('/'));
+    let mut out = Vec::new();
+    for line in std::fs::read_to_string(path).unwrap_or_default().lines() {
+        let t = line.split('#').next().unwrap_or("").trim();
+        if t.is_empty() {
+            continue;
+        }
+        if let Some(inc) = t.strip_prefix("Include ") {
+            if depth < 2 {
+                out.extend(list_entries(root, inc.trim(), depth + 1));
+            }
+            continue;
+        }
+        // "tcp|in|d=22|s=1.2.3.4" advanced entries: take the s= address
+        let entry = t
+            .split('|')
+            .find_map(|f| f.strip_prefix("s="))
+            .unwrap_or(t)
+            .to_string();
+        out.push(entry);
+    }
+    out
+}
+
+/// Does a list entry (`ip` or `ip/cidr`) cover `ip`? IPv4 CIDRs are
+/// evaluated; IPv6 only exact.
+pub fn entry_covers(entry: &str, ip: &str) -> bool {
+    if entry == ip {
+        return true;
+    }
+    let Some((net, bits)) = entry.split_once('/') else {
+        return false;
+    };
+    let (Ok(net), Ok(ip)) = (
+        net.parse::<std::net::Ipv4Addr>(),
+        ip.parse::<std::net::Ipv4Addr>(),
+    ) else {
+        return false;
+    };
+    let Ok(bits) = bits.parse::<u32>() else {
+        return false;
+    };
+    if bits > 32 {
+        return false;
+    }
+    let mask = if bits == 0 {
+        0
+    } else {
+        u32::MAX << (32 - bits)
+    };
+    (u32::from(net) & mask) == (u32::from(ip) & mask)
+}
+
+/// csf's verdict on `ip` from its files: allow/ignore first, then deny and
+/// the temporary blocks.
+pub fn list_state(ip: &str) -> ListState {
+    list_state_at(&csf_root(), ip)
+}
+
+pub fn list_state_at(root: &std::path::Path, ip: &str) -> ListState {
+    for f in ["/etc/csf/csf.allow", "/etc/csf/csf.ignore"] {
+        if list_entries(root, f, 0).iter().any(|e| entry_covers(e, ip)) {
+            return ListState::Allowed;
+        }
+    }
+    if list_entries(root, "/etc/csf/csf.deny", 0)
+        .iter()
+        .any(|e| entry_covers(e, ip))
+    {
+        return ListState::Denied;
+    }
+    let temp = std::fs::read_to_string(root.join("var/lib/csf/csf.tempban")).unwrap_or_default();
+    if temp
+        .lines()
+        .filter_map(|l| l.split('|').nth(1))
+        .any(|e| entry_covers(e.trim(), ip))
+    {
+        return ListState::Denied;
+    }
+    ListState::Unlisted
+}
+
 /// Normalize a client address as recorded by MailScanner/Exim, which may
 /// arrive as `[ip]`, `[ip]:port`, `ip:port` (IPv4) or bare — csf, DNS and our
 /// own queries all want the bare address.
@@ -300,6 +410,69 @@ pub fn reverse_dns(ip: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_state_reads_csf_files_with_includes_and_cidrs() {
+        let root = std::env::temp_dir().join(format!("msfe-csf-lists-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("etc/csf")).unwrap();
+        std::fs::create_dir_all(root.join("var/lib/csf")).unwrap();
+        std::fs::write(
+            root.join("etc/csf/csf.allow"),
+            "# comment\nInclude /etc/csf/cpanel.allow\n10.0.0.0/8 # office\ntcp|in|d=22|s=203.0.113.9\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("etc/csf/cpanel.allow"), "198.51.100.7\n").unwrap();
+        std::fs::write(root.join("etc/csf/csf.ignore"), "127.0.0.1\n").unwrap();
+        std::fs::write(
+            root.join("etc/csf/csf.deny"),
+            "192.0.2.1 # do not delete\n192.0.2.0/30\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("var/lib/csf/csf.tempban"),
+            "1758380000|192.0.2.200|*|in|3600|MSFE-NG auto-ban\n",
+        )
+        .unwrap();
+        assert_eq!(
+            list_state_at(&root, "198.51.100.7"),
+            ListState::Allowed,
+            "via Include"
+        );
+        assert_eq!(
+            list_state_at(&root, "10.20.30.40"),
+            ListState::Allowed,
+            "CIDR"
+        );
+        assert_eq!(
+            list_state_at(&root, "203.0.113.9"),
+            ListState::Allowed,
+            "advanced entry"
+        );
+        assert_eq!(
+            list_state_at(&root, "127.0.0.1"),
+            ListState::Allowed,
+            "ignore"
+        );
+        assert_eq!(list_state_at(&root, "192.0.2.1"), ListState::Denied);
+        assert_eq!(
+            list_state_at(&root, "192.0.2.3"),
+            ListState::Denied,
+            "deny CIDR"
+        );
+        assert_eq!(
+            list_state_at(&root, "192.0.2.200"),
+            ListState::Denied,
+            "temporary block"
+        );
+        assert_eq!(list_state_at(&root, "192.0.2.201"), ListState::Unlisted);
+        assert!(!entry_covers("10.0.0.0/33", "10.0.0.1"));
+        assert!(
+            entry_covers("2001:db8::1", "2001:db8::1")
+                && !entry_covers("2001:db8::/32", "2001:db8::1")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
     use std::sync::Mutex;
 
     // Two tests set/remove MSFE_NG_OWN_IPS; process env is shared across test
