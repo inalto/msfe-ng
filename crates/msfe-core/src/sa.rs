@@ -11,6 +11,172 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+// ---- upstream rules ----------------------------------------------------------
+//
+// SpamAssassin loads the upstream ruleset from `<local state dir>/<version>/
+// updates_spamassassin_org`, fetched by sa-update. Without it every scan runs
+// on the site rules alone (gauss: a CPAN SpamAssassin 4.0.2 whose 4.000002
+// dir had never been created — cPanel's nightly sa-update feeds its own
+// bundled 4.0.1 — so MailScanner scored with KAM + cPanel's 79 picked rules,
+// and `spamassassin -r`, which insists on rules, refused to report).
+
+/// Where the upstream rules for the SpamAssassin MailScanner loads stand.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RulesState {
+    /// `$Mail::SpamAssassin::VERSION` under the engine's perl (`4.000002`).
+    pub version: String,
+    /// `<local state dir>/<version>/updates_spamassassin_org.cf`.
+    pub updates_cf: PathBuf,
+    /// Age of that file in days, `None` when it does not exist.
+    pub age_days: Option<u64>,
+}
+
+/// Older than this and sa-update is not running.
+pub const RULES_STALE_DAYS: u64 = 30;
+
+fn sa_version(perl: &[String]) -> Option<String> {
+    let (interp, args) = perl.split_first()?;
+    let out = Command::new(interp)
+        .args(args)
+        .args([
+            "-MMail::SpamAssassin",
+            "-e",
+            "print $Mail::SpamAssassin::VERSION",
+        ])
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !v.is_empty()).then_some(v)
+}
+
+/// `SpamAssassin Local State Dir` from MailScanner.conf when set to a real
+/// path (the stock file carries `= # /var/lib/spamassassin`), else SA's own
+/// default.
+fn local_state_dir(cfg: &Config) -> PathBuf {
+    let conf = std::fs::read_to_string(&cfg.mailscanner_conf).unwrap_or_default();
+    mailscanner::get_directive(&conf, "SpamAssassin Local State Dir")
+        .map(str::trim)
+        .filter(|v| v.starts_with('/'))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/var/lib/spamassassin"))
+}
+
+/// The state under the engine's perl; `None` when Mail::SpamAssassin does
+/// not load there (the "available" check covers that).
+pub fn rules_state(cfg: &Config, perl: &[String]) -> Option<RulesState> {
+    let version = sa_version(perl)?;
+    Some(rules_state_at(&local_state_dir(cfg), &version, now_secs()))
+}
+
+pub fn rules_state_at(state_dir: &std::path::Path, version: &str, now: u64) -> RulesState {
+    let updates_cf = state_dir.join(version).join("updates_spamassassin_org.cf");
+    let age_days = std::fs::metadata(&updates_cf)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| now.saturating_sub(d.as_secs()) / 86_400);
+    RulesState {
+        version: version.to_string(),
+        updates_cf,
+        age_days,
+    }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// `(level ok?, fail-not-warn?, detail)` for the doctor.
+pub fn rules_verdict(s: &RulesState) -> (bool, bool, String) {
+    match s.age_days {
+        None => (
+            false,
+            true,
+            format!(
+                "MailScanner scans with the site rules only — the upstream ruleset for SpamAssassin {} was never fetched ({} missing)",
+                s.version,
+                s.updates_cf.display()
+            ),
+        ),
+        Some(d) if d > RULES_STALE_DAYS => (
+            false,
+            false,
+            format!(
+                "upstream ruleset for SpamAssassin {} is {d} days old — sa-update is not running",
+                s.version
+            ),
+        ),
+        Some(d) => (
+            true,
+            false,
+            format!(
+                "upstream ruleset for SpamAssassin {} updated {d} day(s) ago",
+                s.version
+            ),
+        ),
+    }
+}
+
+/// Fetch the upstream rules the way the engine's daily cron does: its own
+/// `ms-update-sa` (sa-update, sa-compile, MailScanner restart), else the
+/// sa-update beside the engine's perl and a reload. Returns what happened.
+pub fn update_rules(perl: &[String]) -> (bool, String) {
+    let ms = std::path::Path::new("/usr/sbin/ms-update-sa");
+    if ms.is_file() {
+        let ok = Command::new(ms)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|st| st.success());
+        return (
+            ok,
+            format!(
+                "ms-update-sa (sa-update, compile, MailScanner restart): {}",
+                if ok { "ok" } else { "FAILED" }
+            ),
+        );
+    }
+    // sa-update lives beside the perl that owns Mail::SpamAssassin
+    let sa_update = perl
+        .first()
+        .map(|p| std::path::Path::new(p).with_file_name("sa-update"))
+        .filter(|p| p.is_file())
+        .or_else(|| {
+            ["/usr/local/bin/sa-update", "/usr/bin/sa-update"]
+                .iter()
+                .map(PathBuf::from)
+                .find(|p| p.is_file())
+        });
+    let Some(sa_update) = sa_update else {
+        return (false, "no sa-update found".into());
+    };
+    let st = Command::new(&sa_update)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    // sa-update: 0 = updated, 1 = nothing new, >1 = error
+    let ok = st.as_ref().is_ok_and(|s| matches!(s.code(), Some(0 | 1)));
+    if ok && st.is_ok_and(|s| s.code() == Some(0)) {
+        crate::sync::reload_mailscanner();
+    }
+    (
+        ok,
+        format!(
+            "{}: {}",
+            sa_update.display(),
+            if ok {
+                "ok (MailScanner reloaded)"
+            } else {
+                "FAILED"
+            }
+        ),
+    )
+}
+
 /// The Bayes DB MailScanner scans with: `<SpamAssassin User State Dir>/bayes`
 /// from MailScanner.conf, or `None` when no state dir is set (sa-learn's own
 /// default then — root's `~/.spamassassin`, which the scanning children never
@@ -379,6 +545,31 @@ fn run_with_stdin(cmd: &str, args: &[&str], input: &[u8]) -> std::io::Result<(bo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // gauss: SpamAssassin 4.0.2 wanted /var/lib/spamassassin/4.000002, which
+    // never existed — only cPanel's 4.000001 did.
+    #[test]
+    fn upstream_rules_missing_stale_or_fresh() {
+        let root = std::env::temp_dir().join(format!("msfe-sarules-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("4.000001/updates_spamassassin_org")).unwrap();
+        std::fs::write(root.join("4.000001/updates_spamassassin_org.cf"), "").unwrap();
+        let now = now_secs();
+        let s = rules_state_at(&root, "4.000002", now);
+        assert_eq!(s.age_days, None);
+        let (ok, fail, d) = rules_verdict(&s);
+        assert!(!ok && fail, "{d}");
+        assert!(d.contains("never fetched") && d.contains("4.000002"), "{d}");
+        // the version that has rules
+        let s = rules_state_at(&root, "4.000001", now);
+        assert_eq!(s.age_days, Some(0));
+        assert!(rules_verdict(&s).0);
+        // stale
+        let s = rules_state_at(&root, "4.000001", now + 45 * 86_400);
+        let (ok, fail, d) = rules_verdict(&s);
+        assert!(!ok && !fail && d.contains("45 days old"), "{d}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
     use crate::Config;
 
     #[test]

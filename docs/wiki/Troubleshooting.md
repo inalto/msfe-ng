@@ -23,14 +23,32 @@ engine already set to `MTA = exim`; runs the phishing-list updater; `sync`
 when archive rules are missing; spool repair; starts MailScanner when it is
 wired and the startup latch is on but it is stopped; disables and parks a
 `MailScanner.service` whose binary is gone (a ConfigServer-era unit failing at
-every boot, kept under `/etc/msfe-ng/legacy-engine-etc`); takes the first
-configuration snapshot. Decisions are never made for you: the mailflow kill
+every boot, kept under `/etc/msfe-ng/legacy-engine-etc`); fetches the
+upstream SpamAssassin ruleset when it is missing or older than 30 days
+(*SpamAssassin upstream rules* — the engine's own `ms-update-sa`: sa-update,
+sa-compile, MailScanner restart); takes the first configuration snapshot. Decisions are never made for you: the mailflow kill
 switch, cPanel SpamAssassin, cPanel's own ClamAV pass in Exim (*cPanel virus
 scan in Exim (exiscan)* — `touch /etc/exiscandisable` and rebuild Exim to
 stop the double virus scan, or keep it to reject infected mail at SMTP time),
 the DNS resolver, database creation, enabling message logging and config
 paths stay listed with their fix. The installer runs `doctor --fix` at the end of every install and
 upgrade, and the guided migration runs it as its last step.
+
+## `spamassassin -r` says "no rules were found" / scores look thin
+
+SpamAssassin loads the upstream ruleset from `/var/lib/spamassassin/<its
+version>/updates_spamassassin_org`, written by `sa-update` for that exact
+version. A SpamAssassin installed from CPAN (`/usr/local/share/perl5`, version
+`4.000002` say) is not fed by cPanel's nightly `sa-update`, which serves its
+own bundled copy (`4.000001`): MailScanner then scans with the site rules
+alone (`/etc/mail/spamassassin`: KAM plus cPanel's few picked rules) and the
+`spamassassin` command, which insists on rules, refuses to report or learn.
+The doctor check *SpamAssassin upstream rules* fails on the missing directory
+and warns when it is over 30 days old; `doctor --fix` runs the engine's
+`ms-update-sa`. The RPM engine's daily cron keeps it updated afterwards.
+The `P0f.pm … IO/SigGuard.pm` lines in a learn transcript are cPanel's
+SpamAssassin plugin (`/etc/mail/spamassassin/P0f.cf`) failing to load under
+the system perl — noise, not a failure.
 
 ## A configuration change did not take effect
 

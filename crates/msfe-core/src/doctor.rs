@@ -449,6 +449,16 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
         },
         "dnf -y install spamassassin (or re-run msfe-ng engine install with MSFE_NG_ENGINE_FORCE=1)",
     ));
+    if let Some(rules) = crate::sa::rules_state(cfg, &lay.perl) {
+        let (ok, fail, detail) = crate::sa::rules_verdict(&rules);
+        out.push(check(
+            "SpamAssassin upstream rules",
+            ok,
+            if fail { Level::Fail } else { Level::Warn },
+            detail,
+            "msfe-ng doctor --fix (runs the engine's ms-update-sa: sa-update, compile, MailScanner restart)",
+        ));
+    }
     let clam = mailscanner::get_directive(&conf, "Virus Scanners")
         .map(|v| v.contains("clamd"))
         .unwrap_or(false);
@@ -1538,6 +1548,8 @@ pub enum Fix {
     ResolverStart,
     /// disable + park a MailScanner.service whose binary is gone.
     StaleUnit,
+    /// sa-update: the upstream ruleset is missing or stale.
+    SaUpdate,
     /// `snapshot export` — none taken yet.
     Snapshot,
 }
@@ -1582,6 +1594,7 @@ pub fn plan(checks: &[Check], engine_targets_exim: bool) -> Vec<Fix> {
             "MailScanner running" if wired && latch_on => Some(Fix::Start),
             "local DNS resolver answering" => Some(Fix::ResolverStart),
             "stale MailScanner service unit" => Some(Fix::StaleUnit),
+            "SpamAssassin upstream rules" => Some(Fix::SaUpdate),
             "configuration snapshot" => Some(Fix::Snapshot),
             _ => None,
         };
@@ -1682,6 +1695,10 @@ pub fn fix(cfg: &Config, config_file: &Path) -> Vec<String> {
                     Ok(lines) => done.extend(lines),
                     Err(e) => done.push(format!("stale unit: {e}")),
                 }
+            }
+            Fix::SaUpdate => {
+                let (_, line) = crate::sa::update_rules(&layout::resolve(cfg).perl);
+                done.push(line);
             }
             Fix::Snapshot => {
                 match crate::snapshot::export(cfg, config_file, crate::snapshot::Only::All, None) {
@@ -2238,6 +2255,10 @@ mod tests {
         assert_eq!(
             plan(&[chk("stale MailScanner service unit", Level::Warn)], false),
             vec![Fix::StaleUnit]
+        );
+        assert_eq!(
+            plan(&[chk("SpamAssassin upstream rules", Level::Fail)], false),
+            vec![Fix::SaUpdate]
         );
         assert!(plan(
             &[chk("cPanel virus scan in Exim (exiscan)", Level::Warn)],
