@@ -98,7 +98,15 @@ blocklists*, for what the install does.
 legacy `/usr/mailscanner` tree exists — see [Migration](Migration) for what it
 does, step by step.
 
-All of these run as **background jobs**: transient systemd units that survive the
+**Decommission ConfigServer MSFE** appears instead while something of
+`/usr/msfe` (or its cron entries, root's crontab lines, WHM registration) is
+left and the ConfigServer engine is gone: it removes the old front-end and
+only it, after packing all of it into `<backup_dir>/legacy-msfe-<time>.tar.gz`;
+the engine keeps scanning and nothing is restarted, so it runs at once rather
+than as a job — see [Migration](Migration), *Decommissioning ConfigServer
+MSFE*. CLI: `msfe-ng legacy decommission [--run]`.
+
+All the cards above it run as **background jobs**: transient systemd units that survive the
 daemon's own restart, logging to `/var/log/msfe-ng/jobs/<job>.log`. The job
 console under the card follows the log; reopening the tab while a job runs
 picks it up again. CLI: `msfe-ng upgrade [--check]`, `msfe-ng engine install`.
