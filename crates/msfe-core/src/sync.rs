@@ -239,10 +239,71 @@ pub fn run(
     // Keep MailScanner's Archive Mail directive in step with the generated
     // ruleset (no-op when nothing changed, so the sync cron cannot loop).
     let _ = crate::engine::apply_archive(cfg, policy_path);
+    // the admin's match rules, as a SpamAssassin site-rules file
+    let mut files_n = files.len();
+    if let Some(wrote) = write_match_rules(cfg, &dir)? {
+        files_n += 1;
+        if wrote {
+            changed += 1;
+        }
+    }
     Ok(SyncReport {
-        files: files.len(),
+        files: files_n,
         changed,
     })
+}
+
+/// The SpamAssassin file the match rules become.
+pub const MATCH_CF: &str = "msfe-ng-match.cf";
+
+/// Render the match rules into `<SpamAssassin Site Rules Dir>/msfe-ng-match.cf`.
+/// `Ok(None)` when there is no engine conf (nowhere to write); `Ok(Some(changed))`
+/// otherwise. When the file changed and `spamassassin` is on the PATH, the
+/// whole site config is linted; on failure the previous text is put back and
+/// the lint output returned as the error — a bad rule never goes live.
+pub fn write_match_rules(cfg: &Config, policy_dir: &Path) -> io::Result<Option<bool>> {
+    let conf = match std::fs::read_to_string(&cfg.mailscanner_conf) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // only where the conf names its site rules dir explicitly (the stock
+    // conf does): a fixture without one never touches a real /etc/mail
+    let Some(site) = crate::mailscanner::get_directive(&conf, "SpamAssassin Site Rules Dir")
+        .map(str::trim)
+        .filter(|v| v.starts_with('/'))
+        .map(Path::new)
+    else {
+        return Ok(None);
+    };
+    if !site.is_dir() {
+        return Ok(None);
+    }
+    let path = site.join(MATCH_CF);
+    let text = crate::autoban::sa_rules_text(&crate::autoban::load_match_rules(policy_dir));
+    let previous = std::fs::read_to_string(&path).ok();
+    if !atomic_write_if_changed(&path, text.as_bytes())? {
+        return Ok(Some(false));
+    }
+    if std::env::var("MSFE_NG_SKIP_SA_LINT").is_err() && which_spamassassin() {
+        let (ok, out) = crate::sa::lint_prefs(None);
+        if !ok {
+            match previous {
+                Some(p) => atomic_write(&path, p.as_bytes())?,
+                None => {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+            return Err(io::Error::other(format!(
+                "spamassassin --lint rejected the match rules (previous file restored): {out}"
+            )));
+        }
+    }
+    Ok(Some(true))
+}
+
+fn which_spamassassin() -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("spamassassin").is_file()))
 }
 
 /// Canonical rule lines a managed file is expected to contain, regenerated from
@@ -374,6 +435,60 @@ mod tests {
         assert_eq!(mode, 0o640, "rewrite must not widen credential file perms");
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "secret = 2\n");
         std::fs::remove_file(&p).unwrap();
+    }
+
+    #[test]
+    fn sync_writes_the_match_cf_into_the_site_rules_dir() {
+        let base = std::env::temp_dir().join(format!("msfe-matchcf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let site = base.join("sa");
+        std::fs::create_dir_all(&site).unwrap();
+        std::fs::create_dir_all(base.join("policy")).unwrap();
+        std::fs::write(
+            base.join("MailScanner.conf"),
+            format!("SpamAssassin Site Rules Dir = {}\n", site.display()),
+        )
+        .unwrap();
+        std::env::set_var("MSFE_NG_SKIP_SA_LINT", "1");
+        let cfg = Config {
+            mailscanner_conf: base.join("MailScanner.conf").display().to_string(),
+            ..Config::default()
+        };
+        let policy = base.join("policy");
+        // no rules: the banner alone, written once
+        assert_eq!(write_match_rules(&cfg, &policy).unwrap(), Some(true));
+        assert_eq!(write_match_rules(&cfg, &policy).unwrap(), Some(false));
+        let text = std::fs::read_to_string(site.join(MATCH_CF)).unwrap();
+        assert!(text.starts_with("# Managed by MSFE-NG"));
+        // a rule: rendered exactly as autoban renders it
+        let rules = crate::autoban::save_match_rules(
+            &policy,
+            &[crate::autoban::MatchRule {
+                id: 0,
+                enabled: true,
+                field: "subject".into(),
+                matcher: "contains".into(),
+                pattern: "win a prize".into(),
+                block: true,
+                ban_secs: 3600,
+                comment: String::new(),
+                created: String::new(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(write_match_rules(&cfg, &policy).unwrap(), Some(true));
+        assert_eq!(
+            std::fs::read_to_string(site.join(MATCH_CF)).unwrap(),
+            crate::autoban::sa_rules_text(&rules)
+        );
+        // no engine conf: nothing to write, no error
+        let none = Config {
+            mailscanner_conf: base.join("missing.conf").display().to_string(),
+            ..Config::default()
+        };
+        assert_eq!(write_match_rules(&none, &policy).unwrap(), None);
+        std::env::remove_var("MSFE_NG_SKIP_SA_LINT");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
