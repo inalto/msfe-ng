@@ -1207,6 +1207,21 @@
     text-decoration: underline;
     font-family: var(--font-mono);
   }
+  /* the delivery-test paper plane next to an address */
+  a.dtlink {
+    display: inline-block;
+    vertical-align: middle;
+    color: var(--muted);
+    cursor: pointer;
+    line-height: 0;
+  }
+  a.dtlink:hover {
+    color: var(--accent);
+  }
+  a.dtlink .dtico {
+    width: 0.95rem;
+    height: 0.95rem;
+  }
   .toast {
     position: fixed;
     bottom: 1rem;

@@ -307,11 +307,17 @@ async function showSaLint(){
 }
 
 // ---- sender: history and white/black listing --------------------------------
-// "test" link on a recipient: the Delivery test tab, run for that address
+// Delivery-test icon (the paper plane of the Delivery test tab) on an address:
+// the tab, run for that address. `addr` may be a comma list — the first counts.
 function deliveryTestLink(addr){
   const a=String(addr||'').split(',')[0].trim();
   if(!a.includes('@'))return el('span',{});
-  return Object.assign(el('a',{class:'iplink',title:'Run a delivery test for '+a+' (DNS, authentication, mail servers; the server audit when hosted here)'},'test'),{onclick:e=>{e.stopPropagation();deliveryTestFor(a);}});
+  const icon=document.createElementNS('http://www.w3.org/2000/svg','svg');
+  icon.setAttribute('viewBox','0 0 24 24');icon.setAttribute('fill','none');icon.setAttribute('stroke','currentColor');icon.setAttribute('stroke-width','1.7');icon.setAttribute('aria-hidden','true');icon.setAttribute('class','dtico');
+  const path=document.createElementNS('http://www.w3.org/2000/svg','path');
+  path.setAttribute('stroke-linecap','round');path.setAttribute('stroke-linejoin','round');path.setAttribute('d','M6 12 3.269 3.125A59.769 59.769 0 0 1 21.485 12 59.768 59.768 0 0 1 3.27 20.875L5.999 12Zm0 0h7.5');
+  icon.append(path);
+  return Object.assign(el('a',{class:'dtlink',role:'button','aria-label':'Delivery test for '+a,title:'Run a delivery test for '+a+' (DNS, authentication, mail servers; the server audit when hosted here)'},icon),{onclick:e=>{e.stopPropagation();deliveryTestFor(a);}});
 }
 function senderLink(addr){
   const a=String(addr||'').trim();
@@ -1987,8 +1993,8 @@ function queueCard(v,which,title){
           m.frozen?el('span',{class:'badge',style:'background:var(--serious);margin-left:.4rem'},'frozen'):'',
           m.parsed?'':el('span',{class:'badge',style:'background:var(--muted);margin-left:.4rem',title:'spool header could not be parsed — only age and size are known'},'?')),
         scoreCell(m),
-        el('td',{},m.bounce?el('span',{class:'badge',style:'background:var(--ink2)',title:'null envelope sender — a bounce, or spam sent so it can never be bounced back'},'∅ bounce'):(m.sender||'—')),
-        el('td',{title:m.recipients.join(', ')},m.recipients[0]||'—',m.recipients.length>1?el('span',{class:'muted'},' +'+(m.recipients.length-1)):''),
+        el('td',{},m.bounce?el('span',{class:'badge',style:'background:var(--ink2)',title:'null envelope sender — a bounce, or spam sent so it can never be bounced back'},'∅ bounce'):el('span',{},m.sender||'—',' ',deliveryTestLink(m.sender||''))),
+        el('td',{title:m.recipients.join(', ')},m.recipients[0]||'—',m.recipients.length>1?el('span',{class:'muted'},' +'+(m.recipients.length-1)):'',' ',deliveryTestLink(m.recipients[0]||'')),
         el('td',{style:'max-width:16rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap',title:m.subject||''},m.subject||el('span',{class:'muted'},'—')),
         el('td',{},...['headers','body','log'].map(w=>Object.assign(el('button',{class:'act plain',style:'margin-right:.25rem'},w),{onclick:()=>msgView(m.id,w)}))),
         el('td',{},

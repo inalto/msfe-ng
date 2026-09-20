@@ -18,6 +18,9 @@ never auto-selected.
 - **Filters** — All, Frozen, Bounces, Spam ≥5 — and a free-text search over
   sender, recipient, subject and id.
 - **headers / body / log** — view that message from the spool.
+- The **paper-plane icon** next to a sender or recipient runs a
+  [Delivery test](Delivery-test) for that address — handy for a message that
+  keeps deferring.
 - **Deliver** — force delivery now (works for frozen messages; from the
   MailScanner queue it *bypasses scanning*, and says so). **Delete** — remove
   permanently.

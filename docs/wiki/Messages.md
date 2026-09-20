@@ -61,10 +61,12 @@ be trusted) and the full **headers**.
 
 ## Delivery test from a row
 
-The small **test** link next to the recipient runs a [Delivery test](Delivery-test)
-for that address: it opens the tab with the address filled in and starts the
-run at once, with the server audit included when the domain is hosted here —
-the quickest way from "this message did not arrive" to the report.
+The small **paper-plane icon** next to the recipient runs a
+[Delivery test](Delivery-test) for that address: it opens the tab with the
+address filled in and starts the run at once, with the server audit included
+when the domain is hosted here — the quickest way from "this message did not
+arrive" to the report. The same icon sits next to senders and recipients in
+the [Queues](Queues) tab.
 
 ## Ban rule from a message
 
