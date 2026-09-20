@@ -12,7 +12,8 @@ every tab is described on its own wiki page.
 - **Health dot** (bottom) — mirrors `msfe-ng doctor`, refreshed every minute:
   green *all systems ok*, amber *N notices*, red *N problems*.
 - **Theme** — cycles Auto → Light → Dark; remembered in the browser.
-- **Version** — the running daemon's version.
+- **Version** — the running daemon's version, with links to the project on
+  GitHub, this wiki and the issue tracker.
 
 ## The doctor banner
 

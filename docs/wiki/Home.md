@@ -20,14 +20,14 @@ the discontinued ConfigServer MSFE.
 - [Dashboard](Dashboard)
 - [Settings](Settings) — global scanning policy, retention, interface & release preferences
 - [Lists](Lists) — system-wide whitelist / blacklist
-- [Messages](Messages) — message log, search, message view, learn, release, sender & IP actions
+- [Messages](Messages) — message log, search, message view, learn, release, sender & IP actions, ban rule from a message
 - [Rules](Rules) — custom MailScanner rules and the live ruleset files
 - [Service](Service) — MailScanner control, Exim wiring, health check, mail queues, updates, private DNS resolver, migration
 - [Logs](Logs) — tail the mail log / Exim mainlog, search the whole log file
 - [Queues](Queues) — both Exim queues, bulk delete/deliver, spool repair
 - [Delivery test](Delivery-test) — deliverability diagnostic for an address: DNS, SPF/DKIM/DMARC, MX and TLS, MTA-STS/DANE, blocklists; cPanel audit, message/bounce analysis, diagnostic inbox, test message, monitors
 - [Quarantine](Quarantine) — what is on disk, purge
-- [Config](Config) — every MailScanner configuration file with validation, history and a tester; snapshots; DB & Bayes maintenance, queue auto-clean, Telegram alerts
+- [Config](Config) — every MailScanner configuration file with validation, history and a tester; snapshots; DB & Bayes maintenance, queue auto-clean, auto-ban of spam sources (csf) and match rules, Telegram alerts
 
 **Other**
 - [End-user panel](End-user-panel) — what account owners see in cPanel
