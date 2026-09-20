@@ -9,6 +9,7 @@
 //! but no original code is copied. See CONTRIBUTING.md.
 
 pub mod authchecks;
+pub mod autoban;
 pub mod b64;
 pub mod civil;
 pub mod confcatalog;

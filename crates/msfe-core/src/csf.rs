@@ -175,6 +175,33 @@ pub fn ban(
     restart: bool,
     force: bool,
 ) -> ControlOutcome {
+    ban_for(
+        target,
+        comment,
+        hours.map(|h| h.clamp(1, 8760) as u64 * 3600),
+        restart,
+        force,
+    )
+}
+
+/// A temporary block in seconds (`csf -td`), as the auto-ban uses it.
+pub fn ban_secs(target: &str, comment: &str, secs: u64) -> ControlOutcome {
+    ban_for(
+        target,
+        comment,
+        Some(secs.clamp(60, 365 * 86_400)),
+        false,
+        false,
+    )
+}
+
+fn ban_for(
+    target: &str,
+    comment: &str,
+    secs: Option<u64>,
+    restart: bool,
+    force: bool,
+) -> ControlOutcome {
     let mut transcript = Vec::new();
     if !available() {
         return ControlOutcome {
@@ -189,11 +216,11 @@ pub fn ban(
         };
     }
     let comment = sanitize_comment(comment);
-    let secs;
-    let args: Vec<&str> = match hours {
-        Some(h) => {
-            secs = (h.clamp(1, 8760) as u64 * 3600).to_string();
-            vec!["-td", target, &secs, &comment]
+    let secs_text;
+    let args: Vec<&str> = match secs {
+        Some(s) => {
+            secs_text = s.to_string();
+            vec!["-td", target, &secs_text, &comment]
         }
         None => vec!["-d", target, &comment],
     };

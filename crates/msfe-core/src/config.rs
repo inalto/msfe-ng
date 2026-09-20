@@ -82,6 +82,21 @@ pub struct Config {
     /// Remove messages whose spool spam score is at least this (0 = off).
     pub queue_clean_spam_score: f64,
 
+    // ---- auto-ban of spam sources in csf (every rule ships OFF) --------------
+    /// Ban an IP after `autoban_high_count` high-spam messages within
+    /// `autoban_high_window_secs`, for `autoban_high_ban_secs`.
+    pub autoban_high_enabled: bool,
+    pub autoban_high_count: u32,
+    pub autoban_high_window_secs: u64,
+    pub autoban_high_ban_secs: u64,
+    /// The same for (low-scoring) spam.
+    pub autoban_spam_enabled: bool,
+    pub autoban_spam_count: u32,
+    pub autoban_spam_window_secs: u64,
+    pub autoban_spam_ban_secs: u64,
+    /// One Telegram line per auto-ban (when Telegram is configured).
+    pub autoban_telegram: bool,
+
     // ---- Telegram alerts (empty token disables everything) -------------------
     /// Telegram bot token (from @BotFather). Secret: never exposed via the API.
     pub telegram_bot_token: String,
@@ -95,6 +110,14 @@ pub struct Config {
     pub alert_burst_per_hour: u32,
     /// Minimum minutes between repeats of the same alert.
     pub alert_cooldown_mins: u32,
+}
+
+/// `true`/`yes`/`1` (case-insensitive) is on; anything else off.
+fn truthy(v: &str) -> bool {
+    matches!(
+        v.trim().to_ascii_lowercase().as_str(),
+        "true" | "yes" | "1" | "on"
+    )
 }
 
 impl Default for Config {
@@ -137,6 +160,15 @@ impl Default for Config {
             queue_clean_frozen_hours: 0,
             queue_clean_bounce_hours: 0,
             queue_clean_spam_score: 0.0,
+            autoban_high_enabled: false,
+            autoban_high_count: 1,
+            autoban_high_window_secs: 600,
+            autoban_high_ban_secs: 86_400,
+            autoban_spam_enabled: false,
+            autoban_spam_count: 3,
+            autoban_spam_window_secs: 3_600,
+            autoban_spam_ban_secs: 7_200,
+            autoban_telegram: true,
             telegram_bot_token: String::new(),
             telegram_chat_id: String::new(),
             alert_queue_size: 0,
@@ -232,6 +264,17 @@ impl Config {
                 "queue_clean_frozen_hours" => c.queue_clean_frozen_hours = v.parse().unwrap_or(0),
                 "queue_clean_bounce_hours" => c.queue_clean_bounce_hours = v.parse().unwrap_or(0),
                 "queue_clean_spam_score" => c.queue_clean_spam_score = v.parse().unwrap_or(0.0),
+                "autoban_high_enabled" => c.autoban_high_enabled = truthy(&v),
+                "autoban_high_count" => c.autoban_high_count = v.parse().unwrap_or(1).max(1),
+                "autoban_high_window_secs" => c.autoban_high_window_secs = v.parse().unwrap_or(600),
+                "autoban_high_ban_secs" => c.autoban_high_ban_secs = v.parse().unwrap_or(86_400),
+                "autoban_spam_enabled" => c.autoban_spam_enabled = truthy(&v),
+                "autoban_spam_count" => c.autoban_spam_count = v.parse().unwrap_or(3).max(1),
+                "autoban_spam_window_secs" => {
+                    c.autoban_spam_window_secs = v.parse().unwrap_or(3_600)
+                }
+                "autoban_spam_ban_secs" => c.autoban_spam_ban_secs = v.parse().unwrap_or(7_200),
+                "autoban_telegram" => c.autoban_telegram = truthy(&v),
                 "telegram_bot_token" => c.telegram_bot_token = v,
                 "telegram_chat_id" => c.telegram_chat_id = v,
                 "alert_queue_size" => c.alert_queue_size = v.parse().unwrap_or(0),
@@ -309,6 +352,39 @@ impl Config {
                 "queue_clean_spam_score".into(),
                 Json::Num(format!("{}", self.queue_clean_spam_score)),
             ),
+            (
+                "autoban_high_enabled".into(),
+                Json::Bool(self.autoban_high_enabled),
+            ),
+            (
+                "autoban_high_count".into(),
+                Json::Int(self.autoban_high_count as i64),
+            ),
+            (
+                "autoban_high_window_secs".into(),
+                Json::Int(self.autoban_high_window_secs as i64),
+            ),
+            (
+                "autoban_high_ban_secs".into(),
+                Json::Int(self.autoban_high_ban_secs as i64),
+            ),
+            (
+                "autoban_spam_enabled".into(),
+                Json::Bool(self.autoban_spam_enabled),
+            ),
+            (
+                "autoban_spam_count".into(),
+                Json::Int(self.autoban_spam_count as i64),
+            ),
+            (
+                "autoban_spam_window_secs".into(),
+                Json::Int(self.autoban_spam_window_secs as i64),
+            ),
+            (
+                "autoban_spam_ban_secs".into(),
+                Json::Int(self.autoban_spam_ban_secs as i64),
+            ),
+            ("autoban_telegram".into(), Json::Bool(self.autoban_telegram)),
             // the bot token is a secret: expose only whether it is set
             (
                 "telegram_configured".into(),
