@@ -37,9 +37,12 @@ including straight from a message row.
    (above any high-spam threshold → the domain's high-spam action, i.e. never
    delivered), 0.01 when it only bans (tagged in the report, verdict
    unchanged). Whitelisted mail skips SpamAssassin and therefore match rules.
-   The generated file is linted (`spamassassin --lint` under the engine's
-   perl) before it replaces the live one; a rule that breaks lint is refused
-   at save time with the lint text.
+   A pattern is validated at save time exactly as SpamAssassin will compile
+   it — `perl -e 'qr/…/i'` under the engine's perl (`autoban::check_regex`)
+   — so a bad regex is refused with perl's message before anything is
+   written. After writing, `sync` runs `spamassassin --lint` (`sa::lint_prefs`
+   style, whole site config); on failure the previous file is restored and
+   the error reported.
 3. **Safeguards are fixed, not knobs**: never ban own/loopback/private
    addresses, an address in `csf.allow`/`csf.ignore` or already denied
    (`csf -g`), an address that also delivered clean mail in the rule's window
@@ -120,11 +123,12 @@ prints `1d`, `2h`, `10m`. Helper `format_secs`/`parse_secs` (pure, tested).
 - `PUT /api/autoban/settings` (thresholds), `PUT /api/autoban/rules`
   (whole list; lint failure → 400 with text and nothing written; success →
   `sync` and reload only if the `.cf` changed).
-- `POST /api/autoban/test` `{field, match, pattern}` → the last 200 subjects
-  / senders from `maillog`, which would match (regex evaluated in Rust with a
-  conservative subset: `contains` exactly; `regex` via the `regex` crate —
-  not identical to SpamAssassin's PCRE, said so in the UI; lint remains the
-  authority).
+- `POST /api/autoban/test` `{field, match, pattern}` → validates the pattern
+  (`check_regex`) and, for `subject`/`from`/`to`, lists which of the last 200
+  messages in `maillog` would match — evaluated by the same perl `qr//` over
+  the stored subject/sender (one perl run, the values on stdin), so the
+  answer is SpamAssassin's own regex engine; `header:`/`body` rules are only
+  validated (the DB holds no bodies or arbitrary headers).
 - `POST /api/autoban/run` `{dry_run}` → the report.
 - `GET /api/autoban/history?limit=50`.
 - Existing `POST /api/ip/unban` for the unban button.
@@ -163,9 +167,9 @@ Pure: `evaluate` (threshold reached / not; window edges; clean-mail
 exemption; dedup; match rule immediate; longest ban wins; disabled rules),
 `sa_rules_text` and `pattern_to_regex` (escaping, delimiters, header names),
 `parse_secs/format_secs`, match-rule JSON round trip and id allocation.
-Integration: `sync` writes and lints the `.cf` on a fixture (lint stubbed by
-`MSFE_NG_SA_LINT=skip` as the conf tester does); CLI `autoban status` with
-nothing enabled; migration 0004 applied by `db-migrate --status`.
+Integration: `sync` writes the `.cf` on a fixture (lint skipped when no
+`spamassassin` binary is on the PATH, reported as such); CLI `autoban status`
+with nothing enabled; migration 0004 listed by `db-migrate --status`.
 
 ## Out of scope
 
