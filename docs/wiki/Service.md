@@ -31,7 +31,14 @@ the right.
   back on. An account can still re-enable Spam Filters in cPanel — the
   status line and the doctor check *cPanel SpamAssassin double scan* show it
   (remove the *Spam Filters* feature in WHM → Feature Manager to prevent
-  that). CLI: `msfe-ng exim <enable|disable>-cpanel-spamassassin`.
+  that). Two WHM switches sit above the per-account flags and are honoured:
+  the *Apache SpamAssassin* service off in *Service Manager*
+  (`/etc/spamddisable` — Exim skips spamd for everyone) and *Enable Apache
+  SpamAssassin spam filter* off in *Tweak Settings* (`skipspamassassin=1` —
+  the feature is gone, cPanel's API refuses to touch it). With either off
+  the status line and the doctor report *off server-wide*, stale
+  `.spamassassinenable` flags left in account homes are ignored, and the
+  button does nothing. CLI: `msfe-ng exim <enable|disable>-cpanel-spamassassin`.
 - **Update rules now** — runs a sync immediately (also every 10 min by cron).
 - **Wire Exim → MailScanner / Unwire** — adds (or removes) the Exim named queue
   that holds incoming mail for scanning. **Preview wiring (dry-run)** prints

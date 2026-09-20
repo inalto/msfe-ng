@@ -1081,7 +1081,8 @@ fn route_task(ctx: &Ctx, res: &Results) -> (Vec<Check>, Vec<Task>) {
         }),
     });
     let sa = crate::mailflow::cpanel_sa_state_at(&cp.root);
-    let sa_on = sa.forced_on || sa.accounts_on.iter().any(|u| u == &user);
+    let sa_on =
+        !sa.off_server_wide() && (sa.forced_on || sa.accounts_on.iter().any(|u| u == &user));
     if sa_on && method.is_some() && ms_on {
         out.push(Check::new("route.cpanel_sa", S, cat, Verdict::Warn, Severity::Low, "cPanel's SpamAssassin scans too (double scan)", "mail is scored twice — by MailScanner and by cPanel's Spam Filters; the second pass adds headers and time and can quarantine what the first already handled").fix(Fix {
             summary: "Turn off cPanel's Spam Filters for the account (MailScanner does the job)".into(),
@@ -1097,10 +1098,16 @@ fn route_task(ctx: &Ctx, res: &Results) -> (Vec<Check>, Vec<Task>) {
             Severity::Info,
             if sa_on {
                 "cPanel's Spam Filters are on"
+            } else if sa.off_server_wide() {
+                "cPanel's SpamAssassin is off server-wide"
             } else {
                 "cPanel's Spam Filters are off for this account"
             },
-            if sa.forced_on {
+            if sa.service_disabled {
+                "the Apache SpamAssassin service is off in WHM → Service Manager; Exim skips it for every account"
+            } else if sa.feature_disabled {
+                "the spam filter is off in WHM → Tweak Settings; the feature does not exist for any account"
+            } else if sa.forced_on {
                 "forced on for every account (/etc/global_spamassassin_enable)"
             } else {
                 "per-account setting"
@@ -1751,8 +1758,10 @@ fn limit_task(ctx: &Ctx, res: &Results) -> (Vec<Check>, Vec<Task>) {
     // cPanel SpamAssassin per-account settings
     if let Some(a) = &acct {
         let home = cp.root.join(a.home.strip_prefix("/").unwrap_or(&a.home));
-        let sa_on = home.join(".spamassassinenable").exists()
-            || cp.exists("/etc/global_spamassassin_enable");
+        let sa = crate::mailflow::cpanel_sa_state_at(&cp.root);
+        let sa_on = !sa.off_server_wide()
+            && (home.join(".spamassassinenable").exists()
+                || cp.exists("/etc/global_spamassassin_enable"));
         if sa_on {
             let prefs =
                 std::fs::read_to_string(home.join(".spamassassin/user_prefs")).unwrap_or_default();

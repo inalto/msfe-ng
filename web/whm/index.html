@@ -1030,7 +1030,8 @@ async function renderService(){
     // cPanel's own SpamAssassin runs in Exim before MailScanner: a double scan
     const cs=s.cpanel_sa;
     if(cs){
-      const txt=cs.forced_on?'cPanel SpamAssassin forced ON for every account (double scan)'
+      const txt=cs.off_server_wide?`cPanel SpamAssassin off server-wide (${cs.service_disabled?'Service Manager':'Tweak Settings'})${cs.accounts_on?` — stale flag on ${cs.accounts_on} account(s) ignored`:''}`
+        :cs.forced_on?'cPanel SpamAssassin forced ON for every account (double scan)'
         :cs.accounts_on?`cPanel SpamAssassin on for ${cs.accounts_on} account(s) (double scan)`
         :'cPanel SpamAssassin off for every account — MailScanner is the only spam scanner';
       stat.append(el('span',{},el('span',{class:'dot',style:'background:'+(cs.would_scan?'var(--warning)':'var(--good)')}),txt));

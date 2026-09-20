@@ -75,11 +75,19 @@ fn toggle_wiring_fragment(enabled: bool) -> io::Result<()> {
 // cPanel's Exim runs Apache SpamAssassin (spamd) from its DATA ACL before the
 // message ever reaches MailScanner, when `/etc/global_spamassassin_enable`
 // exists (WHM "Apache SpamAssassin: Forced Global ON") or when the account's
-// home holds `.spamassassinenable` (cPanel → Spam Filters). That ACL has no
-// off switch: with MailScanner scoring every message it is a second scan
-// with its own threshold and its own +spam folder. Turning it off therefore
-// means turning Spam Filters off per account — through cPanel's own API, so
-// cPanel's bookkeeping stays right — and remembering who had it on.
+// home holds `.spamassassinenable` (cPanel → Spam Filters). Two server-wide
+// switches sit above those flags (issue #9): every step of that ACL is
+// guarded by `condition = ${perl{spamd_is_available}}`, which is
+// `!-e /etc/spamddisable` (WHM → Service Manager → Apache SpamAssassin), and
+// the Tweak Setting "Enable Apache SpamAssassin spam filter" off
+// (`skipspamassassin=1` in /var/cpanel/cpanel.config) removes the feature —
+// spamd is killed, cPanel's UI hides Spam Filters and UAPI refuses to touch
+// them. Accounts created after that still get `.spamassassinenable`, so the
+// per-account flags alone overstate what Exim does. With MailScanner scoring
+// every message the ACL is a second scan with its own threshold and its own
+// +spam folder. Turning it off therefore means turning Spam Filters off per
+// account — through cPanel's own API, so cPanel's bookkeeping stays right —
+// and remembering who had it on.
 
 /// Where cPanel's files live (`/`; tests point it at a fixture tree, which
 /// also switches the per-account calls from `uapi` to plain file operations).
@@ -91,6 +99,12 @@ fn cpanel_root() -> PathBuf {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CpanelSa {
+    /// `/etc/spamddisable` — the Apache SpamAssassin service is off in WHM →
+    /// Service Manager; Exim's ACL skips spamd entirely.
+    pub service_disabled: bool,
+    /// `skipspamassassin=1` in cpanel.config — the Tweak Setting "Enable
+    /// Apache SpamAssassin spam filter" is off; the feature does not exist.
+    pub feature_disabled: bool,
     /// `/etc/global_spamassassin_enable` — every account, no opt-out.
     pub forced_on: bool,
     /// Accounts whose home has `.spamassassinenable`.
@@ -100,10 +114,23 @@ pub struct CpanelSa {
 }
 
 impl CpanelSa {
+    /// Is cPanel's SpamAssassin switched off above the per-account flags?
+    pub fn off_server_wide(&self) -> bool {
+        self.service_disabled || self.feature_disabled
+    }
+
     /// Would cPanel's Exim hand mail to spamd for at least one account?
     pub fn would_scan(&self) -> bool {
-        self.forced_on || !self.accounts_on.is_empty()
+        !self.off_server_wide() && (self.forced_on || !self.accounts_on.is_empty())
     }
+}
+
+/// `skipspamassassin=1` in `/var/cpanel/cpanel.config`.
+fn tweak_skipspamassassin(root: &Path) -> bool {
+    std::fs::read_to_string(root.join("var/cpanel/cpanel.config"))
+        .unwrap_or_default()
+        .lines()
+        .any(|l| l.trim() == "skipspamassassin=1")
 }
 
 fn sa_record_path(root: &Path) -> PathBuf {
@@ -141,6 +168,8 @@ pub fn cpanel_sa_state_at(root: &Path) -> CpanelSa {
         .map(str::to_string)
         .collect();
     CpanelSa {
+        service_disabled: root.join("etc/spamddisable").exists(),
+        feature_disabled: tweak_skipspamassassin(root),
         forced_on: root.join("etc/global_spamassassin_enable").is_file(),
         accounts_on,
         restorable,
@@ -186,17 +215,25 @@ fn set_account_sa(root: &Path, user: &str, home: &Path, on: bool) -> io::Result<
 
 /// Turn cPanel's SpamAssassin off for every account (`enabled == false`),
 /// remembering them, or back on for the remembered ones (`true`). Never
-/// forces it globally on. Returns the accounts changed.
+/// forces it globally on. Returns the accounts changed. Turning off is a
+/// no-op while cPanel has it off server-wide: nothing scans, and with the
+/// feature gone UAPI would only answer "not enabled on this system".
 pub fn set_cpanel_sa(enabled: bool) -> io::Result<Vec<String>> {
-    let root = cpanel_root();
-    let homes = passwd_homes(&root);
-    let record = sa_record_path(&root);
+    set_cpanel_sa_at(&cpanel_root(), enabled)
+}
+
+pub fn set_cpanel_sa_at(root: &Path, enabled: bool) -> io::Result<Vec<String>> {
+    let homes = passwd_homes(root);
+    let record = sa_record_path(root);
     let mut changed = Vec::new();
+    if !enabled && cpanel_sa_state_at(root).off_server_wide() {
+        return Ok(changed);
+    }
     if enabled {
-        let restore = cpanel_sa_state_at(&root).restorable;
+        let restore = cpanel_sa_state_at(root).restorable;
         for user in restore {
             if let Some((_, home)) = homes.iter().find(|(u, _)| *u == user) {
-                set_account_sa(&root, &user, home, true)?;
+                set_account_sa(root, &user, home, true)?;
                 changed.push(user);
             }
         }
@@ -229,7 +266,7 @@ pub fn set_cpanel_sa(enabled: bool) -> io::Result<Vec<String>> {
         }
         for (user, home) in &homes {
             if home.join(".spamassassinenable").is_file() {
-                set_account_sa(&root, user, home, false)?;
+                set_account_sa(root, user, home, false)?;
                 changed.push(user.clone());
             }
         }
@@ -237,7 +274,7 @@ pub fn set_cpanel_sa(enabled: bool) -> io::Result<Vec<String>> {
             if let Some(dir) = record.parent() {
                 std::fs::create_dir_all(dir)?;
             }
-            let mut all = cpanel_sa_state_at(&root).restorable;
+            let mut all = cpanel_sa_state_at(root).restorable;
             all.extend(changed.iter().cloned());
             all.sort();
             all.dedup();
@@ -249,6 +286,25 @@ pub fn set_cpanel_sa(enabled: bool) -> io::Result<Vec<String>> {
 
 /// Is mail scored twice? `(ok, detail)` for the doctor.
 pub fn cpanel_sa_verdict(state: &CpanelSa) -> (bool, String) {
+    if state.off_server_wide() {
+        let switch = match (state.service_disabled, state.feature_disabled) {
+            (true, true) => "the Apache SpamAssassin service is off in WHM → Service Manager and the spam filter is off in Tweak Settings",
+            (true, false) => "the Apache SpamAssassin service is off in WHM → Service Manager (/etc/spamddisable)",
+            _ => "the Apache SpamAssassin spam filter is off in WHM → Tweak Settings (skipspamassassin=1)",
+        };
+        let stale = if state.forced_on {
+            " — the Forced Global ON flag is ignored".to_string()
+        } else {
+            match state.accounts_on.len() {
+                0 => String::new(),
+                n => format!(" — the stale Spam Filters flag on {n} account(s) is ignored"),
+            }
+        };
+        return (
+            true,
+            format!("off server-wide: {switch}{stale}; MailScanner is the only spam scanner"),
+        );
+    }
     if state.forced_on {
         return (false, "Forced Global ON (/etc/global_spamassassin_enable) — every message is scored by cPanel's spamd before MailScanner scores it again".into());
     }
@@ -306,6 +362,82 @@ mod tests {
         let s = cpanel_sa_state_at(&root);
         assert!(s.forced_on && s.would_scan());
         assert!(cpanel_sa_verdict(&s).1.starts_with("Forced Global ON"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Issue #9: stale `.spamassassinenable` flags are not a double scan when
+    /// cPanel's SpamAssassin is off server-wide — Exim's ACL is gated on
+    /// `/etc/spamddisable` (WHM → Service Manager) and the Tweak Setting
+    /// (`skipspamassassin=1`) removes the feature altogether.
+    #[test]
+    fn server_wide_switches_override_stale_account_flags() {
+        let root = cpanel_fixture("serverwide");
+        std::fs::write(root.join("home/alice/.spamassassinenable"), "").unwrap();
+        std::fs::write(root.join("home/bob/.spamassassinenable"), "").unwrap();
+        assert!(
+            cpanel_sa_state_at(&root).would_scan(),
+            "baseline: flags count"
+        );
+
+        // Service Manager: Apache SpamAssassin disabled
+        std::fs::write(root.join("etc/spamddisable"), "").unwrap();
+        let s = cpanel_sa_state_at(&root);
+        assert!(s.service_disabled && !s.feature_disabled);
+        assert_eq!(s.accounts_on, vec!["alice", "bob"], "flags still reported");
+        assert!(!s.would_scan());
+        let (ok, d) = cpanel_sa_verdict(&s);
+        assert!(ok, "{d}");
+        assert!(
+            d.contains("Service Manager") && d.contains("2 account(s)"),
+            "{d}"
+        );
+        // forced-on cannot beat the service switch either
+        std::fs::write(root.join("etc/global_spamassassin_enable"), "").unwrap();
+        assert!(!cpanel_sa_state_at(&root).would_scan());
+        std::fs::remove_file(root.join("etc/global_spamassassin_enable")).unwrap();
+        std::fs::remove_file(root.join("etc/spamddisable")).unwrap();
+
+        // Tweak Settings: "Enable Apache SpamAssassin spam filter" off
+        std::fs::create_dir_all(root.join("var/cpanel")).unwrap();
+        std::fs::write(
+            root.join("var/cpanel/cpanel.config"),
+            "skipspambox=1\nskipspamassassin=1\n",
+        )
+        .unwrap();
+        let s = cpanel_sa_state_at(&root);
+        assert!(s.feature_disabled && !s.service_disabled);
+        assert!(!s.would_scan());
+        let (ok, d) = cpanel_sa_verdict(&s);
+        assert!(ok, "{d}");
+        assert!(d.contains("Tweak Settings"), "{d}");
+
+        // skipspamassassin=0 is the live default: flags count again
+        std::fs::write(
+            root.join("var/cpanel/cpanel.config"),
+            "skipspamassassin=0\n",
+        )
+        .unwrap();
+        let s = cpanel_sa_state_at(&root);
+        assert!(!s.feature_disabled && s.would_scan());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// With the feature off server-wide the per-account UAPI call fails
+    /// ("feature not enabled"), so the fix must not attempt it.
+    #[test]
+    fn set_cpanel_sa_is_a_no_op_when_off_server_wide() {
+        let root = cpanel_fixture("serverwide-noop");
+        std::fs::write(root.join("home/alice/.spamassassinenable"), "").unwrap();
+        std::fs::write(root.join("etc/spamddisable"), "").unwrap();
+        assert_eq!(
+            set_cpanel_sa_at(&root, false).unwrap(),
+            Vec::<String>::new()
+        );
+        assert!(
+            root.join("home/alice/.spamassassinenable").exists(),
+            "flag untouched"
+        );
+        assert!(!sa_record_path(&root).exists(), "nothing to restore");
         let _ = std::fs::remove_dir_all(&root);
     }
 

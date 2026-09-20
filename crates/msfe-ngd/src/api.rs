@@ -1520,6 +1520,9 @@ fn service_status(cfg: &Config) -> Response {
                 if cfg.panel == "cpanel" {
                     let s = mailflow::cpanel_sa_state();
                     Json::Object(vec![
+                        ("service_disabled".into(), Json::Bool(s.service_disabled)),
+                        ("feature_disabled".into(), Json::Bool(s.feature_disabled)),
+                        ("off_server_wide".into(), Json::Bool(s.off_server_wide())),
                         ("forced_on".into(), Json::Bool(s.forced_on)),
                         ("accounts_on".into(), Json::Int(s.accounts_on.len() as i64)),
                         ("restorable".into(), Json::Int(s.restorable.len() as i64)),
