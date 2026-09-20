@@ -618,8 +618,10 @@ fn force_queue_run() -> bool {
     if std::env::var("MSFE_NG_SKIP_QUEUE_RUN").is_ok() {
         return false;
     }
+    // the delivery queue: through the outgoing config on the two-config layout
     for exim in ["/usr/sbin/exim", "exim"] {
         let spawned = Command::new(exim)
+            .args(crate::engine::exim_queue_args(None))
             .arg("-qff")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -638,9 +640,7 @@ fn force_queue_run() -> bool {
 pub fn queue_listing(named: Option<&str>) -> String {
     for exim in ["/usr/sbin/exim", "exim"] {
         let mut c = Command::new(exim);
-        if let Some(q) = named {
-            c.arg(format!("-qG{q}"));
-        }
+        c.args(crate::engine::exim_queue_args(named));
         c.arg("-bp");
         match run_with_timeout(&mut c, std::time::Duration::from_secs(30)) {
             Ok(o) if o.ok => {
@@ -857,7 +857,7 @@ pub fn queue_bulk_action(
         if action == "delete" {
             transcript.push(format!(
                 "$ exim {}-Mrm <{} ids>",
-                named.map(|q| format!("-qG{q} ")).unwrap_or_default(),
+                exim_queue_prefix(named),
                 chunk.len()
             ));
             match run_with_timeout(
@@ -922,6 +922,7 @@ pub fn queue_bulk_action(
     ControlOutcome { ok, transcript }
 }
 
+/// `exim` pointed at the right queue (`engine::exim_queue_args`).
 fn exim_cmd(named: Option<&str>) -> Command {
     let bin = if Path::new("/usr/sbin/exim").exists() {
         "/usr/sbin/exim"
@@ -929,10 +930,18 @@ fn exim_cmd(named: Option<&str>) -> Command {
         "exim"
     };
     let mut c = Command::new(bin);
-    if let Some(q) = named {
-        c.arg(format!("-qG{q}"));
-    }
+    c.args(crate::engine::exim_queue_args(named));
     c
+}
+
+/// The queue selection as shown in transcripts (`-qGmailscanner `, `-C … `).
+fn exim_queue_prefix(named: Option<&str>) -> String {
+    let args = crate::engine::exim_queue_args(named);
+    if args.is_empty() {
+        String::new()
+    } else {
+        format!("{} ", args.join(" "))
+    }
 }
 
 /// View a queued message: its headers, body, or delivery-log history.
@@ -1001,7 +1010,7 @@ pub fn queue_msg_action(named: Option<&str>, id: &str, action: &str) -> ControlO
     };
     let mut transcript = vec![format!(
         "$ exim {}{} {id}",
-        named.map(|q| format!("-qG{q} ")).unwrap_or_default(),
+        exim_queue_prefix(named),
         args.join(" ")
     )];
     // deliveries legitimately take a while on slow remotes; deletes should be

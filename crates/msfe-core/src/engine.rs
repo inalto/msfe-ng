@@ -910,6 +910,27 @@ pub fn two_config_spool(exim_conf: &str) -> Option<std::path::PathBuf> {
     spool.filter(|_| queue_only)
 }
 
+/// ConfigServer's two-config layout is in place: `/etc/exim.conf` spools
+/// into the scanning queue and `/etc/exim_outgoing.conf` delivers.
+pub fn two_config_active() -> bool {
+    two_config_spool(&read_exim_conf()).is_some() && exim_outgoing_conf_path().is_file()
+}
+
+/// The `exim` arguments that select a queue: `named` is the scanning queue
+/// (`Some("mailscanner")`), `None` the delivery queue. With the named-queue
+/// wiring that is `-qG<name>` or nothing; on the two-config layout the
+/// default config *is* the scanning spool and the delivery spool is only
+/// reachable through `-C /etc/exim_outgoing.conf` — a bare `exim -Mrm` there
+/// answers "Spool file not found" (gauss).
+pub fn exim_queue_args(named: Option<&str>) -> Vec<String> {
+    match (two_config_active(), named) {
+        (true, None) => vec!["-C".into(), exim_outgoing_conf_path().display().to_string()],
+        (true, Some(_)) => Vec::new(),
+        (false, Some(q)) => vec![format!("-qG{q}")],
+        (false, None) => Vec::new(),
+    }
+}
+
 pub fn exim_method(cfg: &Config) -> Option<EximMethod> {
     if named_queue_wired(cfg) {
         Some(EximMethod::NamedQueue)
@@ -1452,6 +1473,13 @@ pub(crate) mod tests {
         std::fs::write(&outgoing, "spool_directory = /var/spool/exim\n").unwrap();
         assert_eq!(exim_method(&cfg), Some(EximMethod::TwoConfig));
         assert!(is_wired(&cfg));
+        // queue commands: the delivery spool is only reachable through the
+        // outgoing config; the scanning spool is the default config's
+        assert_eq!(
+            exim_queue_args(None),
+            vec!["-C".to_string(), outgoing.display().to_string()]
+        );
+        assert!(exim_queue_args(Some("mailscanner")).is_empty());
 
         configure(&cfg).unwrap();
         let text = std::fs::read_to_string(&cfg.mailscanner_conf).unwrap();
@@ -1622,6 +1650,9 @@ pub(crate) mod tests {
         // real wire
         wire(&cfg, false).unwrap();
         assert!(is_wired(&cfg));
+        // queue commands: the named queue by -qG, the delivery queue bare
+        assert_eq!(exim_queue_args(Some("mailscanner")), vec!["-qGmailscanner"]);
+        assert!(exim_queue_args(None).is_empty());
         let hook = std::fs::read_to_string(base.join("hook")).unwrap();
         assert_eq!(hook.matches(".include_if_exists").count(), 1);
         let frag = std::fs::read_to_string(&cfg.mailscannerq_conf).unwrap();
