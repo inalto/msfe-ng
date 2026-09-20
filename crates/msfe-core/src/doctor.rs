@@ -330,6 +330,17 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
             "msfe-ng engine configure (sets envelope_sender_header in spamassassin.conf)",
         ));
     }
+    // A loopback resolver that is dead takes every lookup on the server
+    // with it (gauss: cPanel's chkservd killed unbound off port 53)
+    if let Some((ok, detail)) = crate::resolver::local_resolver_verdict(&crate::resolver::state()) {
+        out.push(check(
+            "local DNS resolver answering",
+            ok,
+            Level::Fail,
+            detail,
+            "msfe-ng doctor --fix (starts unbound), or msfe-ng resolver install to set it up again",
+        ));
+    }
     out.push(dnsbl_check(&conf, Path::new(&cfg.mailscanner_conf)));
     // Mail over `Max Spam Check Size` bypasses every spam check; the DB
     // records those as "too large" reports.
@@ -1523,6 +1534,8 @@ pub enum Fix {
     SpoolRepair,
     /// start MailScanner: wired, latch on, but not running.
     Start,
+    /// start unbound: resolv.conf points at loopback and it is down.
+    ResolverStart,
     /// disable + park a MailScanner.service whose binary is gone.
     StaleUnit,
     /// `snapshot export` — none taken yet.
@@ -1567,6 +1580,7 @@ pub fn plan(checks: &[Check], engine_targets_exim: bool) -> Vec<Fix> {
             "message archive configured" => Some(Fix::Sync),
             "spool files correctly placed" => Some(Fix::SpoolRepair),
             "MailScanner running" if wired && latch_on => Some(Fix::Start),
+            "local DNS resolver answering" => Some(Fix::ResolverStart),
             "stale MailScanner service unit" => Some(Fix::StaleUnit),
             "configuration snapshot" => Some(Fix::Snapshot),
             _ => None,
@@ -1658,6 +1672,10 @@ pub fn fix(cfg: &Config, config_file: &Path) -> Vec<String> {
                     "start MailScanner: {}",
                     if o.ok { "ok" } else { "FAILED" }
                 ));
+            }
+            Fix::ResolverStart => {
+                let (_, line) = crate::resolver::start_unbound();
+                done.push(line);
             }
             Fix::StaleUnit => {
                 match crate::legacy::remove_stale_engine_units(Path::new("/"), true) {
@@ -2211,7 +2229,12 @@ mod tests {
                 Fix::Snapshot
             ]
         );
-        // a stale unit is mechanical; the exiscan double scan is a decision
+        // a dead loopback resolver is restarted; a stale unit is mechanical;
+        // the exiscan double scan is a decision
+        assert_eq!(
+            plan(&[chk("local DNS resolver answering", Level::Fail)], false),
+            vec![Fix::ResolverStart]
+        );
         assert_eq!(
             plan(&[chk("stale MailScanner service unit", Level::Warn)], false),
             vec![Fix::StaleUnit]

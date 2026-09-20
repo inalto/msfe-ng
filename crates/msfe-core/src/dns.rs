@@ -1250,6 +1250,9 @@ mod tests {
             Some("[::1]:5353".parse().unwrap())
         );
         assert_eq!(parse_server("nonsense"), None);
+        let _env = crate::deliveryrun::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::env::set_var("MSFE_NG_RESOLVER", "127.0.0.1:5353, 10.0.0.1");
         let c = Client::system();
         assert_eq!(

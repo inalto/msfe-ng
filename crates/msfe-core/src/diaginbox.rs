@@ -861,11 +861,17 @@ mod tests {
             .join("new");
         std::fs::create_dir_all(&newdir).unwrap();
         std::fs::write(newdir.join("1.msg"), "Received: from mail.sender.test ([185.199.108.25]) by host.test with esmtps id x; Sat, 19 Sep 2026 10:00:00 +0000\r\nFrom: someone@sender.test\r\nTo: dt-x@host.test\r\nSubject: test\r\nDate: Sat, 19 Sep 2026 09:59:00 +0000\r\nMessage-ID: <1@sender.test>\r\nX-host.test-MailScanner-SpamCheck: not spam, SpamAssassin (score=0.1)\r\n\r\nhello\r\n").unwrap();
-        std::env::set_var("MSFE_NG_DELIVERY_NO_NET", "1");
-        std::env::set_var("MSFE_NG_RESOLVER", "127.0.0.1:1");
-        let st = poll(&cfg, &inbox.token).unwrap();
-        std::env::remove_var("MSFE_NG_RESOLVER");
-        std::env::remove_var("MSFE_NG_DELIVERY_NO_NET");
+        let st = {
+            let _env = crate::deliveryrun::tests::ENV_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            std::env::set_var("MSFE_NG_DELIVERY_NO_NET", "1");
+            std::env::set_var("MSFE_NG_RESOLVER", "127.0.0.1:1");
+            let st = poll(&cfg, &inbox.token).unwrap();
+            std::env::remove_var("MSFE_NG_RESOLVER");
+            std::env::remove_var("MSFE_NG_DELIVERY_NO_NET");
+            st
+        };
         assert_eq!(st.messages.len(), 1);
         assert_eq!(st.messages[0].from, "someone@sender.test");
         let ids: Vec<&str> = st.messages[0]

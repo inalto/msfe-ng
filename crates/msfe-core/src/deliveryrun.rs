@@ -698,12 +698,13 @@ fn tool_notes(ctx: &Ctx) -> Vec<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
 
-    /// The tests that set process-wide env vars must not overlap.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    /// The tests that set process-wide env vars must not overlap — across
+    /// modules: MSFE_NG_RESOLVER is read by every DNS lookup.
+    pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn ctx(deadline: Duration) -> Arc<Ctx> {
         Arc::new(Ctx {

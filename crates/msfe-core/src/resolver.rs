@@ -82,20 +82,76 @@ fn unit_active(unit: &str) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-/// `ip -o -<4|6> addr show scope global` → addresses.
+/// `ip -o -<4|6> addr show scope global` → addresses, each once: Hetzner
+/// hosts carry the same IPv4 as a `peer` route and as a plain /32, and
+/// PowerDNS refuses to bind one address twice (gauss: crash-loop, then
+/// cPanel's chkservd killed unbound off port 53 trying to restart it).
 pub fn parse_ip_addr(output: &str) -> Vec<String> {
-    output
-        .lines()
-        .filter_map(|l| {
-            let mut f = l.split_whitespace();
-            let _idx = f.next()?;
-            let _dev = f.next()?;
-            let fam = f.next()?;
-            let addr = f.next()?;
-            (fam == "inet" || fam == "inet6")
-                .then(|| addr.split('/').next().unwrap_or(addr).to_string())
-        })
-        .collect()
+    let mut out: Vec<String> = Vec::new();
+    for l in output.lines() {
+        let mut f = l.split_whitespace();
+        let (Some(_idx), Some(_dev), Some(fam), Some(addr)) =
+            (f.next(), f.next(), f.next(), f.next())
+        else {
+            continue;
+        };
+        if fam != "inet" && fam != "inet6" {
+            continue;
+        }
+        let ip = addr.split('/').next().unwrap_or(addr).to_string();
+        if !out.contains(&ip) {
+            out.push(ip);
+        }
+    }
+    out
+}
+
+/// `(ok, detail)` for the doctor: resolv.conf points at loopback, so
+/// something must answer there — unbound, running and resolving. `None`
+/// when the system resolver is elsewhere (nothing of ours to check).
+pub fn local_resolver_verdict(s: &State) -> Option<(bool, String)> {
+    if !s.on_loopback {
+        return None;
+    }
+    Some(match (s.unbound_installed, s.unbound_active, s.unbound_answers) {
+        (_, true, Some(true)) => (true, "unbound answers on 127.0.0.1".into()),
+        (_, true, _) => (
+            false,
+            "unbound is running on 127.0.0.1 but does not resolve — every DNS lookup on this server fails (mail delivery, blocklists)".into(),
+        ),
+        (true, false, _) => (
+            false,
+            "resolv.conf points at 127.0.0.1 but unbound is not running — every DNS lookup on this server fails (mail delivery, blocklists)".into(),
+        ),
+        (false, false, _) => (
+            false,
+            "resolv.conf points at 127.0.0.1 and nothing serves DNS there — every DNS lookup on this server fails".into(),
+        ),
+    })
+}
+
+/// Start unbound (the mechanical fix for a dead loopback resolver) and say
+/// whether it answers afterwards.
+pub fn start_unbound() -> (bool, String) {
+    let started = Command::new("systemctl")
+        .args(["start", "unbound"])
+        .status()
+        .is_ok_and(|st| st.success());
+    if !started {
+        return (false, "systemctl start unbound FAILED".into());
+    }
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let answers = query_a("127.0.0.1", "a.root-servers.net")
+        .map(|a| !a.is_empty())
+        .unwrap_or(false);
+    (
+        answers,
+        if answers {
+            "unbound started and answers on 127.0.0.1".into()
+        } else {
+            "unbound started but does not answer yet on 127.0.0.1".into()
+        },
+    )
 }
 
 fn public_addrs(family: &str) -> Vec<String> {
@@ -447,12 +503,28 @@ pub fn install() -> io::Result<()> {
                 service::save_conf(&pdns, &fixed)?;
                 println!("  {}: local-address={}", pdns.display(), ips.join(", "));
                 if live {
-                    let ok = if Path::new("/scripts/restartsrv_pdns").exists() {
-                        run_logged(&mut Command::new("/scripts/restartsrv_pdns"))?
-                    } else {
-                        run_logged(Command::new("systemctl").args(["restart", "pdns"]))?
+                    let restart = || -> io::Result<bool> {
+                        if Path::new("/scripts/restartsrv_pdns").exists() {
+                            run_logged(&mut Command::new("/scripts/restartsrv_pdns"))
+                        } else {
+                            run_logged(Command::new("systemctl").args(["restart", "pdns"]))
+                        }
                     };
+                    let ok = restart()?;
                     println!("  PowerDNS restarted: {}", if ok { "ok" } else { "FAILED" });
+                    if !ok {
+                        // a pdns that cannot start is worse than one on every
+                        // address: cPanel's chkservd restarting it kills
+                        // whatever holds port 53, unbound included
+                        crate::sync::atomic_write(&pdns, text.as_bytes())?;
+                        let back = restart()?;
+                        return Err(io::Error::other(format!(
+                            "PowerDNS does not start with local-address={} — {} restored{}; nothing else changed",
+                            ips.join(", "),
+                            pdns.display(),
+                            if back { " and PowerDNS restarted" } else { ", but PowerDNS still does not start: check `journalctl -u pdns`" }
+                        )));
+                    }
                 }
             }
             None => println!("  already bound to {}", ips.join(", ")),
@@ -468,8 +540,10 @@ pub fn install() -> io::Result<()> {
     println!("  {}", local.display());
     let dropin = at(UNBOUND_DROPIN);
     std::fs::create_dir_all(dropin.parent().unwrap())?;
-    service::save_conf(&dropin, "[Service]\nRestart=on-failure\nRestartSec=5\n")?;
-    println!("  {} (Restart=on-failure)", dropin.display());
+    // always: cPanel's restartsrv kills whatever holds a service's port, and
+    // a SIGTERM exit is not a failure
+    service::save_conf(&dropin, "[Service]\nRestart=always\nRestartSec=5\n")?;
+    println!("  {} (Restart=always)", dropin.display());
     if live {
         let _ = Command::new("systemctl").arg("daemon-reload").status();
         if Path::new("/usr/sbin/unbound-checkconf").exists()
@@ -621,6 +695,31 @@ pub fn start_job() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // gauss: `ip -o -4 addr` lists 49.12.174.167 twice (peer route + /32)
+    #[test]
+    fn ip_addr_parsing_lists_each_address_once() {
+        let out = "2: eno1    inet 49.12.174.167 peer 49.12.174.129/32 brd 49.12.174.167 scope global eno1\\       valid_lft forever preferred_lft forever\n2: eno1    inet 49.12.174.167/32 scope global eno1\\       valid_lft forever preferred_lft forever\n3: eno2    inet 203.0.113.9/24 brd 203.0.113.255 scope global eno2\n";
+        assert_eq!(parse_ip_addr(out), vec!["49.12.174.167", "203.0.113.9"]);
+    }
+
+    #[test]
+    fn local_resolver_verdict_only_judges_a_loopback_resolv_conf() {
+        let mut s = State {
+            on_loopback: false,
+            ..Default::default()
+        };
+        assert!(local_resolver_verdict(&s).is_none());
+        s.on_loopback = true;
+        s.unbound_installed = true;
+        let (ok, d) = local_resolver_verdict(&s).unwrap();
+        assert!(!ok && d.contains("not running"), "{d}");
+        s.unbound_active = true;
+        s.unbound_answers = Some(true);
+        assert!(local_resolver_verdict(&s).unwrap().0);
+        s.unbound_answers = Some(false);
+        assert!(!local_resolver_verdict(&s).unwrap().0);
+    }
 
     #[test]
     fn pdns_local_address_is_set_once() {
