@@ -40,13 +40,48 @@ under cPanel's perl) — the installer detects that tree and points
    rewrites the managed rule files every 10 minutes, so make policy changes in
    MSFE-NG only from here on.
 
-## Decommissioning ConfigServer MSFE — the guided migration
+## Decommissioning ConfigServer MSFE
 
-The doctor's *legacy ConfigServer front-end* warning stays until `/usr/msfe`,
-its cron entries and its WHM registration are gone. **Its uninstaller
-(`/usr/msfe/uninstall.msfe.sh`) removes the bundled MailScanner engine too**,
-and the RPM installer refuses to install beside `/usr/mailscanner`, so the
-two have to happen in one sequence. **Service → Migrate from ConfigServer
+Once the import is verified (`msfe-ng import /usr/msfe --save`, or the
+Settings tab shows your policy), the old front-end can go. Which tool depends
+on the engine:
+
+- **Still on ConfigServer's bundled engine (`/usr/mailscanner` exists)?**
+  Use the guided migration below — its uninstaller removes the engine as
+  well, and the RPM cannot be installed beside it, so the two happen in one
+  sequence.
+- **Already on the MailScanner RPM (or any other engine)?** **Service →
+  Decommission ConfigServer MSFE**, or `msfe-ng legacy decommission --run`
+  (`msfe-ng legacy decommission` alone prints what would happen). It removes
+  the front-end and *only* the front-end — the engine keeps scanning, nothing
+  is restarted:
+
+  1. backup: `/usr/msfe`, every cron file that runs it (`/etc/cron.d/msfe.sh`,
+     `/etc/cron.hourly/msdigest.pl`, `/etc/cron.daily/mailscanner_daily.cron`,
+     …), the WHM app registration file and root's crontab (as `root.crontab`)
+     go into `<backup_dir>/legacy-msfe-<time>.tar.gz` — nothing is removed
+     if that fails
+  2. `/usr/msfe` removed
+  3. those cron files removed (`csget`, ConfigServer's shared updater used by
+     csf, is never touched)
+  4. the `/usr/msfe` lines dropped from root's crontab
+  5. the legacy WHM plugin unregistered
+  6. re-scan: *decommissioned*, or whatever is still present for your hands
+
+  Restore everything with `tar xzf <backup> -C /` (root's crontab from the
+  `root.crontab` member: `crontab root.crontab`). ConfigServer's own
+  `uninstall.msfe.sh` is never run by this tool. On a host still on the
+  ConfigServer engine the command works too (the engine is left alone, with a
+  note that the migration is the way to switch it), but the Service tab shows
+  the migration card instead of this one.
+
+The doctor's *legacy ConfigServer front-end* notice links here.
+
+## The guided migration — ConfigServer engine → MailScanner RPM
+
+**ConfigServer's uninstaller (`/usr/msfe/uninstall.msfe.sh`) removes the
+bundled MailScanner engine too**, and the RPM installer refuses to install
+beside `/usr/mailscanner`, so the two have to happen in one sequence. **Service → Migrate from ConfigServer
 MailScanner** (shown while `/usr/mailscanner` exists) does it as one
 background job and follows its log; `msfe-ng engine migrate-legacy` prints
 the preflight, `--run` does the same from a shell. Mail keeps spooling

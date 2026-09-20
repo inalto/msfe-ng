@@ -33,6 +33,18 @@ pub struct Check {
     pub detail: String,
     /// How to fix it (command or UI button), when not ok.
     pub fix: Option<String>,
+    /// The procedure to read, when the fix is more than one command.
+    pub url: Option<&'static str>,
+}
+
+impl Check {
+    /// Attach the procedure's page (kept only while the check is not ok).
+    pub fn url(mut self, url: &'static str) -> Self {
+        if self.level != Level::Ok {
+            self.url = Some(url);
+        }
+        self
+    }
 }
 
 fn check(name: &'static str, ok: bool, level: Level, detail: String, fix: &str) -> Check {
@@ -41,6 +53,7 @@ fn check(name: &'static str, ok: bool, level: Level, detail: String, fix: &str) 
         level: if ok { Level::Ok } else { level },
         detail,
         fix: if ok { None } else { Some(fix.to_string()) },
+        url: None,
     }
 }
 
@@ -467,17 +480,20 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
         ),
     ));
     let legacy = crate::legacy::remnants(Path::new("/"));
-    out.push(check(
-        "legacy ConfigServer front-end",
-        legacy.is_empty(),
-        Level::Warn,
-        if legacy.is_empty() {
-            "not installed".into()
-        } else {
-            format!("still present: {}", legacy.join(", "))
-        },
-        "once the import is verified, decommission it — its uninstaller also removes the /usr/mailscanner engine, so follow the wiki (Migration → Decommissioning ConfigServer MSFE) to switch to the RPM engine at the same time",
-    ));
+    out.push(
+        check(
+            "legacy ConfigServer front-end",
+            legacy.is_empty(),
+            Level::Warn,
+            if legacy.is_empty() {
+                "not installed".into()
+            } else {
+                format!("still present: {}", legacy.join(", "))
+            },
+            "once the import is verified: msfe-ng legacy decommission --run (or Service → Decommission ConfigServer MSFE) removes the front-end only, backed up first; still on ConfigServer's /usr/mailscanner engine? Service → Migrate from ConfigServer MailScanner switches to the RPM engine as well",
+        )
+        .url(crate::legacy_decommission::WIKI_URL),
+    );
 
     // ---- message bodies (archive) ----------------------------------------
     let (settings, _, _) = crate::sync::load_policy(&crate::sync::policy_dir(config_file));
@@ -2080,6 +2096,7 @@ mod tests {
             level,
             detail: String::new(),
             fix: None,
+            url: None,
         }
     }
 
@@ -2130,9 +2147,18 @@ mod tests {
                     over: vec![0; 7],
                 },
             )),
+            url: None,
         };
         assert_eq!(plan(&[size("200k")], true), vec![Fix::EngineConfigure]);
         assert!(plan(&[size("2M")], true).is_empty());
+    }
+
+    #[test]
+    fn a_procedure_url_sticks_only_to_a_finding() {
+        let c = check("x", false, Level::Warn, String::new(), "f").url("https://w/x");
+        assert_eq!(c.url, Some("https://w/x"));
+        let c = check("x", true, Level::Warn, String::new(), "f").url("https://w/x");
+        assert_eq!(c.url, None, "an ok check has no procedure to follow");
     }
 
     #[test]

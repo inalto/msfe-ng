@@ -271,3 +271,38 @@ fn snapshot_export_list_and_dry_run_import() {
     let _ = std::fs::remove_dir_all(&d);
     let _ = std::fs::remove_dir_all(&side);
 }
+
+/// `legacy decommission` without `--run` only reports; an unknown flag and
+/// an unknown subcommand are usage errors, and with nothing of /usr/msfe on
+/// this machine `--run` refuses rather than writing a backup.
+#[test]
+fn legacy_decommission_reports_and_refuses_when_nothing_is_left() {
+    let d = tmp("decom");
+    let out = msfe_ng(&d, &["legacy", "decommission", "--dry-run"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("usage:"));
+    let out = msfe_ng(&d, &["legacy", "remove"]);
+    assert_eq!(out.status.code(), Some(2));
+
+    if std::path::Path::new("/usr/msfe").exists() {
+        return; // a host with the real thing: not a machine to test on
+    }
+    let out = msfe_ng(&d, &["legacy", "decommission"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("ConfigServer front-end: nothing left"),
+        "{text}"
+    );
+    assert!(
+        text.contains("procedure: https://github.com/inalto/msfe-ng/wiki/Migration"),
+        "{text}"
+    );
+    assert_eq!(out.status.code(), Some(1), "blocked");
+    let out = msfe_ng(&d, &["legacy", "decommission", "--run"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("already decommissioned"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

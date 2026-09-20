@@ -37,6 +37,8 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
         ("exim", _) => Some(NONE),
         ("engine", Some("wire" | "unwire")) => Some(DRY),
         ("engine", Some("migrate-legacy")) => Some(&["--run"]),
+        ("legacy", Some("decommission")) => Some(&["--run"]),
+        ("legacy", _) => Some(NONE),
         ("engine", _) => Some(NONE),
         ("service", Some("spool-repair")) => Some(DRY),
         ("service", _) => Some(NONE),
@@ -106,6 +108,7 @@ fn usage_of(cmd: &str) -> &'static str {
             "msfe-ng service <status|start|stop|reload|restart|queue-fix|spool-repair [--dry-run]>"
         }
         "mailscanner" => "msfe-ng mailscanner <status|enable-logging|disable-logging>",
+        "legacy" => "msfe-ng legacy decommission [--run]",
         "upgrade" => "msfe-ng upgrade [--check]",
         "doctor" => "msfe-ng doctor [--fix]",
         "resolver" => "msfe-ng resolver <status|install>",
@@ -168,6 +171,7 @@ fn main() -> ExitCode {
         "service" => cmd_service(args.get(1).map(String::as_str)),
         "rules" => cmd_rules(args.get(1).map(String::as_str)),
         "engine" => cmd_engine(args.get(1).map(String::as_str)),
+        "legacy" => cmd_legacy(args.get(1).map(String::as_str)),
         "doctor" => cmd_doctor(args.iter().any(|a| a == "--fix")),
         "backup" => cmd_backup(sub),
         "restore" => cmd_restore(sub, rest),
@@ -226,6 +230,78 @@ fn cmd_config() -> ExitCode {
 /// Import a legacy MSFE directory. Prints the normalized config as JSON, or with
 /// `--save` writes the normalized policy files into `<confdir>/policy/` so `sync`
 /// can consume them.
+/// `msfe-ng legacy decommission [--run]`: ConfigServer's front-end goes,
+/// its engine stays; the preflight alone without `--run`.
+fn cmd_legacy(sub: Option<&str>) -> ExitCode {
+    use msfe_core::legacy_decommission as decom;
+    if sub != Some("decommission") {
+        eprintln!("usage: msfe-ng legacy decommission [--run]");
+        return ExitCode::from(2);
+    }
+    let cfg = Config::load(&config_path());
+    let run = std::env::args().any(|x| x == "--run");
+    let pf = decom::preflight(&cfg, &config_path());
+    if !run {
+        println!(
+            "ConfigServer front-end: {}",
+            if pf.remnants.is_empty() {
+                "nothing left".to_string()
+            } else {
+                pf.remnants.join(", ")
+            }
+        );
+        for l in &pf.crontab_lines {
+            println!("root's crontab: {l}");
+        }
+        println!(
+            "ConfigServer engine at /usr/mailscanner: {} (never touched here); policy imported: {}; backup dir: {}",
+            if pf.legacy_engine { "present" } else { "absent" },
+            pf.policy_imported,
+            pf.backup_dir
+        );
+        for w in &pf.warnings {
+            println!("note: {w}");
+        }
+        for b in &pf.blockers {
+            println!("blocked: {b}");
+        }
+        println!("procedure: {}", decom::WIKI_URL);
+        if pf.ok() {
+            println!(
+                "\nrun it with: msfe-ng legacy decommission --run   (or from the Service tab)"
+            );
+        }
+        return if pf.ok() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(1)
+        };
+    }
+    match decom::run(&cfg, &config_path()) {
+        Ok(rep) => {
+            for l in &rep.done {
+                println!("{l}");
+            }
+            if rep.left.is_empty() {
+                println!(
+                    "decommissioned — restore with: tar xzf {} -C /",
+                    rep.backup
+                        .map(|b| b.display().to_string())
+                        .unwrap_or_default()
+                );
+                ExitCode::SUCCESS
+            } else {
+                println!("still present (remove by hand): {}", rep.left.join(", "));
+                ExitCode::from(1)
+            }
+        }
+        Err(e) => {
+            eprintln!("msfe-ng legacy decommission: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn cmd_import(args: &[String]) -> ExitCode {
     let dir = args.iter().find(|a| !a.starts_with("--"));
     let save = args.iter().any(|a| a == "--save");
@@ -828,6 +904,9 @@ fn cmd_doctor(fix: bool) -> ExitCode {
         println!("[{tag}] {} — {}", c.name, c.detail);
         if let Some(fix) = &c.fix {
             println!("       fix: {fix}");
+        }
+        if let Some(url) = c.url {
+            println!("       see: {url}");
         }
     }
     if doctor::healthy(&checks) {
@@ -2425,6 +2504,7 @@ COMMANDS:
     housekeeping        Prune old mail-log rows (cleanmysql retention)
     monitor [--dry-run] Auto-clean the delivery queue, fix misfiled spool files, send Telegram alerts (cron)
     engine migrate-legacy [--run]     ConfigServer MailScanner → the MailScanner RPM (preflight without --run)
+    legacy decommission [--run]       Remove ConfigServer's MSFE front-end only, backed up first (preflight without --run)
     exim <status|enable-scanning|disable-scanning>   Toggle MailScanner scanning
     exim <enable|disable>-cpanel-spamassassin        cPanel's own SpamAssassin (double scan)
     upgrade [--check]                 Upgrade MSFE-NG to the latest release (or just compare)

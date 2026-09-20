@@ -338,9 +338,9 @@ pub fn run(config_file: &Path) -> io::Result<()> {
 }
 
 /// Remove what ConfigServer installed: its uninstaller first when present
-/// (answering yes), then whatever it left — the trees, its cron files, the
-/// SysV service, root's crontab lines and the WHM app (live hosts only for
-/// the last three). Returns what was done.
+/// (answering yes), then whatever it left — the engine tree and its SysV
+/// service, then the front-end (`legacy::remove_front_end`). Returns what
+/// was done.
 pub fn remove_legacy(root: &Path, live: bool) -> io::Result<Vec<String>> {
     let mut done = Vec::new();
     let at = |p: &str| root.join(p.trim_start_matches('/'));
@@ -358,25 +358,13 @@ pub fn remove_legacy(root: &Path, live: bool) -> io::Result<Vec<String>> {
             done.push("WARNING: the uninstaller exited non-zero — removing what is left".into());
         }
     }
-    for tree in [LEGACY_TREE, "/usr/msfe"] {
-        let p = at(tree);
-        if p.exists() {
-            std::fs::remove_dir_all(&p)?;
-            done.push(format!("removed {tree}"));
-        }
+    let engine_tree = at(LEGACY_TREE);
+    if engine_tree.exists() {
+        std::fs::remove_dir_all(&engine_tree)?;
+        done.push(format!("removed {LEGACY_TREE}"));
     }
-    // its cron entries, wherever they sit (root's crontab and the WHM app
-    // below are live-only); the remnants scan already leaves csget alone
-    let cron_entries: Vec<String> = legacy::remnants(root)
-        .into_iter()
-        .filter(|f| f.starts_with("/etc/cron"))
-        .collect();
-    for f in LEGACY_FILES
-        .iter()
-        .map(|s| s.to_string())
-        .chain(cron_entries)
-    {
-        let p = at(&f);
+    for f in LEGACY_FILES {
+        let p = at(f);
         if p.is_file() {
             std::fs::remove_file(&p)?;
             done.push(format!("removed {f}"));
@@ -389,46 +377,10 @@ pub fn remove_legacy(root: &Path, live: bool) -> io::Result<Vec<String>> {
             .stderr(Stdio::null())
             .status();
         let _ = Command::new("systemctl").arg("daemon-reload").status();
-        if let Ok(out) = Command::new("crontab").arg("-l").output() {
-            let text = String::from_utf8_lossy(&out.stdout);
-            if legacy::mentions_legacy_dir(&text) {
-                let kept: String = text
-                    .lines()
-                    .filter(|l| !legacy::mentions_legacy_dir(l))
-                    .map(|l| format!("{l}\n"))
-                    .collect();
-                let mut c = Command::new("crontab")
-                    .arg("-")
-                    .stdin(Stdio::piped())
-                    .spawn()?;
-                if let Some(mut si) = c.stdin.take() {
-                    use std::io::Write;
-                    si.write_all(kept.as_bytes())?;
-                }
-                let _ = c.wait();
-                done.push("removed the legacy entries from root's crontab".into());
-            }
-        }
-        if let Ok(rd) = std::fs::read_dir("/var/cpanel/apps") {
-            for e in rd.flatten() {
-                let text = std::fs::read_to_string(e.path()).unwrap_or_default();
-                if !legacy::mentions_legacy_dir(&text) {
-                    continue;
-                }
-                let name = text
-                    .lines()
-                    .find_map(|l| l.strip_prefix("name="))
-                    .unwrap_or("msfe")
-                    .trim()
-                    .to_string();
-                let _ = Command::new("/usr/local/cpanel/bin/unregister_appconfig")
-                    .arg(&name)
-                    .status();
-                let _ = std::fs::remove_file(e.path());
-                done.push(format!("unregistered the legacy WHM plugin ({name})"));
-            }
-        }
     }
+    // the front-end itself: the tree, its cron files, root's crontab lines,
+    // the WHM app — shared with `legacy_decommission`
+    done.extend(legacy::remove_front_end(root, live)?);
     let left = legacy::remnants(root);
     if !left.is_empty() {
         done.push(format!(

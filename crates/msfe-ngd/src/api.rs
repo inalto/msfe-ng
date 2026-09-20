@@ -667,6 +667,7 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                             "fix".into(),
                             c.fix.clone().map(Json::Str).unwrap_or(Json::Null),
                         ),
+                        ("url".into(), c.url.map(Json::str).unwrap_or(Json::Null)),
                     ])
                 })
                 .collect();
@@ -1023,6 +1024,8 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             crate::delivery_api::handle(m, p, req, cfg, config_file)
         }
         ("GET", "/api/engine/migrate") => engine_migrate_preflight(cfg, config_file),
+        ("GET", "/api/legacy/decommission") => legacy_decommission_preflight(cfg, config_file),
+        ("POST", "/api/legacy/decommission") => legacy_decommission_run(cfg, config_file),
         ("GET", "/api/resolver") => resolver_state(),
 
         // ---- structured rule management (root-only admin surface) -----------
@@ -2201,6 +2204,62 @@ fn engine_migrate_preflight(cfg: &Config, config_file: &Path) -> Response {
         ])
         .to_string(),
     )
+}
+
+/// What decommissioning ConfigServer's front-end would remove.
+fn legacy_decommission_preflight(cfg: &Config, config_file: &Path) -> Response {
+    let pf = msfe_core::legacy_decommission::preflight(cfg, config_file);
+    let strs = |v: &[String]| Json::Array(v.iter().map(Json::str).collect());
+    Response::json(
+        200,
+        &Json::Object(vec![
+            ("remnants".into(), strs(&pf.remnants)),
+            ("crontab_lines".into(), strs(&pf.crontab_lines)),
+            ("legacy_engine".into(), Json::Bool(pf.legacy_engine)),
+            ("policy_imported".into(), Json::Bool(pf.policy_imported)),
+            ("backup_dir".into(), Json::str(&pf.backup_dir)),
+            (
+                "wiki".into(),
+                Json::str(msfe_core::legacy_decommission::WIKI_URL),
+            ),
+            ("ok".into(), Json::Bool(pf.ok())),
+            ("blockers".into(), strs(&pf.blockers)),
+            ("warnings".into(), strs(&pf.warnings)),
+        ])
+        .to_string(),
+    )
+}
+
+/// Back up and remove ConfigServer's front-end (never its engine).
+fn legacy_decommission_run(cfg: &Config, config_file: &Path) -> Response {
+    match msfe_core::legacy_decommission::run(cfg, config_file) {
+        Ok(rep) => {
+            let strs = |v: &[String]| Json::Array(v.iter().map(Json::str).collect());
+            Response::json(
+                200,
+                &Json::Object(vec![
+                    ("ok".into(), Json::Bool(true)),
+                    ("done".into(), strs(&rep.done)),
+                    (
+                        "backup".into(),
+                        rep.backup
+                            .map(|b| Json::str(b.display().to_string()))
+                            .unwrap_or(Json::Null),
+                    ),
+                    ("left".into(), strs(&rep.left)),
+                ])
+                .to_string(),
+            )
+        }
+        Err(e) => Response::json(
+            500,
+            &Json::Object(vec![(
+                "error".into(),
+                Json::str(format!("decommission: {e}")),
+            )])
+            .to_string(),
+        ),
+    }
 }
 
 /// Background jobs (`msfe_core::jobs`): GET status + log tail, POST start.

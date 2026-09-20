@@ -46,6 +46,7 @@ pub mod jobs;
 pub mod json;
 pub mod layout;
 pub mod legacy;
+pub mod legacy_decommission;
 pub mod logindex;
 pub mod mailflow;
 pub mod mailscanner;

@@ -1365,6 +1365,39 @@ async function renderService(){
   };
   loadMig();
   api('/api/jobs/engine-migrate').then(s=>{if(s&&s.running){mig.style.display='';migBtn.disabled=true;followMig();}}).catch(()=>{});
+
+  // Decommission ConfigServer's front-end alone (its engine is never touched;
+  // a host still on /usr/mailscanner gets the migration card instead). Shown
+  // while something of /usr/msfe is left; synchronous — seconds, no restart.
+  const dec=el('div',{class:'card',style:'display:none'},el('h2',{},'Decommission ConfigServer MSFE'));
+  const decInfo=el('div',{class:'muted',style:'font-size:.85rem;margin-bottom:.5rem'});
+  const decList=el('ul',{style:'margin:.25rem 0 .5rem 1.2rem;font-size:.85rem'});
+  const decBtn=el('button',{class:'act danger'},'Decommission now');
+  const decLink=el('a',{href:'#',target:'_blank',rel:'noopener',style:'margin-left:.6rem;font-size:.85rem'},'procedure');
+  const decOut=el('pre',{class:'log',style:'display:none;max-height:16rem;margin-top:.5rem'});
+  dec.append(decInfo,decList,el('div',{class:'ctl'},decBtn,decLink),decOut);uc.append(dec);
+  async function loadDec(){
+    let p;try{p=await api('/api/legacy/decommission');}catch(e){p=null;}
+    if(!p||p.error||p.legacy_engine||(!p.remnants.length&&!p.crontab_lines.length)){dec.style.display='none';return;}
+    dec.style.display='';decLink.href=p.wiki;
+    decInfo.textContent=`ConfigServer’s old front-end is still on this server. This removes it — and only it: the MailScanner engine keeps scanning. Everything removed is first packed into ${p.backup_dir}/legacy-msfe-<time>.tar.gz together with root’s crontab, so one tar puts it back.`;
+    decList.innerHTML='';
+    p.remnants.forEach(r=>decList.append(el('li',{},r)));
+    p.crontab_lines.forEach(l=>decList.append(el('li',{},'root’s crontab: ',el('code',{},l))));
+    (p.warnings||[]).forEach(w=>decList.append(el('li',{style:'color:var(--warning)'},w)));
+    (p.blockers||[]).forEach(b=>decList.append(el('li',{style:'color:var(--critical)'},b)));
+    decBtn.disabled=!p.ok;
+  }
+  decBtn.onclick=async()=>{
+    if(!confirm('Decommission ConfigServer’s MSFE front-end now?\n\n/usr/msfe, its cron entries, its lines in root’s crontab and its WHM plugin registration are removed after being backed up. The MailScanner engine is not touched. Import the legacy settings first if you have not (msfe-ng import /usr/msfe --save).'))return;
+    decBtn.disabled=true;decOut.style.display='';decOut.textContent='working…';
+    const r=await api('/api/legacy/decommission',{method:'POST'});
+    if(!r||!r.ok){decOut.textContent=(r&&r.error)||'failed';decBtn.disabled=false;return;}
+    decOut.textContent=r.done.join('\n')+(r.left&&r.left.length?'\nstill present (remove by hand): '+r.left.join(', '):'\ndecommissioned — restore with: tar xzf '+r.backup+' -C /');
+    toast('ConfigServer MSFE decommissioned');
+    loadDec();refreshDoctor();
+  };
+  loadDec();
   // a job started earlier (or from another window) is still worth following
   for(const [n,l] of [['upgrade','Upgrade MSFE-NG'],['engine-upgrade','Upgrade MailScanner']]){
     api(`/api/jobs/${n}`).then(s=>{if(s&&s.running)followJob(n,l,n==='engine-upgrade'?()=>refreshStatus():null);}).catch(()=>{});
@@ -3054,7 +3087,7 @@ async function refreshDoctor(){
     ...probs.map(c=>el('div',{style:'margin:.3rem 0 0 .5rem'},
       el('span',{class:'badge',style:'background:'+(c.level==='fail'?'var(--critical)':'var(--warning)')},c.level),
       ' ',el('b',{},c.name),' — ',c.detail,
-      c.fix?el('div',{class:'muted',style:'margin-left:2.6rem'},'fix: '+c.fix):'')));
+      c.fix?el('div',{class:'muted',style:'margin-left:2.6rem'},'fix: '+c.fix,c.url?el('span',{},' — ',el('a',{href:c.url,target:'_blank',rel:'noopener'},'procedure')):''):'')));
   // the mechanical repairs (perl modules, engine configure, phishing lists,
   // rules, spool, start) in one go; decisions stay listed with their fix
   const fixBtn=el('button',{class:'act plain',style:'margin:.4rem 0 0 .5rem'},'Fix what can be fixed');

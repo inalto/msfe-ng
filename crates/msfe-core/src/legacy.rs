@@ -84,6 +84,103 @@ pub fn remnants(root: &Path) -> Vec<String> {
     found
 }
 
+/// The lines of a crontab that run the legacy front-end.
+pub fn legacy_crontab_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .filter(|l| mentions_legacy_dir(l))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The crontab without its legacy lines — `None` when there were none.
+pub fn strip_legacy_crontab(text: &str) -> Option<String> {
+    if !mentions_legacy_dir(text) {
+        return None;
+    }
+    Some(
+        text.lines()
+            .filter(|l| !mentions_legacy_dir(l))
+            .map(|l| format!("{l}\n"))
+            .collect(),
+    )
+}
+
+/// Remove the front-end and only the front-end: `/usr/msfe`, the cron files
+/// under `/etc/cron*` that run it, the `/usr/msfe` lines of root's crontab
+/// and the WHM plugin registration. `live` goes through `crontab` and
+/// `unregister_appconfig`; under a fixture root the crontab file
+/// (`var/spool/cron/root`) and the app file are edited directly. `csget`
+/// (ConfigServer's shared updater, csf's too) and any engine are never
+/// touched. Returns what was done.
+pub fn remove_front_end(root: &Path, live: bool) -> io::Result<Vec<String>> {
+    let mut done = Vec::new();
+    let at = |p: &str| root.join(p.trim_start_matches('/'));
+    let tree = at(LEGACY_DIR);
+    if tree.exists() {
+        std::fs::remove_dir_all(&tree)?;
+        done.push(format!("removed {LEGACY_DIR}"));
+    }
+    for f in remnants(root)
+        .into_iter()
+        .filter(|f| f.starts_with("/etc/cron"))
+    {
+        let p = at(&f);
+        if p.is_file() {
+            std::fs::remove_file(&p)?;
+            done.push(format!("removed {f}"));
+        }
+    }
+    // root's crontab
+    if live {
+        if let Ok(out) = std::process::Command::new("crontab").arg("-l").output() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            if let Some(kept) = strip_legacy_crontab(&text) {
+                let mut c = std::process::Command::new("crontab")
+                    .arg("-")
+                    .stdin(std::process::Stdio::piped())
+                    .spawn()?;
+                if let Some(mut si) = c.stdin.take() {
+                    use std::io::Write;
+                    si.write_all(kept.as_bytes())?;
+                }
+                let _ = c.wait();
+                done.push("removed the legacy entries from root's crontab".into());
+            }
+        }
+    } else {
+        let f = at("/var/spool/cron/root");
+        if let Ok(text) = std::fs::read_to_string(&f) {
+            if let Some(kept) = strip_legacy_crontab(&text) {
+                std::fs::write(&f, kept)?;
+                done.push("removed the legacy entries from root's crontab".into());
+            }
+        }
+    }
+    // the WHM plugin registration
+    if let Ok(rd) = std::fs::read_dir(at("/var/cpanel/apps")) {
+        for e in rd.flatten() {
+            let text = std::fs::read_to_string(e.path()).unwrap_or_default();
+            if !mentions_legacy_dir(&text) {
+                continue;
+            }
+            let name = text
+                .lines()
+                .find_map(|l| l.strip_prefix("name="))
+                .unwrap_or("msfe")
+                .trim()
+                .to_string();
+            if live {
+                let _ = std::process::Command::new("/usr/local/cpanel/bin/unregister_appconfig")
+                    .arg(&name)
+                    .status();
+            }
+            let _ = std::fs::remove_file(e.path());
+            done.push(format!("unregistered the legacy WHM plugin ({name})"));
+        }
+    }
+    Ok(done)
+}
+
 /// Does `text` refer to `/usr/msfe` itself — not `/usr/msfe-ng` or any other
 /// path that merely starts with it?
 pub fn mentions_legacy_dir(text: &str) -> bool {
