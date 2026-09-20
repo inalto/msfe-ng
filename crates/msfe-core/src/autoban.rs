@@ -401,7 +401,7 @@ pub fn evaluate(rows: &[Row], rules: &Rules, matches: &[MatchRule], now: u64) ->
     for (ip, rows) in by_ip {
         let mut best: Option<Candidate> = None;
         let mut consider = |c: Candidate| {
-            if best.as_ref().is_none_or(|b| c.seconds > b.seconds) {
+            if best.as_ref().map_or(true, |b| c.seconds > b.seconds) {
                 best = Some(c);
             }
         };
