@@ -563,7 +563,7 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
         // ---- MailScanner service operations (root-only admin surface) -------
         ("GET", "/api/service/status") => service_status(cfg),
         ("POST", "/api/service/control") => service_control(req),
-        ("POST", "/api/service/mailflow") => service_mailflow(req),
+        ("POST", "/api/service/mailflow") => service_mailflow(req, cfg),
         ("POST", "/api/service/cpanel-spamassassin") => service_cpanel_sa(req),
         ("POST", "/api/service/engine-latch") => {
             let v = Json::parse(&req.body).unwrap_or(Json::Null);
@@ -1517,7 +1517,18 @@ fn service_status(cfg: &Config) -> Response {
             ("wired".into(), Json::Bool(msfe_core::engine::is_wired(cfg))),
             ("active".into(), Json::Bool(st.active)),
             ("procs".into(), Json::Int(st.procs as i64)),
-            ("scanning".into(), Json::Bool(mailflow::scanning_enabled())),
+            (
+                "scanning".into(),
+                Json::Bool(mailflow::scanning_enabled(cfg)),
+            ),
+            (
+                "kill_switch".into(),
+                Json::Bool(mailflow::scanning_state(cfg).has_switch()),
+            ),
+            (
+                "scanning_detail".into(),
+                Json::str(mailflow::scanning_state(cfg).describe()),
+            ),
             (
                 "cpanel_sa".into(),
                 if cfg.panel == "cpanel" {
@@ -1597,16 +1608,16 @@ fn service_cpanel_sa(req: &Request) -> Response {
     }
 }
 
-/// Enable/disable scanning via the exiscandisable mailflow flag.
-fn service_mailflow(req: &Request) -> Response {
+/// Enable/disable scanning via the named-queue kill switch.
+fn service_mailflow(req: &Request, cfg: &Config) -> Response {
     let v = Json::parse(&req.body).unwrap_or(Json::Null);
     let enabled = matches!(v.get("enabled"), Some(Json::Bool(true)));
-    match mailflow::set_scanning(enabled) {
+    match mailflow::set_scanning(cfg, enabled) {
         Ok(()) => Response::json(
             200,
             &format!(
                 "{{\"ok\":true,\"scanning\":{}}}",
-                mailflow::scanning_enabled()
+                mailflow::scanning_enabled(cfg)
             ),
         ),
         Err(e) => Response::json(500, &format!("{{\"error\":\"mailflow: {e}\"}}")),

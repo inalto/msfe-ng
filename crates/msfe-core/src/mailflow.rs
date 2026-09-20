@@ -1,66 +1,108 @@
-//! Mail-flow control: turn MailScanner scanning on/off without touching the mail
-//! server config.
+//! Mail-flow control: the kill switch that lets mail bypass MailScanner
+//! without touching the mail server config, and cPanel's own SpamAssassin.
 //!
-//! cPanel's Exim/MailScanner integration honors the presence of
-//! `/etc/exiscandisable` to bypass scanning. Rather than blindly patch cPanel
-//! internals (the original `mschange.pl`/`EximPatch` edited `Cpanel::Exim`),
-//! MSFE-NG just toggles that flag — safe and fully reversible. The deeper
-//! Exim.pm patching stays with cPanel's own MailScanner package.
+//! The switch is the named-queue ACL fragment: renamed to `.disabled` its
+//! `include_if_exists` finds nothing and mail flows direct again; renamed
+//! back, scanning resumes — one Exim rebuild either way. It exists only for
+//! the named-queue wiring. ConfigServer's two-config layout has no switch:
+//! `/etc/exim.conf` itself spools into the scanning queue, so mail always
+//! passes through MailScanner. `/etc/exiscandisable` is NOT a kill switch —
+//! cPanel reads it for exactly one thing, its own *exiscan* (ClamAV in the
+//! SMTP ACL); only ConfigServer's long-gone patch of `Cpanel::Exim` ever made
+//! it bypass MailScanner. MSFE-NG leaves that file as it finds it.
 
+use crate::{engine, Config};
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// Path of the flag file whose presence disables scanning.
-pub fn exiscandisable_path() -> PathBuf {
-    std::env::var("MSFE_NG_EXISCANDISABLE")
-        .unwrap_or_else(|_| "/etc/exiscandisable".to_string())
-        .into()
+/// Whether mail passes through MailScanner, and whether that can be switched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scanning {
+    /// Our named-queue wiring: the fragment is live (`true`) or `.disabled`.
+    NamedQueue { enabled: bool },
+    /// ConfigServer's two-config layout: always scanning, no switch.
+    TwoConfig,
+    /// Exim does not route mail through MailScanner at all.
+    Unwired,
 }
 
-/// True when scanning is active (the disable flag is absent).
-pub fn scanning_enabled() -> bool {
-    !exiscandisable_path().exists()
-}
-
-/// Enable (`true`) or disable (`false`) MailScanner scanning.
-///
-/// Besides the legacy flag file, this toggles the real kill switch when the
-/// Exim wiring is present: the named-queue ACL fragment is renamed to
-/// `.disabled` (its include is `include_if_exists`, so mail immediately flows
-/// direct again) and Exim is rebuilt.
-pub fn set_scanning(enabled: bool) -> io::Result<()> {
-    let path = exiscandisable_path();
-    if enabled {
-        match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e),
-        }?;
-    } else {
-        if let Some(dir) = Path::new(&path).parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(&path, b"MailScanner scanning disabled by MSFE-NG\n")?;
+impl Scanning {
+    /// Is mail being scanned?
+    pub fn enabled(&self) -> bool {
+        !matches!(self, Scanning::NamedQueue { enabled: false })
     }
-    toggle_wiring_fragment(enabled)
+    /// Is there a switch to flip?
+    pub fn has_switch(&self) -> bool {
+        matches!(self, Scanning::NamedQueue { .. })
+    }
+    /// One line for the doctor / status.
+    pub fn describe(&self) -> &'static str {
+        match self {
+            Scanning::NamedQueue { enabled: true } => "scanning enabled",
+            Scanning::NamedQueue { enabled: false } => {
+                "scanning DISABLED via the mailflow toggle — mail bypasses MailScanner"
+            }
+            Scanning::TwoConfig => {
+                "mail always passes through MailScanner — the two-config layout has no kill switch"
+            }
+            Scanning::Unwired => "Exim is not wired to MailScanner",
+        }
+    }
 }
 
-/// Rename the wiring ACL fragment live↔disabled to match the scanning state,
-/// rebuilding Exim when something actually changed. No-op when unwired.
-fn toggle_wiring_fragment(enabled: bool) -> io::Result<()> {
-    let frag = PathBuf::from(
-        std::env::var("MSFE_NG_MAILSCANNERQ")
-            .unwrap_or_else(|_| "/etc/msfe-ng/mailscannerq.conf".to_string()),
-    );
-    let disabled = frag.with_extension("conf.disabled");
+fn disabled_fragment(cfg: &Config) -> PathBuf {
+    Path::new(&cfg.mailscannerq_conf).with_extension("conf.disabled")
+}
+
+/// The switch as Exim sees it.
+pub fn scanning_state(cfg: &Config) -> Scanning {
+    let frag = Path::new(&cfg.mailscannerq_conf);
+    if engine::named_queue_hooked(cfg) {
+        if frag.exists() {
+            return Scanning::NamedQueue { enabled: true };
+        }
+        if disabled_fragment(cfg).exists() {
+            return Scanning::NamedQueue { enabled: false };
+        }
+    }
+    match engine::exim_method(cfg) {
+        Some(engine::EximMethod::TwoConfig) => Scanning::TwoConfig,
+        Some(engine::EximMethod::NamedQueue) => Scanning::NamedQueue { enabled: true },
+        None => Scanning::Unwired,
+    }
+}
+
+/// True when mail is being scanned (or there is nothing to switch).
+pub fn scanning_enabled(cfg: &Config) -> bool {
+    scanning_state(cfg).enabled()
+}
+
+/// Flip the kill switch: rename the fragment live↔disabled and rebuild
+/// Exim. Refused where there is no switch. Idempotent.
+pub fn set_scanning(cfg: &Config, enabled: bool) -> io::Result<()> {
+    match scanning_state(cfg) {
+        Scanning::TwoConfig => {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "no kill switch with the two-config layout: /etc/exim.conf itself spools into the scanning queue, so mail always passes through MailScanner",
+            ));
+        }
+        Scanning::Unwired => {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "Exim is not wired to MailScanner — nothing to switch (msfe-ng engine wire)",
+            ));
+        }
+        Scanning::NamedQueue { enabled: now } if now == enabled => return Ok(()),
+        Scanning::NamedQueue { .. } => {}
+    }
+    let frag = PathBuf::from(&cfg.mailscannerq_conf);
+    let disabled = disabled_fragment(cfg);
     let (from, to) = if enabled {
         (&disabled, &frag)
     } else {
         (&frag, &disabled)
     };
-    if !from.exists() {
-        return Ok(());
-    }
     std::fs::rename(from, to)?;
     if std::env::var("MSFE_NG_SKIP_EXIM_CMDS").is_err() {
         for cmd in ["/scripts/buildeximconf", "/scripts/restartsrv_exim"] {
@@ -485,18 +527,82 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    // The switch is the fragment rename; the two-config layout has none and
+    // /etc/exiscandisable (cPanel's exiscan switch) is never involved.
     #[test]
-    fn toggle_roundtrip() {
-        let tmp = std::env::temp_dir().join(format!("msfe-exiscan-{}", std::process::id()));
-        std::env::set_var("MSFE_NG_EXISCANDISABLE", &tmp);
-        let _ = std::fs::remove_file(&tmp);
-        assert!(scanning_enabled());
-        set_scanning(false).unwrap();
-        assert!(!scanning_enabled());
-        assert!(tmp.exists());
-        set_scanning(true).unwrap();
-        assert!(scanning_enabled());
-        set_scanning(true).unwrap(); // idempotent
-        std::env::remove_var("MSFE_NG_EXISCANDISABLE");
+    fn kill_switch_follows_the_wiring() {
+        let _g = crate::engine::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("msfe-killswitch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::env::set_var("MSFE_NG_EXIM_ACL_HOOK", base.join("hook"));
+        std::env::set_var("MSFE_NG_EXIM_CONF", base.join("exim.conf"));
+        std::env::set_var(
+            "MSFE_NG_EXIM_OUTGOING_CONF",
+            base.join("exim_outgoing.conf"),
+        );
+        std::env::set_var("MSFE_NG_SKIP_EXIM_CMDS", "1");
+        let cfg = Config {
+            mailscannerq_conf: base.join("mailscannerq.conf").display().to_string(),
+            ..Config::default()
+        };
+        // unwired
+        std::fs::write(base.join("exim.conf"), "primary_hostname = x\n").unwrap();
+        assert_eq!(scanning_state(&cfg), Scanning::Unwired);
+        assert!(
+            scanning_enabled(&cfg),
+            "nothing to switch counts as not-disabled"
+        );
+        assert!(set_scanning(&cfg, false).is_err());
+
+        // named queue: hooked + fragment live
+        std::fs::write(
+            base.join("hook"),
+            format!(".include_if_exists {}\n", cfg.mailscannerq_conf),
+        )
+        .unwrap();
+        std::fs::write(&cfg.mailscannerq_conf, "queue = mailscanner\n").unwrap();
+        assert_eq!(scanning_state(&cfg), Scanning::NamedQueue { enabled: true });
+        set_scanning(&cfg, false).unwrap();
+        assert_eq!(
+            scanning_state(&cfg),
+            Scanning::NamedQueue { enabled: false }
+        );
+        assert!(!scanning_enabled(&cfg));
+        assert!(!Path::new(&cfg.mailscannerq_conf).exists());
+        assert!(base.join("mailscannerq.conf.disabled").exists());
+        set_scanning(&cfg, false).unwrap(); // idempotent
+        set_scanning(&cfg, true).unwrap();
+        assert_eq!(scanning_state(&cfg), Scanning::NamedQueue { enabled: true });
+        assert!(Path::new(&cfg.mailscannerq_conf).exists());
+        assert!(
+            !base.join("exiscandisable").exists(),
+            "the cPanel flag is not ours"
+        );
+
+        // two-config: no switch
+        std::fs::remove_file(&cfg.mailscannerq_conf).unwrap();
+        std::fs::write(base.join("hook"), "").unwrap();
+        std::fs::write(
+            base.join("exim.conf"),
+            "spool_directory = /var/spool/exim_incoming\nqueue_only\n",
+        )
+        .unwrap();
+        std::fs::write(base.join("exim_outgoing.conf"), "").unwrap();
+        assert_eq!(scanning_state(&cfg), Scanning::TwoConfig);
+        assert!(scanning_enabled(&cfg));
+        let err = set_scanning(&cfg, false).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        for v in [
+            "MSFE_NG_EXIM_ACL_HOOK",
+            "MSFE_NG_EXIM_CONF",
+            "MSFE_NG_EXIM_OUTGOING_CONF",
+            "MSFE_NG_SKIP_EXIM_CMDS",
+        ] {
+            std::env::remove_var(v);
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

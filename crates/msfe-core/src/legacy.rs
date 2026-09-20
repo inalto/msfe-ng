@@ -181,6 +181,82 @@ pub fn remove_front_end(root: &Path, live: bool) -> io::Result<Vec<String>> {
     Ok(done)
 }
 
+/// Where a hand-written `MailScanner.service` may sit (the RPM engine runs
+/// as `mailscanner.service`, generated from its LSB `ms-init`).
+const UNIT_DIRS: [&str; 2] = ["/etc/systemd/system", "/usr/lib/systemd/system"];
+/// Where a stale unit is parked so it can be read later.
+pub const PARKED_UNITS_DIR: &str = "/etc/msfe-ng/legacy-engine-etc";
+
+/// `MailScanner.service` files whose `ExecStart` binary no longer exists —
+/// ConfigServer's era left one pointing at `/usr/mailscanner/...`, enabled,
+/// failing at every boot. `(unit path, ExecStart binary)`.
+pub fn stale_engine_units(root: &Path) -> Vec<(String, String)> {
+    let at = |p: &str| root.join(p.trim_start_matches('/'));
+    let mut found = Vec::new();
+    for dir in UNIT_DIRS {
+        let unit = format!("{dir}/MailScanner.service");
+        let Ok(text) = std::fs::read_to_string(at(&unit)) else {
+            continue;
+        };
+        let Some(bin) = text.lines().find_map(|l| {
+            l.trim()
+                .strip_prefix("ExecStart=")
+                .and_then(|v| v.split_whitespace().next())
+                .map(|b| b.trim_start_matches(['-', '@', '+', '!', ':']).to_string())
+        }) else {
+            continue;
+        };
+        if !at(&bin).exists() {
+            found.push((unit, bin));
+        }
+    }
+    found
+}
+
+/// Disable and park every stale `MailScanner.service` (`live`: through
+/// systemctl, then `daemon-reload`). Returns what was done.
+pub fn remove_stale_engine_units(root: &Path, live: bool) -> io::Result<Vec<String>> {
+    let at = |p: &str| root.join(p.trim_start_matches('/'));
+    let mut done = Vec::new();
+    let stale = stale_engine_units(root);
+    if stale.is_empty() {
+        return Ok(done);
+    }
+    if live {
+        let _ = std::process::Command::new("systemctl")
+            .args(["disable", "--now", "MailScanner.service"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    let park = at(PARKED_UNITS_DIR);
+    std::fs::create_dir_all(&park)?;
+    for (unit, bin) in stale {
+        let src = at(&unit);
+        let name = format!(
+            "{}.{}",
+            Path::new(&unit)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "MailScanner.service".into()),
+            unit.trim_start_matches('/').replace('/', "_")
+        );
+        let dst = park.join(&name);
+        std::fs::rename(&src, &dst)
+            .or_else(|_| std::fs::copy(&src, &dst).and_then(|_| std::fs::remove_file(&src)))?;
+        done.push(format!(
+            "disabled and parked {unit} (ExecStart {bin} is gone) as {}",
+            dst.display()
+        ));
+    }
+    if live {
+        let _ = std::process::Command::new("systemctl")
+            .arg("daemon-reload")
+            .status();
+    }
+    Ok(done)
+}
+
 /// Does `text` refer to `/usr/msfe` itself — not `/usr/msfe-ng` or any other
 /// path that merely starts with it?
 pub fn mentions_legacy_dir(text: &str) -> bool {
@@ -382,6 +458,55 @@ impl LegacyImport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // gauss: a 2020 hand-written MailScanner.service pointing at the removed
+    // ConfigServer tree, enabled, failing at every boot next to the RPM's
+    // mailscanner.service.
+    #[test]
+    fn stale_engine_units_are_the_ones_whose_binary_is_gone() {
+        let root = std::env::temp_dir().join(format!("msfe-units-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("usr/lib/systemd/system")).unwrap();
+        std::fs::create_dir_all(root.join("etc/systemd/system")).unwrap();
+        std::fs::create_dir_all(root.join("usr/sbin")).unwrap();
+        std::fs::write(
+            root.join("usr/lib/systemd/system/MailScanner.service"),
+            "[Unit]\nDescription=MailScanner AntiSpam and AntiVirus\n[Service]\nExecStart=/usr/mailscanner/usr/sbin/MailScanner\nType=forking\n",
+        )
+        .unwrap();
+        // a unit whose binary exists is somebody's live unit: not stale
+        std::fs::write(root.join("usr/sbin/MailScanner"), "").unwrap();
+        std::fs::write(
+            root.join("etc/systemd/system/MailScanner.service"),
+            "[Service]\nExecStart=-/usr/sbin/MailScanner --foreground\n",
+        )
+        .unwrap();
+        assert_eq!(
+            stale_engine_units(&root),
+            vec![(
+                "/usr/lib/systemd/system/MailScanner.service".to_string(),
+                "/usr/mailscanner/usr/sbin/MailScanner".to_string()
+            )]
+        );
+        let done = remove_stale_engine_units(&root, false).unwrap();
+        assert_eq!(done.len(), 1, "{done:?}");
+        assert!(!root
+            .join("usr/lib/systemd/system/MailScanner.service")
+            .exists());
+        assert!(root
+            .join("etc/msfe-ng/legacy-engine-etc/MailScanner.service.usr_lib_systemd_system_MailScanner.service")
+            .exists(), "parked, not deleted");
+        assert!(
+            root.join("etc/systemd/system/MailScanner.service").exists(),
+            "live unit kept"
+        );
+        assert!(stale_engine_units(&root).is_empty());
+        assert!(
+            remove_stale_engine_units(&root, false).unwrap().is_empty(),
+            "idempotent"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn mentions_legacy_dir_ignores_our_own_paths() {

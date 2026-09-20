@@ -1042,13 +1042,22 @@ pub fn exim_split_spool() -> bool {
     })
 }
 
-/// Our named-queue wiring is live: the ACL hook includes our fragment and
-/// the fragment file exists.
+/// The cPanel ACL hook includes our fragment (live or switched off).
+pub fn named_queue_hooked(cfg: &Config) -> bool {
+    std::fs::read_to_string(acl_hook_path())
+        .map(|t| t.contains(&include_line(cfg)))
+        .unwrap_or(false)
+}
+
+/// Our named-queue wiring is in place: the hook includes the fragment and
+/// the fragment exists — live, or renamed `.disabled` by the kill switch
+/// (still wired, just switched off; `mailflow::scanning_state` tells).
 fn named_queue_wired(cfg: &Config) -> bool {
-    Path::new(&cfg.mailscannerq_conf).exists()
-        && std::fs::read_to_string(acl_hook_path())
-            .map(|t| t.contains(&include_line(cfg)))
-            .unwrap_or(false)
+    named_queue_hooked(cfg)
+        && (Path::new(&cfg.mailscannerq_conf).exists()
+            || Path::new(&cfg.mailscannerq_conf)
+                .with_extension("conf.disabled")
+                .exists())
 }
 
 /// True when mail is currently routed through MailScanner, by either method.
@@ -1293,13 +1302,14 @@ pub(crate) fn gid_of(name: &str) -> Option<u32> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
 
-    // Both tests mutate shared process env vars — serialize them.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // Both tests mutate shared process env vars — serialize them (the
+    // mailflow tests share it: same variables).
+    pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     // MailScanner 5.5.3 (usr/sbin/MailScanner) probes `Exim Command -bV` and
     // tests `(split / /, $out[0])[2] >= 4.97` — Perl numifies "4.100" to 4.1.

@@ -1024,10 +1024,12 @@ async function renderService(){
       el('span',{},el('span',{class:'dot',style:'background:'+(s.active?'var(--good)':'var(--critical)')}),
         s.active?'Running':'Stopped',s.procs?` (${s.procs} processes)`:''),
       el('span',{},el('span',{class:'dot',style:'background:'+(s.scanning?'var(--good)':'var(--warning)')}),
-        'Scanning '+(s.scanning?'enabled':'disabled (mail bypasses MailScanner)')),
+        s.kill_switch?'Scanning '+(s.scanning?'enabled':'disabled (mail bypasses MailScanner)'):(s.scanning_detail||'Scanning enabled')),
       el('span',{class:'muted'},`Queues: ${s.queues?.incoming??'?'} incoming · ${s.queues?.outgoing??'?'} outgoing`));
     mfBtn.textContent=s.scanning?'Disable MailScanner (mailflow)':'Enable MailScanner (mailflow)';
     mfBtn.dataset.enable=s.scanning?'false':'true';
+    // the two-config layout has no kill switch: nothing to offer
+    mfBtn.style.display=s.kill_switch?'':'none';
     // cPanel's own SpamAssassin runs in Exim before MailScanner: a double scan
     const cs=s.cpanel_sa;
     if(cs){

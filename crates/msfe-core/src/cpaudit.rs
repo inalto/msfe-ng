@@ -1065,7 +1065,7 @@ fn route_task(ctx: &Ctx, res: &Results) -> (Vec<Check>, Vec<Task>) {
     }
 
     // MailScanner and cPanel's own SpamAssassin
-    let ms_on = crate::mailflow::scanning_enabled();
+    let ms_on = crate::mailflow::scanning_enabled(&ctx.cfg);
     let method = crate::engine::exim_method(&ctx.cfg);
     out.push(match (method.is_some(), ms_on) {
         (true, true) => Check::new("route.mailscanner", S, cat, Verdict::Pass, Severity::Info, "MailScanner scans mail for this address", "Exim hands every message to MailScanner before delivery (see Rules for per-domain settings)"),

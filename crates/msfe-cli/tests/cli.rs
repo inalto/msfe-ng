@@ -16,7 +16,8 @@ fn msfe_ng(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_msfe-ng"))
         .args(args)
         .env("MSFE_NG_CONFIG", dir.join("config.toml"))
-        .env("MSFE_NG_EXISCANDISABLE", dir.join("exiscandisable"))
+        .env("MSFE_NG_EXIM_ACL_HOOK", dir.join("hook"))
+        .env("MSFE_NG_SKIP_EXIM_CMDS", "1")
         .output()
         .unwrap()
 }
@@ -24,8 +25,20 @@ fn msfe_ng(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
 #[test]
 fn unknown_flag_is_rejected_before_anything_changes() {
     let d = tmp("dryrun");
-    let latch = d.join("exiscandisable");
-    std::fs::write(&latch, "disabled\n").unwrap();
+    // a named-queue wiring switched off: the fragment sits as .disabled
+    let frag = d.join("mailscannerq.conf");
+    let latch = d.join("mailscannerq.conf.disabled");
+    std::fs::write(
+        d.join("config.toml"),
+        format!("mailscannerq_conf = \"{}\"\n", frag.display()),
+    )
+    .unwrap();
+    std::fs::write(
+        d.join("hook"),
+        format!(".include_if_exists {}\n", frag.display()),
+    )
+    .unwrap();
+    std::fs::write(&latch, "queue = mailscanner\n").unwrap();
 
     let out = msfe_ng(&d, &["exim", "enable-scanning", "--dry-run"]);
     assert_eq!(
@@ -36,7 +49,24 @@ fn unknown_flag_is_rejected_before_anything_changes() {
     );
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("--dry-run") && err.contains("usage:"), "{err}");
-    assert!(latch.exists(), "the kill switch must not have been touched");
+    assert!(
+        latch.exists() && !frag.exists(),
+        "the kill switch must not have been touched"
+    );
+    // the real thing flips it
+    let out = msfe_ng(&d, &["exim", "status"]);
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("DISABLED"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let out = msfe_ng(&d, &["exim", "enable-scanning"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(frag.exists() && !latch.exists());
 
     // the same for a subcommand that takes no flags at all
     let out = msfe_ng(&d, &["engine", "configure", "--dry-run"]);
@@ -104,7 +134,6 @@ fn cpanel_spamassassin_toggle_uses_the_forced_off_flag() {
         Command::new(env!("CARGO_BIN_EXE_msfe-ng"))
             .args(args)
             .env("MSFE_NG_CONFIG", d.join("config.toml"))
-            .env("MSFE_NG_EXISCANDISABLE", d.join("exiscandisable"))
             .env("MSFE_NG_CPANEL_ROOT", &d)
             .output()
             .unwrap()

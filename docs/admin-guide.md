@@ -55,7 +55,7 @@ Verify: `msfe-ng health` and **WHM → Plugins → MSFE-NG**.
 - **Housekeeping** — `msfe-ng housekeeping` prunes old log rows (retention from
   the `cleanmysql` setting); runs nightly.
 - **Scanning toggle** — `msfe-ng exim status | enable-scanning | disable-scanning`
-  (uses `/etc/exiscandisable`).
+  (renames the named-queue ACL fragment; the two-config layout has no switch).
 - **Self-test** — `msfe-ng selftest` sends GTUBE/EICAR/clean mail through the MTA.
 - **Doctor** — `msfe-ng doctor` checks every link of the chain and names the fix.
 - **Monitor** — `msfe-ng monitor` (cron, every 5 min) applies the queue

@@ -21,10 +21,15 @@ Exim* for anything it owns (Razor identity, Pyzor/Bayes homes, envelope-sender
 header, archive dir, spam-check size, the Exim message-id shim) — only on an
 engine already set to `MTA = exim`; runs the phishing-list updater; `sync`
 when archive rules are missing; spool repair; starts MailScanner when it is
-wired and the startup latch is on but it is stopped. Decisions are never made
-for you: the mailflow kill switch, cPanel SpamAssassin, the DNS resolver,
-database creation, enabling message logging and config paths stay listed with
-their fix. The installer runs `doctor --fix` at the end of every install and
+wired and the startup latch is on but it is stopped; disables and parks a
+`MailScanner.service` whose binary is gone (a ConfigServer-era unit failing at
+every boot, kept under `/etc/msfe-ng/legacy-engine-etc`); takes the first
+configuration snapshot. Decisions are never made for you: the mailflow kill
+switch, cPanel SpamAssassin, cPanel's own ClamAV pass in Exim (*cPanel virus
+scan in Exim (exiscan)* — `touch /etc/exiscandisable` and rebuild Exim to
+stop the double virus scan, or keep it to reject infected mail at SMTP time),
+the DNS resolver, database creation, enabling message logging and config
+paths stay listed with their fix. The installer runs `doctor --fix` at the end of every install and
 upgrade, and the guided migration runs it as its last step.
 
 ## A configuration change did not take effect

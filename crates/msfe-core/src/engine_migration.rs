@@ -378,6 +378,9 @@ pub fn remove_legacy(root: &Path, live: bool) -> io::Result<Vec<String>> {
             .status();
         let _ = Command::new("systemctl").arg("daemon-reload").status();
     }
+    // a hand-written MailScanner.service pointing at the removed tree would
+    // fail at every boot from now on
+    done.extend(legacy::remove_stale_engine_units(root, live)?);
     // the front-end itself: the tree, its cron files, root's crontab lines,
     // the WHM app — shared with `legacy_decommission`
     done.extend(legacy::remove_front_end(root, live)?);

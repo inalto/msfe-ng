@@ -373,18 +373,45 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
         },
         "msfe-ng service spool-repair (or Queues tab → Fix misplaced spool files), then msfe-ng engine configure to stop it recurring",
     ));
-    let scanning = mailflow::scanning_enabled();
+    let scanning = mailflow::scanning_state(cfg);
     out.push(check(
         "scanning kill switch",
-        scanning,
+        scanning.enabled(),
         Level::Warn,
-        if scanning {
-            "scanning enabled".into()
-        } else {
-            "scanning DISABLED via mailflow toggle".into()
-        },
+        scanning.describe().into(),
         "msfe-ng exim enable-scanning (or the mailflow toggle on the Service tab)",
     ));
+    // A MailScanner.service left by another era, pointing at a binary that
+    // is gone (gauss: ConfigServer's, enabled, failing at every boot)
+    let stale_units = crate::legacy::stale_engine_units(Path::new("/"));
+    out.push(check(
+        "stale MailScanner service unit",
+        stale_units.is_empty(),
+        Level::Warn,
+        if stale_units.is_empty() {
+            "no MailScanner.service points at a missing binary".into()
+        } else {
+            stale_units
+                .iter()
+                .map(|(u, b)| format!("{u} starts {b}, which does not exist — it fails at every boot"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        },
+        "msfe-ng doctor --fix (disables it and parks the unit file under /etc/msfe-ng/legacy-engine-etc)",
+    ));
+    if cfg.panel == "cpanel" {
+        let (ok, detail) = exiscan_verdict(
+            &std::fs::read_to_string(engine::exim_conf_path()).unwrap_or_default(),
+            wired,
+        );
+        out.push(check(
+            "cPanel virus scan in Exim (exiscan)",
+            ok,
+            Level::Warn,
+            detail,
+            "a policy choice, not applied by --fix: touch /etc/exiscandisable && /scripts/buildeximconf && /scripts/restartsrv_exim stops cPanel's SMTP-time ClamAV pass (MailScanner keeps scanning); leave it to keep rejecting infected mail at SMTP time",
+        ));
+    }
     if cfg.panel == "cpanel" {
         let (ok, detail) = mailflow::cpanel_sa_verdict(&mailflow::cpanel_sa_state());
         out.push(check(
@@ -1187,6 +1214,29 @@ fn dnsbl_check(ms_conf: &str, conf_path: &Path) -> Check {
     check("DNS blocklists answering", ok, Level::Warn, detail, &fix)
 }
 
+/// `(ok, detail)` for cPanel's exiscan: `av_scanner` in exim.conf means
+/// cPanel's ClamAV pass in the SMTP DATA ACL is on; with MailScanner wired
+/// that is a second virus scan of every message.
+pub fn exiscan_verdict(exim_conf: &str, wired: bool) -> (bool, String) {
+    let on = exim_conf
+        .lines()
+        .any(|l| l.trim_start().starts_with("av_scanner"));
+    match (on, wired) {
+        (false, _) => (
+            true,
+            "off — cPanel's Exim does not run ClamAV itself (/etc/exiscandisable or no clamd); MailScanner is the virus scanner".into(),
+        ),
+        (true, false) => (
+            true,
+            "on — cPanel's Exim runs ClamAV at SMTP time (av_scanner in exim.conf); MailScanner is not in the mail path, so nothing is scanned twice".into(),
+        ),
+        (true, true) => (
+            false,
+            "on — cPanel's Exim runs ClamAV at SMTP time (av_scanner in exim.conf) and MailScanner scans every message again: a double virus scan".into(),
+        ),
+    }
+}
+
 /// Candidate `Max Spam Check Size` values the doctor can suggest.
 pub const SPAM_CHECK_SIZE_LADDER: &[(&str, u64)] = &[
     ("1M", 1_000_000),
@@ -1473,6 +1523,10 @@ pub enum Fix {
     SpoolRepair,
     /// start MailScanner: wired, latch on, but not running.
     Start,
+    /// disable + park a MailScanner.service whose binary is gone.
+    StaleUnit,
+    /// `snapshot export` — none taken yet.
+    Snapshot,
 }
 
 /// Which fixes the findings call for. `engine_targets_exim`: `MTA = exim`
@@ -1513,6 +1567,8 @@ pub fn plan(checks: &[Check], engine_targets_exim: bool) -> Vec<Fix> {
             "message archive configured" => Some(Fix::Sync),
             "spool files correctly placed" => Some(Fix::SpoolRepair),
             "MailScanner running" if wired && latch_on => Some(Fix::Start),
+            "stale MailScanner service unit" => Some(Fix::StaleUnit),
+            "configuration snapshot" => Some(Fix::Snapshot),
             _ => None,
         };
         if let Some(f) = fix {
@@ -1602,6 +1658,22 @@ pub fn fix(cfg: &Config, config_file: &Path) -> Vec<String> {
                     "start MailScanner: {}",
                     if o.ok { "ok" } else { "FAILED" }
                 ));
+            }
+            Fix::StaleUnit => {
+                match crate::legacy::remove_stale_engine_units(Path::new("/"), true) {
+                    Ok(lines) => done.extend(lines),
+                    Err(e) => done.push(format!("stale unit: {e}")),
+                }
+            }
+            Fix::Snapshot => {
+                match crate::snapshot::export(cfg, config_file, crate::snapshot::Only::All, None) {
+                    Ok((path, m)) => done.push(format!(
+                        "snapshot written: {} ({} files)",
+                        path.display(),
+                        m.files.len()
+                    )),
+                    Err(e) => done.push(format!("snapshot failed: {e}")),
+                }
             }
         }
     }
@@ -2124,15 +2196,31 @@ mod tests {
                 Fix::EngineConfigure,
                 Fix::PhishingUpdate,
                 Fix::Sync,
-                Fix::SpoolRepair
+                Fix::SpoolRepair,
+                Fix::Snapshot
             ],
             "decisions are never planned; configure listed once"
         );
         // an engine never configured for Exim is left to the Service tab
         assert_eq!(
             plan(&checks, false),
-            vec![Fix::LoggingModules, Fix::Sync, Fix::SpoolRepair]
+            vec![
+                Fix::LoggingModules,
+                Fix::Sync,
+                Fix::SpoolRepair,
+                Fix::Snapshot
+            ]
         );
+        // a stale unit is mechanical; the exiscan double scan is a decision
+        assert_eq!(
+            plan(&[chk("stale MailScanner service unit", Level::Warn)], false),
+            vec![Fix::StaleUnit]
+        );
+        assert!(plan(
+            &[chk("cPanel virus scan in Exim (exiscan)", Level::Warn)],
+            true
+        )
+        .is_empty());
         assert!(plan(&[chk("logging perl modules", Level::Ok)], true).is_empty());
         // the size check is configure's business only at the stock limit
         let size = |limit: &str| Check {
@@ -2151,6 +2239,20 @@ mod tests {
         };
         assert_eq!(plan(&[size("200k")], true), vec![Fix::EngineConfigure]);
         assert!(plan(&[size("2M")], true).is_empty());
+    }
+
+    // ncc: no /etc/exiscandisable → av_scanner in exim.conf → every message
+    // is ClamAV-scanned by cPanel at SMTP time and by MailScanner again.
+    #[test]
+    fn exiscan_verdict_flags_the_double_virus_scan_only_when_wired() {
+        let on = "primary_hostname = x\nav_scanner = clamd:/run/clamav/clamd.sock\n";
+        let (ok, d) = exiscan_verdict(on, true);
+        assert!(!ok);
+        assert!(d.contains("double virus scan"), "{d}");
+        assert!(exiscan_verdict(on, false).0);
+        let (ok, d) = exiscan_verdict("primary_hostname = x\n", true);
+        assert!(ok);
+        assert!(d.starts_with("off"), "{d}");
     }
 
     #[test]

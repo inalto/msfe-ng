@@ -1411,7 +1411,7 @@ fn cmd_service(sub: Option<&str>) -> ExitCode {
                 "MailScanner: {} ({} processes), scanning {}",
                 if st.active { "active" } else { "stopped" },
                 st.procs,
-                if mailflow::scanning_enabled() {
+                if mailflow::scanning_enabled(&cfg) {
                     "enabled"
                 } else {
                     "disabled"
@@ -1494,20 +1494,17 @@ fn cmd_service(sub: Option<&str>) -> ExitCode {
     }
 }
 
-/// Toggle / report MailScanner scanning via the exiscandisable flag.
+/// Toggle / report MailScanner scanning via the named-queue kill switch.
 fn cmd_exim(sub: Option<&str>) -> ExitCode {
     use msfe_core::mailflow;
+    let cfg = Config::load(&config_path());
     match sub {
         Some("status") => {
             println!(
                 "MailScanner scanning: {}",
-                if mailflow::scanning_enabled() {
-                    "enabled"
-                } else {
-                    "disabled"
-                }
+                mailflow::scanning_state(&cfg).describe()
             );
-            if Config::load(&config_path()).panel == "cpanel" {
+            if cfg.panel == "cpanel" {
                 let (_, detail) = mailflow::cpanel_sa_verdict(&mailflow::cpanel_sa_state());
                 println!("cPanel SpamAssassin: {detail}");
             }
@@ -1537,7 +1534,7 @@ fn cmd_exim(sub: Option<&str>) -> ExitCode {
                 }
             }
         }
-        Some("enable-scanning") => match mailflow::set_scanning(true) {
+        Some("enable-scanning") => match mailflow::set_scanning(&cfg, true) {
             Ok(()) => {
                 println!("scanning enabled");
                 ExitCode::SUCCESS
@@ -1547,12 +1544,9 @@ fn cmd_exim(sub: Option<&str>) -> ExitCode {
                 ExitCode::from(1)
             }
         },
-        Some("disable-scanning") => match mailflow::set_scanning(false) {
+        Some("disable-scanning") => match mailflow::set_scanning(&cfg, false) {
             Ok(()) => {
-                println!(
-                    "scanning disabled ({} created)",
-                    mailflow::exiscandisable_path().display()
-                );
+                println!("scanning disabled — mail bypasses MailScanner until enable-scanning");
                 ExitCode::SUCCESS
             }
             Err(e) => {

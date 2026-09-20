@@ -20,6 +20,14 @@ the right.
   incoming spool directory. Safe to re-run.
 - **Enable / Disable MailScanner (mailflow)** — the instant kill switch: with
   scanning disabled, mail bypasses MailScanner entirely (Exim delivers directly).
+  It is the named-queue ACL fragment renamed to `.disabled` (its include is
+  `include_if_exists`) plus one Exim rebuild, so it exists only for the
+  named-queue wiring; on ConfigServer's two-config layout `/etc/exim.conf`
+  itself spools into the scanning queue, there is no switch, and the button
+  is not shown. `/etc/exiscandisable` is *not* the kill switch: cPanel reads it
+  for one thing only — turning off its own *exiscan*, the ClamAV pass in
+  Exim's SMTP ACL — so MSFE-NG leaves that file as it finds it (see the doctor
+  check *cPanel virus scan in Exim (exiscan)*).
 - **Disable cPanel SpamAssassin (double scan)** (cPanel only) — cPanel's own
   Apache SpamAssassin runs in Exim *before* MailScanner sees the message, for
   every account with Spam Filters on (or all of them under WHM's *Forced
