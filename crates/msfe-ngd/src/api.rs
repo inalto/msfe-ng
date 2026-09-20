@@ -1025,6 +1025,35 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
         }
         ("GET", "/api/engine/migrate") => engine_migrate_preflight(cfg, config_file),
         ("GET", "/api/legacy/decommission") => legacy_decommission_preflight(cfg, config_file),
+        ("GET", "/api/autoban") => autoban_state(cfg, config_file),
+        ("PUT", "/api/autoban/rules") | ("POST", "/api/autoban/rules") => {
+            autoban_save_rules(req, cfg, config_file)
+        }
+        ("POST", "/api/autoban/test") => autoban_test(req, cfg),
+        ("POST", "/api/autoban/run") => {
+            let v = Json::parse(&req.body).unwrap_or(Json::Null);
+            let dry = matches!(v.get("dry_run"), Some(Json::Bool(true)));
+            Response::json(
+                200,
+                &autoban_report_json(&msfe_core::autoban::run(cfg, config_file, dry)).to_string(),
+            )
+        }
+        ("GET", "/api/autoban/history") => {
+            let limit = req
+                .query_param("limit")
+                .and_then(|l| l.parse().ok())
+                .unwrap_or(50usize);
+            Response::json(
+                200,
+                &Json::Array(
+                    msfe_core::autoban::history(cfg, limit)
+                        .iter()
+                        .map(msfe_core::autoban::ban_row_json)
+                        .collect(),
+                )
+                .to_string(),
+            )
+        }
         ("POST", "/api/legacy/decommission") => legacy_decommission_run(cfg, config_file),
         ("GET", "/api/resolver") => resolver_state(),
 
@@ -2215,6 +2244,225 @@ fn engine_migrate_preflight(cfg: &Config, config_file: &Path) -> Response {
         ])
         .to_string(),
     )
+}
+
+fn threshold_json(t: &msfe_core::autoban::Threshold) -> Json {
+    Json::Object(vec![
+        ("enabled".into(), Json::Bool(t.enabled)),
+        ("count".into(), Json::Int(t.count as i64)),
+        ("window_secs".into(), Json::Int(t.window_secs as i64)),
+        ("ban_secs".into(), Json::Int(t.ban_secs as i64)),
+    ])
+}
+
+fn candidates_json(c: &[msfe_core::autoban::Candidate]) -> Json {
+    Json::Array(
+        c.iter()
+            .map(|c| {
+                Json::Object(vec![
+                    ("ip".into(), Json::str(&c.ip)),
+                    ("reason".into(), Json::str(&c.reason)),
+                    (
+                        "rule_id".into(),
+                        c.rule_id.map(|r| Json::Int(r as i64)).unwrap_or(Json::Null),
+                    ),
+                    ("count".into(), Json::Int(c.count as i64)),
+                    ("seconds".into(), Json::Int(c.seconds as i64)),
+                    ("detail".into(), Json::str(&c.detail)),
+                ])
+            })
+            .collect(),
+    )
+}
+
+fn autoban_report_json(r: &msfe_core::autoban::Report) -> Json {
+    let strs = |v: &[String]| Json::Array(v.iter().map(Json::str).collect());
+    Json::Object(vec![
+        ("ok".into(), Json::Bool(true)),
+        ("dry_run".into(), Json::Bool(r.dry_run)),
+        ("enabled".into(), Json::Bool(r.enabled)),
+        ("examined".into(), Json::Int(r.examined as i64)),
+        ("candidates".into(), candidates_json(&r.candidates)),
+        ("banned".into(), candidates_json(&r.banned)),
+        (
+            "skipped".into(),
+            Json::Array(
+                r.skipped
+                    .iter()
+                    .map(|(ip, why)| {
+                        Json::Object(vec![
+                            ("ip".into(), Json::str(ip)),
+                            ("why".into(), Json::str(why)),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+        ("transcript".into(), strs(&r.transcript)),
+    ])
+}
+
+/// The auto-ban settings, match rules and state for the Settings card.
+fn autoban_state(cfg: &Config, config_file: &Path) -> Response {
+    use msfe_core::autoban;
+    let rules = autoban::Rules::from_config(cfg);
+    let matches = autoban::load_match_rules(&sync::policy_dir(config_file));
+    let kv = |k: &str| {
+        if cfg.db_configured() {
+            msfe_core::db::kv_get(cfg, k).unwrap_or_default()
+        } else {
+            String::new()
+        }
+    };
+    Response::json(
+        200,
+        &Json::Object(vec![
+            (
+                "csf_available".into(),
+                Json::Bool(msfe_core::csf::available()),
+            ),
+            (
+                "telegram_configured".into(),
+                Json::Bool(msfe_core::telegram::configured(cfg)),
+            ),
+            ("telegram".into(), Json::Bool(cfg.autoban_telegram)),
+            ("db_configured".into(), Json::Bool(cfg.db_configured())),
+            (
+                "enabled".into(),
+                Json::Bool(rules.any_enabled() || autoban::any_ban_rule(&matches)),
+            ),
+            (
+                "thresholds".into(),
+                Json::Object(vec![
+                    ("high".into(), threshold_json(&rules.high)),
+                    ("spam".into(), threshold_json(&rules.spam)),
+                ]),
+            ),
+            (
+                "rules".into(),
+                Json::Array(matches.iter().map(autoban::match_rule_json).collect()),
+            ),
+            ("last_run".into(), Json::str(kv("autoban_last_run"))),
+            ("last_id".into(), Json::str(kv("autoban_last_id"))),
+        ])
+        .to_string(),
+    )
+}
+
+/// Validate and store the whole match-rule list, then sync so the
+/// SpamAssassin file follows. Nothing is written when a rule is invalid.
+fn autoban_save_rules(req: &Request, cfg: &Config, config_file: &Path) -> Response {
+    use msfe_core::autoban;
+    let v = Json::parse(&req.body).unwrap_or(Json::Null);
+    let Some(Json::Array(items)) = v.get("rules") else {
+        return Response::json(400, r#"{"error":"rules must be an array"}"#);
+    };
+    let perl = msfe_core::layout::resolve(cfg).perl;
+    let mut rules = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        let r = autoban::match_rule_from_json(item);
+        let fail = |m: String| {
+            Response::json(
+                400,
+                &Json::Object(vec![
+                    ("error".into(), Json::str(format!("rule {}: {m}", i + 1))),
+                    ("index".into(), Json::Int(i as i64)),
+                ])
+                .to_string(),
+            )
+        };
+        if !autoban::valid_field(&r.field) {
+            return fail(format!("unknown field '{}'", r.field));
+        }
+        let re = match autoban::pattern_to_regex(&r.matcher, &r.pattern) {
+            Ok(re) => re,
+            Err(e) => return fail(e),
+        };
+        if let Err(e) = autoban::check_regex(&perl, &re) {
+            return fail(format!("the pattern does not compile: {e}"));
+        }
+        if r.ban_secs > 365 * 86_400 {
+            return fail("the ban may not exceed one year".into());
+        }
+        if !r.block && r.ban_secs == 0 {
+            return fail("a rule must block delivery, ban the source, or both".into());
+        }
+        if r.comment.len() > 200 || r.pattern.len() > 500 {
+            return fail("comment (200) or pattern (500) too long".into());
+        }
+        rules.push(r);
+    }
+    let policy = sync::policy_dir(config_file);
+    let saved = match autoban::save_match_rules(&policy, &rules) {
+        Ok(s) => s,
+        Err(e) => return Response::json(500, &format!("{{\"error\":\"save failed: {e}\"}}")),
+    };
+    match sync::run(cfg, config_file, None) {
+        Ok(r) => {
+            if r.changed > 0 {
+                sync::reload_mailscanner();
+            }
+            Response::json(
+                200,
+                &Json::Object(vec![
+                    ("ok".into(), Json::Bool(true)),
+                    ("changed".into(), Json::Int(r.changed as i64)),
+                    (
+                        "rules".into(),
+                        Json::Array(saved.iter().map(autoban::match_rule_json).collect()),
+                    ),
+                ])
+                .to_string(),
+            )
+        }
+        Err(e) => Response::json(
+            400,
+            &Json::Object(vec![("error".into(), Json::str(e.to_string()))]).to_string(),
+        ),
+    }
+}
+
+/// Which recent messages a pattern would match (SpamAssassin's own regex
+/// engine, via the engine's perl).
+fn autoban_test(req: &Request, cfg: &Config) -> Response {
+    let v = Json::parse(&req.body).unwrap_or(Json::Null);
+    let perl = msfe_core::layout::resolve(cfg).perl;
+    match msfe_core::autoban::test_pattern(
+        cfg,
+        &perl,
+        &v.str_field("field"),
+        &v.str_field("matcher"),
+        &v.str_field("pattern"),
+        200,
+    ) {
+        Ok((re, matches)) => Response::json(
+            200,
+            &Json::Object(vec![
+                ("ok".into(), Json::Bool(true)),
+                ("regex".into(), Json::str(&re)),
+                ("checked".into(), Json::Int(200)),
+                (
+                    "matches".into(),
+                    Json::Array(
+                        matches
+                            .iter()
+                            .map(|(id, value)| {
+                                Json::Object(vec![
+                                    ("id".into(), Json::str(id)),
+                                    ("value".into(), Json::str(value)),
+                                ])
+                            })
+                            .collect(),
+                    ),
+                ),
+            ])
+            .to_string(),
+        ),
+        Err(e) => Response::json(
+            400,
+            &Json::Object(vec![("error".into(), Json::str(e))]).to_string(),
+        ),
+    }
 }
 
 /// What decommissioning ConfigServer's front-end would remove.

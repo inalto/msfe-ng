@@ -335,3 +335,35 @@ fn legacy_decommission_reports_and_refuses_when_nothing_is_left() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// `autoban` with nothing configured reports "off" and does nothing; its
+/// flags are checked like everyone else's.
+#[test]
+fn autoban_status_is_off_by_default_and_flags_are_checked() {
+    let d = tmp("autoban");
+    std::fs::write(d.join("config.toml"), "panel = \"cpanel\"\n").unwrap();
+    let out = msfe_ng(&d, &["autoban", "status"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.starts_with("auto-ban: off"), "{text}");
+    assert!(
+        text.contains("high spam: off — 1 message(s) in 10m → ban 1d"),
+        "{text}"
+    );
+    assert!(
+        text.contains("spam: off — 3 message(s) in 1h → ban 2h"),
+        "{text}"
+    );
+    let out = msfe_ng(&d, &["autoban", "run", "--dry-run"]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("nothing enabled"));
+    let out = msfe_ng(&d, &["autoban", "run", "--force"]);
+    assert_eq!(out.status.code(), Some(2));
+    let out = msfe_ng(&d, &["autoban", "wipe"]);
+    assert_eq!(out.status.code(), Some(2));
+    let _ = std::fs::remove_dir_all(&d);
+}

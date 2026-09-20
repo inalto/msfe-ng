@@ -38,6 +38,8 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
         ("engine", Some("wire" | "unwire")) => Some(DRY),
         ("engine", Some("migrate-legacy")) => Some(&["--run"]),
         ("legacy", Some("decommission")) => Some(&["--run"]),
+        ("autoban", Some("run")) => Some(DRY),
+        ("autoban", _) => Some(NONE),
         ("legacy", _) => Some(NONE),
         ("engine", _) => Some(NONE),
         ("service", Some("spool-repair")) => Some(DRY),
@@ -109,6 +111,7 @@ fn usage_of(cmd: &str) -> &'static str {
         }
         "mailscanner" => "msfe-ng mailscanner <status|enable-logging|disable-logging>",
         "legacy" => "msfe-ng legacy decommission [--run]",
+        "autoban" => "msfe-ng autoban <status|run [--dry-run]|rules>",
         "upgrade" => "msfe-ng upgrade [--check]",
         "doctor" => "msfe-ng doctor [--fix]",
         "resolver" => "msfe-ng resolver <status|install>",
@@ -172,6 +175,7 @@ fn main() -> ExitCode {
         "rules" => cmd_rules(args.get(1).map(String::as_str)),
         "engine" => cmd_engine(args.get(1).map(String::as_str)),
         "legacy" => cmd_legacy(args.get(1).map(String::as_str)),
+        "autoban" => cmd_autoban(args.get(1).map(String::as_str)),
         "doctor" => cmd_doctor(args.iter().any(|a| a == "--fix")),
         "backup" => cmd_backup(sub),
         "restore" => cmd_restore(sub, rest),
@@ -838,6 +842,119 @@ fn cmd_housekeeping() -> ExitCode {
 /// per the queue_clean_* rules, relocate misfiled spool files, and send
 /// Telegram alerts for queue growth, stuck scanning and per-account sending
 /// bursts. `--dry-run` previews everything.
+/// `msfe-ng autoban <status|run [--dry-run]|rules>`: the minute cron's
+/// command, its state, and the match rules.
+fn cmd_autoban(sub: Option<&str>) -> ExitCode {
+    use msfe_core::autoban;
+    let cfg = Config::load(&config_path());
+    let policy = msfe_core::sync::policy_dir(&config_path());
+    let rules = autoban::Rules::from_config(&cfg);
+    let matches = autoban::load_match_rules(&policy);
+    let threshold_line = |name: &str, t: &autoban::Threshold| {
+        format!(
+            "{name}: {} — {} message(s) in {} → ban {}",
+            if t.enabled { "on" } else { "off" },
+            t.count,
+            autoban::format_secs(t.window_secs),
+            autoban::format_secs(t.ban_secs)
+        )
+    };
+    match sub {
+        Some("status") => {
+            let on = rules.any_enabled() || autoban::any_ban_rule(&matches);
+            println!("auto-ban: {}", if on { "on" } else { "off" });
+            println!("{}", threshold_line("high spam", &rules.high));
+            println!("{}", threshold_line("spam", &rules.spam));
+            println!(
+                "match rules: {} ({} enabled, {} banning); csf: {}; telegram: {}",
+                matches.len(),
+                matches.iter().filter(|m| m.enabled).count(),
+                matches
+                    .iter()
+                    .filter(|m| m.enabled && m.ban_secs > 0)
+                    .count(),
+                if msfe_core::csf::available() {
+                    "installed"
+                } else {
+                    "not installed"
+                },
+                if cfg.autoban_telegram && msfe_core::telegram::configured(&cfg) {
+                    "on"
+                } else {
+                    "off"
+                }
+            );
+            if cfg.db_configured() {
+                let last_run = msfe_core::db::kv_get(&cfg, "autoban_last_run").unwrap_or_default();
+                let last_id = msfe_core::db::kv_get(&cfg, "autoban_last_id").unwrap_or_default();
+                println!(
+                    "last run: {}; last maillog id seen: {}",
+                    if last_run.is_empty() {
+                        "never".to_string()
+                    } else {
+                        last_run
+                    },
+                    if last_id.is_empty() {
+                        "none".to_string()
+                    } else {
+                        last_id
+                    }
+                );
+                for b in autoban::history(&cfg, 10) {
+                    println!(
+                        "  {} {} for {} — {} (expires {})",
+                        b.banned_at,
+                        b.ip,
+                        autoban::format_secs(b.seconds),
+                        b.detail,
+                        b.expires_at
+                    );
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Some("run") => {
+            let dry = std::env::args().any(|a| a == "--dry-run");
+            let rep = autoban::run(&cfg, &config_path(), dry);
+            for l in &rep.transcript {
+                println!("{l}");
+            }
+            ExitCode::SUCCESS
+        }
+        Some("rules") => {
+            if matches.is_empty() {
+                println!("no match rules");
+            }
+            for m in &matches {
+                println!(
+                    "#{} {} {} {} {:?} — block: {}, ban: {}{}",
+                    m.id,
+                    if m.enabled { "on " } else { "off" },
+                    m.field,
+                    m.matcher,
+                    m.pattern,
+                    if m.block { "yes" } else { "no" },
+                    if m.ban_secs > 0 {
+                        autoban::format_secs(m.ban_secs)
+                    } else {
+                        "no".into()
+                    },
+                    if m.comment.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" — {}", m.comment)
+                    }
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        _ => {
+            eprintln!("usage: msfe-ng autoban <status|run [--dry-run]|rules>");
+            ExitCode::from(2)
+        }
+    }
+}
+
 fn cmd_monitor(flag: Option<&str>) -> ExitCode {
     let cfg = Config::load(&config_path());
     let dry = flag == Some("--dry-run");
@@ -2497,6 +2614,7 @@ COMMANDS:
     digest [--dry-run]  Email quarantine digests to digest-enabled domains
     housekeeping        Prune old mail-log rows (cleanmysql retention)
     monitor [--dry-run] Auto-clean the delivery queue, fix misfiled spool files, send Telegram alerts (cron)
+    autoban <status|run [--dry-run]|rules>   Temporary csf bans for spam sources and match rules (cron: every minute)
     engine migrate-legacy [--run]     ConfigServer MailScanner → the MailScanner RPM (preflight without --run)
     legacy decommission [--run]       Remove ConfigServer's MSFE front-end only, backed up first (preflight without --run)
     exim <status|enable-scanning|disable-scanning>   Toggle MailScanner scanning
