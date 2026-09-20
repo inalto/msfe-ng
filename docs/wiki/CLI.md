@@ -20,9 +20,10 @@ msfe-ng import <dir> [--save]       import a legacy ConfigServer MSFE dir (e.g. 
 
 msfe-ng engine <status|install|configure|enable|disable|lint>
 msfe-ng engine migrate-legacy [--run]        ConfigServer MailScanner → the RPM (preflight without --run)
+msfe-ng legacy decommission [--run]          remove ConfigServer's front-end only, backed up first (preflight without --run)
 msfe-ng engine <wire|unwire> [--dry-run]     route mail through MailScanner via Exim (or undo)
 msfe-ng service <status|start|stop|reload|restart|queue-fix|spool-repair>
-msfe-ng exim <status|enable-scanning|disable-scanning>   the mailflow kill switch
+msfe-ng exim <status|enable-scanning|disable-scanning>   the mailflow kill switch (named-queue wiring only)
 msfe-ng exim <enable|disable>-cpanel-spamassassin        cPanel's own SpamAssassin (double scan; Forced Global OFF)
 msfe-ng mailscanner <status|enable-logging|disable-logging>
 

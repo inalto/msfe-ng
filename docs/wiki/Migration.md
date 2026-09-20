@@ -97,9 +97,11 @@ first failure:
    to its prompts), then whatever it left: `/usr/mailscanner`, `/usr/msfe`,
    every cron entry referencing `/usr/msfe` (`/etc/cron.d/msfe.sh`,
    `/etc/cron.hourly/msdigest.pl`, `/etc/cron.daily/mailscanner_daily.cron`,
-   …), `/etc/init.d/MailScanner`, root's crontab lines, the legacy WHM plugin
-   registration. `csget` (ConfigServer's shared updater, used by csf too) is
-   never touched.
+   …), `/etc/init.d/MailScanner`, a hand-written `MailScanner.service`
+   pointing at the removed tree (disabled and parked under
+   `/etc/msfe-ng/legacy-engine-etc/`), root's crontab lines, the legacy WHM
+   plugin registration. `csget` (ConfigServer's shared updater, used by csf
+   too) is never touched.
 5. `msfe-ng engine install` at the latest MailScanner v5 release
 6. `config.toml` pointed at `/etc/MailScanner/MailScanner.conf`
 7. `%org-name%`, `%org-long-name%`, `%web-site%` carried over from the legacy conf
@@ -110,11 +112,36 @@ first failure:
 11. Exim wiring: the two-config layout is kept if the uninstaller left it;
     otherwise the named-queue wiring is set up
 12. startup latch on, unit enabled, MailScanner (re)started
-13. `msfe-ng doctor` — anything not OK is printed with its fix
+13. `msfe-ng doctor --fix` — the mechanical repairs first (among them the
+    upstream SpamAssassin ruleset for the SpamAssassin the new engine loads,
+    see below), then anything still not OK is printed with its fix
 
 Preflight notes worth acting on before starting: *no policy imported yet*
 (the legacy settings vanish with `/usr/msfe` — run the import first) and
 *database not configured*.
+
+### What a migrated host looks like, from one that was done
+
+A ConfigServer host migrated on 2026-09-20 kept its **two-config Exim
+wiring** (`/etc/exim.conf` spooling into `/var/spool/exim_incoming`,
+`exim_outgoing.conf` delivering) — expected, and the doctor reports it as
+wired; there is no kill switch on that layout and queue commands must go
+through `-C /etc/exim_outgoing.conf` (the Queues tab does; see
+Troubleshooting). Things the doctor then found and now repairs:
+
+- **`/etc/exiscandisable`** left by ConfigServer: not a MailScanner bypass on
+  a stock cPanel, only its *exiscan* (ClamAV in Exim) switch — kept as is.
+- a **stale `MailScanner.service`** from 2020, enabled, failing at every
+  boot beside the RPM's `mailscanner.service`.
+- **SpamAssassin from CPAN** (`/usr/local/share/perl5`, version 4.0.2) whose
+  upstream ruleset had never been fetched: cPanel's nightly `sa-update` feeds
+  its own bundled 4.0.1, so MailScanner had been scoring with the site rules
+  (KAM + cPanel's few picked rules) for a year. The RPM engine's daily cron
+  (`ms_cron_sa=1` in `/etc/MailScanner/defaults`) runs `ms-update-sa` from
+  the first night; `doctor --fix` does it at once.
+- the **private DNS resolver** install on a Hetzner host, where the same
+  IPv4 is listed twice: fixed in the installer, and the doctor now restarts
+  a dead loopback resolver.
 
 If you already removed the front-end by hand (or its uninstaller took the
 engine with it), just run `msfe-ng engine install`, `msfe-ng engine

@@ -147,10 +147,73 @@ Sendmail2          = /usr/sbin/exim -C /etc/exim_outgoing.conf
 ```
 
 Without the `-C`, MailScanner hands released messages to an Exim that looks
-for them in the *incoming* spool and logs `Spool file … -D not found`.
-**Wire** and **Unwire** refuse to touch that layout: MSFE-NG never layers its
-named queue over it. To switch to the named-queue method, undo the two-config
-setup with the tools that created it first.
+for them in the *incoming* spool and logs `Spool file … -D not found`. The
+same applies to every queue command: a bare `exim -Mrm <id>` (or `-bp`,
+`-Mvh`, `-M`) on this layout only sees the scanning spool and answers `Spool
+file <id>-D not found` for a message waiting in the delivery queue. The
+Queues tab and the monitor's auto-clean select the queue for you — `-C
+/etc/exim_outgoing.conf` for the delivery queue, bare for the scanning queue
+(with the named-queue wiring it is `-qGmailscanner` and bare) — and the
+transcript shows the arguments used. By hand:
+
+```sh
+/usr/sbin/exim -C /etc/exim_outgoing.conf -bp          # the delivery queue
+/usr/sbin/exim -C /etc/exim_outgoing.conf -Mrm <id>    # delete from it
+/usr/sbin/exim -bp                                     # the scanning queue
+```
+
+There is **no mailflow kill switch** on this layout: `/etc/exim.conf` itself
+spools into the scanning queue, so mail always passes through MailScanner.
+The Service tab does not show the toggle, `msfe-ng exim disable-scanning`
+refuses, and the doctor says so. **Wire** and **Unwire** refuse to touch
+that layout: MSFE-NG never layers its named queue over it. To switch to the
+named-queue method, undo the two-config setup with the tools that created it
+first.
+
+## `/etc/exiscandisable` — the kill switch that is not one
+
+With ConfigServer's front-end, `/etc/exiscandisable` bypassed MailScanner —
+through ConfigServer's *patch* of `Cpanel::Exim`, long since overwritten by
+cPanel updates. On a stock cPanel that file does exactly one thing: it turns
+off cPanel's own *exiscan*, the ClamAV pass in Exim's SMTP `DATA` ACL
+(`av_scanner` in exim.conf). MSFE-NG's kill switch is the named-queue ACL
+fragment renamed to `.disabled` (see the Service page) and never touches that
+file, so a ConfigServer-era `/etc/exiscandisable` stays as it is — which is
+the right setting with MailScanner scanning for viruses. Where the file is
+absent, cPanel's Exim scans every message with ClamAV at SMTP time and
+MailScanner scans it again: the doctor check *cPanel virus scan in Exim
+(exiscan)* warns about the double scan. Stopping it is a policy choice, so
+`doctor --fix` leaves it alone — SMTP-time rejection of infected mail is the
+upside of keeping it:
+
+```sh
+touch /etc/exiscandisable && /scripts/buildeximconf && /scripts/restartsrv_exim
+```
+
+## A `MailScanner.service` that fails at every boot
+
+The RPM engine runs as `mailscanner.service`, generated from its LSB
+`ms-init`. A hand-written `/usr/lib/systemd/system/MailScanner.service` (or
+one under `/etc/systemd/system`) from another era — ConfigServer's, pointing
+at `/usr/mailscanner/usr/sbin/MailScanner` — survives the migration, stays
+*enabled*, and fails with status 203 at every boot next to the working unit.
+The doctor check *stale MailScanner service unit* finds any
+`MailScanner.service` whose `ExecStart` binary is gone; `doctor --fix`
+disables it and parks the file under `/etc/msfe-ng/legacy-engine-etc/`
+(the guided migration does the same).
+
+## cPanel Spam Filters: a double scan that is not happening
+
+The doctor check *cPanel SpamAssassin double scan* counts accounts whose home
+holds `.spamassassinenable` — but two WHM switches sit above those flags and
+are honoured: the *Apache SpamAssassin* service off in **Service Manager**
+(`/etc/spamddisable`, tested by cPanel's Exim ACL before every SpamAssassin
+step) and *Enable Apache SpamAssassin spam filter* off in **Tweak Settings**
+(`skipspamassassin=1`, which removes the feature; accounts created afterwards
+still get the flag, and `uapi … disable_spam_assassin` answers *feature is
+not enabled on this system*). With either off the check passes as *off
+server-wide … the stale Spam Filters flag on N account(s) is ignored* and the
+Service tab's button does nothing.
 
 ## Daily cron mail: `gzip: phishing.bad.sites.conf.master.gz: not in gzip format`
 
@@ -213,13 +276,25 @@ most every ten minutes; each change of verdict is logged by the daemon
 The fix is a private recursive resolver on the server itself. **Service →
 Private DNS resolver → Install** (or `msfe-ng resolver install`; `msfe-ng
 resolver status` first) does it as a logged job: installs unbound, binds
-PowerDNS to the public addresses when it holds port 53, configures unbound
-on loopback with `Restart=on-failure`, **verifies a Spamhaus test query
-through 127.0.0.1 before touching anything else**, then points resolv.conf —
-and NetworkManager or the ifcfg files, so it is not written back — at
-loopback only. Every file edited keeps a `.msfe-ng.bak`. BIND (`named`) on
-port 53 is reported as a blocker: set its `listen-on` to the public
-addresses first. By hand, the same steps are:
+PowerDNS to the public addresses when it holds port 53 (each address once —
+Hetzner hosts list the same IPv4 as a peer route and as a /32, and PowerDNS
+refuses to bind one address twice; if PowerDNS does not come back with the
+new `local-address`, its previous config is restored and the job stops
+there), configures unbound on loopback with `Restart=always`, **verifies a
+Spamhaus test query through 127.0.0.1 before touching anything else**, then
+points resolv.conf — and NetworkManager or the ifcfg files, so it is not
+written back — at loopback only. Every file edited keeps a `.msfe-ng.bak`.
+BIND (`named`) on port 53 is reported as a blocker: set its `listen-on` to
+the public addresses first.
+
+`Restart=always` matters on cPanel: when a service fails, chkservd restarts
+it with cPanel's `restartsrv`, which first kills whatever holds the
+service's port — a PowerDNS that cannot start therefore takes unbound off
+port 53 with a plain SIGTERM (exit 0, not a "failure"), and resolv.conf
+keeps pointing at a dead 127.0.0.1: every lookup on the server fails, mail
+delivery included. The doctor check *local DNS resolver answering* fails in
+that state and `doctor --fix` starts unbound again. By hand, the same steps
+are:
 
 ```sh
 dnf -y install unbound
@@ -236,7 +311,8 @@ systemctl enable --now unbound
 # resolver as a fallback: glibc and SpamAssassin switch to it on any error
 # and the lists' refusal codes come back. With network-scripts set
 # PEERDNS=no and DNS1=127.0.0.1 in ifcfg-eth0 so dhclient does not write it
-# back; give unbound Restart=on-failure.
+# back; give unbound Restart=always (a drop-in under
+# /etc/systemd/system/unbound.service.d/).
 dig +short 2.0.0.127.zen.spamhaus.org   # expect 127.0.0.2/4/10, not 127.255.255.254
 ```
 

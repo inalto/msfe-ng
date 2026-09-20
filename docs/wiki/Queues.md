@@ -25,6 +25,11 @@ never auto-selected.
 - **Delete all spam** / **Delete all bounces** — one click; if the queue is
   larger than the loaded page, deletion repeats until nothing matches.
 - **follow (5s)** auto-refreshes; **raw** shows Exim's own `-bp` listing.
+- Every action runs `exim` against the right queue for the wiring: with the
+  named-queue method `-qGmailscanner` for the scanning queue; with
+  ConfigServer's two-config layout `-C /etc/exim_outgoing.conf` for the
+  delivery queue (a bare `exim -Mrm` there answers *Spool file not found*).
+  The transcript shows the exact arguments.
 
 ## Spool placement
 
