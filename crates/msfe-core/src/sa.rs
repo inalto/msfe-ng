@@ -177,6 +177,167 @@ pub fn update_rules(perl: &[String]) -> (bool, String) {
     )
 }
 
+// ---- cPanel's SpamAssassin plugins -----------------------------------------
+//
+// WHM → Exim Configuration Manager → "Apache SpamAssassin: <plugin>" symlinks
+// /usr/local/cpanel/etc/mail/spamassassin/<Name>.cf into the site rules dir.
+// P0f's plugin needs cPanel's private perl (IO::SigGuard from its cpanel_lib)
+// and cPanel's p0f daemon: under the system perl MailScanner runs, it fails
+// to load — at every child start and in every sa-learn/spamassassin
+// transcript (gauss). It serves cPanel's own spamd only.
+
+/// A `loadplugin` of cPanel's in the site rules that the engine's perl
+/// cannot load: `(tweak name, module path, first error line)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrokenPlugin {
+    pub name: String,
+    pub module: String,
+    pub error: String,
+}
+
+/// `loadplugin Module /usr/local/cpanel/...` lines of the site rules dir,
+/// as `(file stem, module path)`.
+pub fn cpanel_plugin_loads(site_rules_dir: &std::path::Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(site_rules_dir) else {
+        return out;
+    };
+    let mut entries: Vec<_> = rd.flatten().map(|e| e.path()).collect();
+    entries.sort();
+    for path in entries {
+        let is_conf = path.extension().is_some_and(|e| e == "cf" || e == "pre");
+        if !is_conf {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for l in text.lines() {
+            let mut f = l.split_whitespace();
+            if f.next() != Some("loadplugin") {
+                continue;
+            }
+            let _module_name = f.next();
+            if let Some(file) = f.next().filter(|p| p.starts_with("/usr/local/cpanel/")) {
+                let stem = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                out.push((stem, file.to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// Which of cPanel's plugins fail to load under `perl` (cheap: only the
+/// plugin file is required, not the ruleset).
+pub fn broken_cpanel_plugins(
+    perl: &[String],
+    site_rules_dir: &std::path::Path,
+) -> Vec<BrokenPlugin> {
+    let Some((interp, args)) = perl.split_first() else {
+        return Vec::new();
+    };
+    cpanel_plugin_loads(site_rules_dir)
+        .into_iter()
+        .filter_map(|(name, module)| {
+            let out = Command::new(interp)
+                .args(args)
+                .args([
+                    "-I",
+                    "/usr/local/cpanel",
+                    "-e",
+                    "require $ARGV[0]; 1",
+                    "--",
+                    &module,
+                ])
+                .output()
+                .ok()?;
+            if out.status.success() {
+                return None;
+            }
+            let err = String::from_utf8_lossy(&out.stderr);
+            let first = err
+                .lines()
+                .find(|l| l.contains("Can't locate") || l.contains("error"))
+                .or_else(|| err.lines().next())
+                .unwrap_or("does not load")
+                .trim()
+                .to_string();
+            Some(BrokenPlugin {
+                name,
+                module,
+                error: first,
+            })
+        })
+        .collect()
+}
+
+/// `(ok, detail)` for the doctor.
+pub fn cpanel_plugins_verdict(broken: &[BrokenPlugin], spamd_disabled: bool) -> (bool, String) {
+    if broken.is_empty() {
+        return (
+            true,
+            "every SpamAssassin plugin in the site rules loads under MailScanner's perl".into(),
+        );
+    }
+    let names: Vec<&str> = broken.iter().map(|b| b.name.as_str()).collect();
+    let why = broken
+        .iter()
+        .map(|b| {
+            let short = b
+                .error
+                .split(" (@INC")
+                .next()
+                .unwrap_or(&b.error)
+                .to_string();
+            format!("{}: {short}", b.name)
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    (
+        false,
+        format!(
+            "cPanel's SpamAssassin plugin(s) {} cannot load under MailScanner's perl — logged at every scan and in every learn/report transcript; they serve cPanel's own spamd{} ({why})",
+            names.join(", "),
+            if spamd_disabled { ", which is off" } else { "" }
+        ),
+    )
+}
+
+/// The WHM tweak that removes a plugin's symlink.
+pub fn cpanel_plugin_off_command(name: &str) -> String {
+    format!("whmapi1 set_tweaksetting module=Mail key=spamassassin_plugin_{name} value=0")
+}
+
+/// Turn the broken plugins off through cPanel's API. Returns what happened.
+pub fn disable_cpanel_plugins(broken: &[BrokenPlugin]) -> Vec<String> {
+    broken
+        .iter()
+        .map(|b| {
+            let ok = Command::new("whmapi1")
+                .args([
+                    "--output=json",
+                    "set_tweaksetting",
+                    "module=Mail",
+                    &format!("key=spamassassin_plugin_{}", b.name),
+                    "value=0",
+                ])
+                .output()
+                .is_ok_and(|o| {
+                    o.status.success()
+                        && String::from_utf8_lossy(&o.stdout).contains("\"result\":1")
+                });
+            format!(
+                "cPanel SpamAssassin plugin {} turned off in WHM: {}",
+                b.name,
+                if ok { "ok" } else { "FAILED" }
+            )
+        })
+        .collect()
+}
+
 /// The Bayes DB MailScanner scans with: `<SpamAssassin User State Dir>/bayes`
 /// from MailScanner.conf, or `None` when no state dir is set (sa-learn's own
 /// default then — root's `~/.spamassassin`, which the scanning children never
@@ -545,6 +706,51 @@ fn run_with_stdin(cmd: &str, args: &[&str], input: &[u8]) -> std::io::Result<(bo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // gauss: WHM's P0f plugin symlinked into the site rules, unloadable
+    // under the system perl.
+    #[test]
+    fn cpanel_plugin_loads_are_found_and_judged() {
+        let dir = std::env::temp_dir().join(format!("msfe-saplug-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("P0f.cf"),
+            "loadplugin Mail::SpamAssassin::Plugin::P0f /usr/local/cpanel/Cpanel/Mail/SpamAssassin/Plugin/P0f.pm\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("v400.pre"),
+            "loadplugin Mail::SpamAssassin::Plugin::ExtractText\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("KAM.cf"), "score KAM_X 1.0\n").unwrap();
+        assert_eq!(
+            cpanel_plugin_loads(&dir),
+            vec![(
+                "P0f".to_string(),
+                "/usr/local/cpanel/Cpanel/Mail/SpamAssassin/Plugin/P0f.pm".to_string()
+            )]
+        );
+        let broken = vec![BrokenPlugin {
+            name: "P0f".into(),
+            module: "/usr/local/cpanel/Cpanel/Mail/SpamAssassin/Plugin/P0f.pm".into(),
+            error: "Can't locate IO/SigGuard.pm in @INC (you may need to install the IO::SigGuard module) (@INC contains: /usr/local/cpanel)".into(),
+        }];
+        let (ok, d) = cpanel_plugins_verdict(&broken, true);
+        assert!(!ok);
+        assert!(
+            d.contains("P0f") && d.contains("which is off") && d.contains("IO/SigGuard.pm"),
+            "{d}"
+        );
+        assert!(!d.contains("@INC contains"), "{d}");
+        assert!(cpanel_plugins_verdict(&[], false).0);
+        assert_eq!(
+            cpanel_plugin_off_command("P0f"),
+            "whmapi1 set_tweaksetting module=Mail key=spamassassin_plugin_P0f value=0"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     // gauss: SpamAssassin 4.0.2 wanted /var/lib/spamassassin/4.000002, which
     // never existed — only cPanel's 4.000001 did.

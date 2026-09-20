@@ -26,7 +26,9 @@ wired and the startup latch is on but it is stopped; disables and parks a
 every boot, kept under `/etc/msfe-ng/legacy-engine-etc`); fetches the
 upstream SpamAssassin ruleset when it is missing or older than 30 days
 (*SpamAssassin upstream rules* — the engine's own `ms-update-sa`: sa-update,
-sa-compile, MailScanner restart); takes the first configuration snapshot. Decisions are never made for you: the mailflow kill
+sa-compile, MailScanner restart); turns off cPanel SpamAssassin plugins the
+engine's perl cannot load, while cPanel's own spamd is disabled; takes the
+first configuration snapshot. Decisions are never made for you: the mailflow kill
 switch, cPanel SpamAssassin, cPanel's own ClamAV pass in Exim (*cPanel virus
 scan in Exim (exiscan)* — `touch /etc/exiscandisable` and rebuild Exim to
 stop the double virus scan, or keep it to reject infected mail at SMTP time),
@@ -47,8 +49,15 @@ The doctor check *SpamAssassin upstream rules* fails on the missing directory
 and warns when it is over 30 days old; `doctor --fix` runs the engine's
 `ms-update-sa`. The RPM engine's daily cron keeps it updated afterwards.
 The `P0f.pm … IO/SigGuard.pm` lines in a learn transcript are cPanel's
-SpamAssassin plugin (`/etc/mail/spamassassin/P0f.cf`) failing to load under
-the system perl — noise, not a failure.
+SpamAssassin plugin (`/etc/mail/spamassassin/P0f.cf`, symlinked in by WHM →
+Exim Configuration Manager → *Apache SpamAssassin: P0f*) failing to load
+under the system perl: it needs cPanel's private perl and serves cPanel's own
+spamd only. Noise, not a failure — but logged at every scan. The doctor check
+*cPanel SpamAssassin plugins load* names any of cPanel's plugins the engine's
+perl cannot load; while cPanel's spamd is off (`/etc/spamddisable`) `doctor
+--fix` turns them off through `whmapi1 set_tweaksetting module=Mail
+key=spamassassin_plugin_<Name> value=0`, otherwise the command is left to
+you.
 
 ## A configuration change did not take effect
 

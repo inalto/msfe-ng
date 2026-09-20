@@ -449,6 +449,31 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
         },
         "dnf -y install spamassassin (or re-run msfe-ng engine install with MSFE_NG_ENGINE_FORCE=1)",
     ));
+    if cfg.panel == "cpanel" && sa {
+        let site = mailscanner::get_directive(&conf, "SpamAssassin Site Rules Dir")
+            .map(str::trim)
+            .filter(|v| v.starts_with('/'))
+            .unwrap_or("/etc/mail/spamassassin");
+        let broken = crate::sa::broken_cpanel_plugins(&lay.perl, Path::new(site));
+        let spamd_off = Path::new("/etc/spamddisable").exists();
+        let (ok, detail) = crate::sa::cpanel_plugins_verdict(&broken, spamd_off);
+        let fix = broken
+            .iter()
+            .map(|b| crate::sa::cpanel_plugin_off_command(&b.name))
+            .collect::<Vec<_>>()
+            .join("; ");
+        out.push(check(
+            "cPanel SpamAssassin plugins load",
+            ok,
+            Level::Warn,
+            detail,
+            &if spamd_off {
+                format!("msfe-ng doctor --fix (turns them off in WHM: {fix})")
+            } else {
+                format!("turn them off in WHM → Exim Configuration Manager once cPanel's spamd is not needed: {fix}")
+            },
+        ));
+    }
     if let Some(rules) = crate::sa::rules_state(cfg, &lay.perl) {
         let (ok, fail, detail) = crate::sa::rules_verdict(&rules);
         out.push(check(
@@ -1550,6 +1575,9 @@ pub enum Fix {
     StaleUnit,
     /// sa-update: the upstream ruleset is missing or stale.
     SaUpdate,
+    /// turn off cPanel SA plugins the engine's perl cannot load — only
+    /// while cPanel's own spamd is disabled (nothing else uses them).
+    CpanelSaPlugins,
     /// `snapshot export` — none taken yet.
     Snapshot,
 }
@@ -1595,6 +1623,13 @@ pub fn plan(checks: &[Check], engine_targets_exim: bool) -> Vec<Fix> {
             "local DNS resolver answering" => Some(Fix::ResolverStart),
             "stale MailScanner service unit" => Some(Fix::StaleUnit),
             "SpamAssassin upstream rules" => Some(Fix::SaUpdate),
+            "cPanel SpamAssassin plugins load"
+                if c.fix
+                    .as_deref()
+                    .is_some_and(|f| f.starts_with("msfe-ng doctor --fix")) =>
+            {
+                Some(Fix::CpanelSaPlugins)
+            }
             "configuration snapshot" => Some(Fix::Snapshot),
             _ => None,
         };
@@ -1699,6 +1734,15 @@ pub fn fix(cfg: &Config, config_file: &Path) -> Vec<String> {
             Fix::SaUpdate => {
                 let (_, line) = crate::sa::update_rules(&layout::resolve(cfg).perl);
                 done.push(line);
+            }
+            Fix::CpanelSaPlugins => {
+                let site = mailscanner::get_directive(&conf, "SpamAssassin Site Rules Dir")
+                    .map(str::trim)
+                    .filter(|v| v.starts_with('/'))
+                    .unwrap_or("/etc/mail/spamassassin");
+                let broken =
+                    crate::sa::broken_cpanel_plugins(&layout::resolve(cfg).perl, Path::new(site));
+                done.extend(crate::sa::disable_cpanel_plugins(&broken));
             }
             Fix::Snapshot => {
                 match crate::snapshot::export(cfg, config_file, crate::snapshot::Only::All, None) {
@@ -2260,6 +2304,30 @@ mod tests {
             plan(&[chk("SpamAssassin upstream rules", Level::Fail)], false),
             vec![Fix::SaUpdate]
         );
+        // cPanel's plugins are switched off only when its spamd is off
+        let plug = |fix: &str| Check {
+            name: "cPanel SpamAssassin plugins load",
+            level: Level::Warn,
+            detail: String::new(),
+            fix: Some(fix.into()),
+            url: None,
+        };
+        assert_eq!(
+            plan(
+                &[plug(
+                    "msfe-ng doctor --fix (turns them off in WHM: whmapi1 …)"
+                )],
+                false
+            ),
+            vec![Fix::CpanelSaPlugins]
+        );
+        assert!(plan(
+            &[plug(
+                "turn them off in WHM → Exim Configuration Manager once …"
+            )],
+            false
+        )
+        .is_empty());
         assert!(plan(
             &[chk("cPanel virus scan in Exim (exiscan)", Level::Warn)],
             true
