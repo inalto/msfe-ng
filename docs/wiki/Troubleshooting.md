@@ -210,6 +210,16 @@ upside of keeping it:
 touch /etc/exiscandisable && /scripts/buildeximconf && /scripts/restartsrv_exim
 ```
 
+Which to choose: with exiscan on, infected mail is refused at SMTP time (the
+sender's MTA reports it) but **never reaches MSFE-NG** — not the Messages
+log, not the quarantine, not the statistics; only `exim_rejectlog` records
+it — and every message is ClamAV-scanned twice. With it off, MailScanner is
+the one virus scanner: infected mail is quarantined with its report in the
+Messages tab and the per-domain virus actions apply. The conventional
+MailScanner setup is off. To keep exiscan on purpose, set `accept_exiscan =
+true` in `config.toml` (Config tab → msfe-ng config): the doctor then shows
+the check as OK, *kept on purpose*.
+
 ## A `MailScanner.service` that fails at every boot
 
 The RPM engine runs as `mailscanner.service`, generated from its LSB

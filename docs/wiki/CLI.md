@@ -62,6 +62,7 @@ Seeded by the installer with comments; editable from the [Config](Config) tab.
 | Paths | `mailscanner_conf`, `mailscanner_custom_dir`, `mailscanner_rules_dir`, `mailscannerq_conf`, `spambox_conf`, `quarantine_dir`, `archive_dir`, `maillog_path`, `exim_mainlog_path`, `backup_dir`, `socket`, `webroot` |
 | Interface & release | `refresh_secs`, `rows_per_page`, `view_new_window`, `learn_updates_db`, `forward_subject`, `forward_body`, `release_from`, `spamcop_address`, `dovecot_lda`, `csf_comment_default`, `geoip_url` |
 | Queue auto-clean | `queue_clean_frozen_hours`, `queue_clean_bounce_hours`, `queue_clean_spam_score` |
+| Doctor | `accept_exiscan` (keep cPanel's ClamAV pass in Exim on purpose; the double-scan notice becomes OK) |
 | Auto-ban | `autoban_high_enabled`, `autoban_high_count`, `autoban_high_window_secs`, `autoban_high_ban_secs`, the same `autoban_spam_*`, `autoban_telegram` |
 | Telegram | `telegram_bot_token`, `telegram_chat_id`, `alert_queue_size`, `alert_scan_stuck_mins`, `alert_burst_per_hour`, `alert_cooldown_mins` |
 | Delivery test | `delivery_runs_per_min`, `delivery_cache_secs`, `delivery_log_days`, `delivery_max_monitors`, `delivery_helo` |

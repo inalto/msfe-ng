@@ -415,12 +415,17 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
             &std::fs::read_to_string(engine::exim_conf_path()).unwrap_or_default(),
             wired,
         );
+        let (ok, detail) = if !ok && cfg.accept_exiscan {
+            (true, format!("{detail} — kept on purpose (accept_exiscan = true in config.toml); infected mail is refused at SMTP time and never reaches the Messages log"))
+        } else {
+            (ok, detail)
+        };
         out.push(check(
             "cPanel virus scan in Exim (exiscan)",
             ok,
             Level::Warn,
             detail,
-            "a policy choice, not applied by --fix: touch /etc/exiscandisable && /scripts/buildeximconf && /scripts/restartsrv_exim stops cPanel's SMTP-time ClamAV pass (MailScanner keeps scanning); leave it to keep rejecting infected mail at SMTP time",
+            "a policy choice, not applied by --fix: touch /etc/exiscandisable && /scripts/buildeximconf && /scripts/restartsrv_exim stops cPanel's SMTP-time ClamAV pass (MailScanner keeps scanning, and infected mail becomes visible in the Messages tab); to keep SMTP-time rejection instead, set accept_exiscan = true in config.toml (Config tab → msfe-ng config) and this notice goes away",
         ));
     }
     if cfg.panel == "cpanel" {

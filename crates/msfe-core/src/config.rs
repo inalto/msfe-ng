@@ -82,6 +82,10 @@ pub struct Config {
     /// Remove messages whose spool spam score is at least this (0 = off).
     pub queue_clean_spam_score: f64,
 
+    /// The admin keeps cPanel's own ClamAV pass in Exim (exiscan) on purpose:
+    /// the doctor's double-virus-scan notice becomes a plain OK line.
+    pub accept_exiscan: bool,
+
     // ---- auto-ban of spam sources in csf (every rule ships OFF) --------------
     /// Ban an IP after `autoban_high_count` high-spam messages within
     /// `autoban_high_window_secs`, for `autoban_high_ban_secs`.
@@ -160,6 +164,7 @@ impl Default for Config {
             queue_clean_frozen_hours: 0,
             queue_clean_bounce_hours: 0,
             queue_clean_spam_score: 0.0,
+            accept_exiscan: false,
             autoban_high_enabled: false,
             autoban_high_count: 1,
             autoban_high_window_secs: 600,
@@ -264,6 +269,7 @@ impl Config {
                 "queue_clean_frozen_hours" => c.queue_clean_frozen_hours = v.parse().unwrap_or(0),
                 "queue_clean_bounce_hours" => c.queue_clean_bounce_hours = v.parse().unwrap_or(0),
                 "queue_clean_spam_score" => c.queue_clean_spam_score = v.parse().unwrap_or(0.0),
+                "accept_exiscan" => c.accept_exiscan = truthy(&v),
                 "autoban_high_enabled" => c.autoban_high_enabled = truthy(&v),
                 "autoban_high_count" => c.autoban_high_count = v.parse().unwrap_or(1).max(1),
                 "autoban_high_window_secs" => c.autoban_high_window_secs = v.parse().unwrap_or(600),
@@ -352,6 +358,7 @@ impl Config {
                 "queue_clean_spam_score".into(),
                 Json::Num(format!("{}", self.queue_clean_spam_score)),
             ),
+            ("accept_exiscan".into(), Json::Bool(self.accept_exiscan)),
             (
                 "autoban_high_enabled".into(),
                 Json::Bool(self.autoban_high_enabled),
