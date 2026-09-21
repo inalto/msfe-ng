@@ -921,7 +921,7 @@ pub fn two_config_active() -> bool {
 /// wiring that is `-qG<name>` or nothing; on the two-config layout the
 /// default config *is* the scanning spool and the delivery spool is only
 /// reachable through `-C /etc/exim_outgoing.conf` — a bare `exim -Mrm` there
-/// answers "Spool file not found" (gauss).
+/// answers "Spool file not found" (seen on a migrated host).
 pub fn exim_queue_args(named: Option<&str>) -> Vec<String> {
     match (two_config_active(), named) {
         (true, None) => vec!["-C".into(), exim_outgoing_conf_path().display().to_string()],

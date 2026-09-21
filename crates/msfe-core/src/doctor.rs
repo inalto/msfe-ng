@@ -331,7 +331,7 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
         ));
     }
     // A loopback resolver that is dead takes every lookup on the server
-    // with it (gauss: cPanel's chkservd killed unbound off port 53)
+    // with it (seen where cPanel's chkservd killed unbound off port 53)
     if let Some((ok, detail)) = crate::resolver::local_resolver_verdict(&crate::resolver::state()) {
         out.push(check(
             "local DNS resolver answering",
@@ -393,7 +393,7 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
         "msfe-ng exim enable-scanning (or the mailflow toggle on the Service tab)",
     ));
     // A MailScanner.service left by another era, pointing at a binary that
-    // is gone (gauss: ConfigServer's, enabled, failing at every boot)
+    // is gone (a ConfigServer-era unit, enabled, failing at every boot)
     let stale_units = crate::legacy::stale_engine_units(Path::new("/"));
     out.push(check(
         "stale MailScanner service unit",
@@ -429,6 +429,26 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
         ));
     }
     if cfg.panel == "cpanel" {
+        // cPanel's Exim system filter rejects a list of attachment extensions
+        // at SMTP time — `.eml` among them, i.e. every PEC (certified) message
+        // — before MailScanner, whose own filename rules are per domain and
+        // logged, gets to see it
+        let localopts = std::fs::read_to_string("/etc/exim.conf.localopts").unwrap_or_default();
+        let filter = localopts
+            .lines()
+            .find_map(|l| l.strip_prefix("systemfilter="))
+            .map(str::trim)
+            .filter(|p| p.starts_with('/'))
+            .map(|p| std::fs::read_to_string(p).unwrap_or_default())
+            .unwrap_or_default();
+        let (ok, detail) = exim_attachment_filter_verdict(&localopts, &filter, wired);
+        out.push(check(
+            "cPanel attachment filter in Exim",
+            ok,
+            Level::Warn,
+            detail,
+            "a policy choice, not applied by --fix: WHM → Exim Configuration Manager → Filters → untick \"Attachments: Filter messages with dangerous attachments\" (or: whmapi1 set_tweaksetting module=Mail key=filter_attachments value=0) — MailScanner's filename and filetype rules keep blocking dangerous attachments, per domain and visibly in the Messages log",
+        ));
         let (ok, detail) = mailflow::cpanel_sa_verdict(&mailflow::cpanel_sa_state());
         out.push(check(
             "cPanel SpamAssassin double scan",
@@ -1312,6 +1332,37 @@ fn dnsbl_check(ms_conf: &str, conf_path: &Path) -> Check {
         .collect();
     let (ok, detail, fix) = dnsbl_verdict(&results, shared_resolver().as_deref());
     check("DNS blocklists answering", ok, Level::Warn, detail, &fix)
+}
+
+/// `(ok, detail)` for cPanel's system-filter attachment block: on when
+/// `filter_attachments=1` and the filter file carries the extension list.
+pub fn exim_attachment_filter_verdict(
+    localopts: &str,
+    filter: &str,
+    wired: bool,
+) -> (bool, String) {
+    let on = localopts
+        .lines()
+        .any(|l| l.trim() == "filter_attachments=1");
+    let in_file = filter.contains("potentially executable attachment");
+    let eml = filter.contains("|eml|");
+    match (on && in_file, wired) {
+        (false, _) => (
+            true,
+            "off — cPanel's Exim does not reject attachments by name; MailScanner's filename rules decide".into(),
+        ),
+        (true, false) => (
+            true,
+            "on — cPanel's Exim rejects attachments by extension at SMTP time; MailScanner is not in the mail path".into(),
+        ),
+        (true, true) => (
+            false,
+            format!(
+                "on — cPanel's Exim rejects attachments by extension at SMTP time, before MailScanner{}; the sender gets \"potentially executable attachment … package it up as a zip file\" and nothing reaches the Messages log",
+                if eml { " — .eml included, so every PEC (certified) message with its postacert.eml is refused" } else { "" }
+            ),
+        ),
+    }
 }
 
 /// `(ok, detail)` for cPanel's exiscan: `av_scanner` in exim.conf means
@@ -2412,7 +2463,7 @@ mod tests {
         assert!(plan(&[size("2M")], true).is_empty());
     }
 
-    // ncc: no /etc/exiscandisable → av_scanner in exim.conf → every message
+    // a stock cPanel host: no /etc/exiscandisable → av_scanner in exim.conf → every message
     // is ClamAV-scanned by cPanel at SMTP time and by MailScanner again.
     #[test]
     fn exiscan_verdict_flags_the_double_virus_scan_only_when_wired() {
@@ -2424,6 +2475,25 @@ mod tests {
         let (ok, d) = exiscan_verdict("primary_hostname = x\n", true);
         assert!(ok);
         assert!(d.starts_with("off"), "{d}");
+    }
+
+    // a cPanel host receiving PEC: the system filter's attachment list has
+    // `eml`, so postacert.eml is refused at SMTP time, before MailScanner
+    #[test]
+    fn attachment_filter_verdict_names_pec_when_eml_is_in_the_list() {
+        let opts = "filter_attachments=1\nsystemfilter=/etc/cpanel_exim_system_filter\n";
+        let filter = "if $header_content-type: matches \"name=(\\.(?:ad[ep]|ba[st]|eml|exe)\")\"\n  fail text \"a potentially executable attachment $1\"\n";
+        let (ok, d) = exim_attachment_filter_verdict(opts, filter, true);
+        assert!(!ok);
+        assert!(d.contains("PEC") && d.contains("postacert.eml"), "{d}");
+        assert!(
+            exim_attachment_filter_verdict(opts, filter, false).0,
+            "unwired: MailScanner not involved"
+        );
+        assert!(exim_attachment_filter_verdict("filter_attachments=0\n", filter, true).0);
+        let no_eml = filter.replace("|eml", "");
+        let (ok, d) = exim_attachment_filter_verdict(opts, &no_eml, true);
+        assert!(!ok && !d.contains("PEC"), "{d}");
     }
 
     #[test]

@@ -15,7 +15,7 @@ use std::process::{Command, Stdio};
 //
 // SpamAssassin loads the upstream ruleset from `<local state dir>/<version>/
 // updates_spamassassin_org`, fetched by sa-update. Without it every scan runs
-// on the site rules alone (gauss: a CPAN SpamAssassin 4.0.2 whose 4.000002
+// on the site rules alone (seen where a CPAN SpamAssassin 4.0.2 whose 4.000002
 // dir had never been created — cPanel's nightly sa-update feeds its own
 // bundled 4.0.1 — so MailScanner scored with KAM + cPanel's 79 picked rules,
 // and `spamassassin -r`, which insists on rules, refused to report).
@@ -184,7 +184,7 @@ pub fn update_rules(perl: &[String]) -> (bool, String) {
 // P0f's plugin needs cPanel's private perl (IO::SigGuard from its cpanel_lib)
 // and cPanel's p0f daemon: under the system perl MailScanner runs, it fails
 // to load — at every child start and in every sa-learn/spamassassin
-// transcript (gauss). It serves cPanel's own spamd only.
+// transcript (a migrated host). It serves cPanel's own spamd only.
 
 /// A `loadplugin` of cPanel's in the site rules that the engine's perl
 /// cannot load: `(tweak name, module path, first error line)`.
@@ -707,7 +707,7 @@ fn run_with_stdin(cmd: &str, args: &[&str], input: &[u8]) -> std::io::Result<(bo
 mod tests {
     use super::*;
 
-    // gauss: WHM's P0f plugin symlinked into the site rules, unloadable
+    // a host where WHM's P0f plugin symlinked into the site rules, unloadable
     // under the system perl.
     #[test]
     fn cpanel_plugin_loads_are_found_and_judged() {

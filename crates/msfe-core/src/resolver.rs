@@ -84,7 +84,7 @@ fn unit_active(unit: &str) -> bool {
 
 /// `ip -o -<4|6> addr show scope global` → addresses, each once: Hetzner
 /// hosts carry the same IPv4 as a `peer` route and as a plain /32, and
-/// PowerDNS refuses to bind one address twice (gauss: crash-loop, then
+/// PowerDNS refuses to bind one address twice (seen where crash-loop, then
 /// cPanel's chkservd killed unbound off port 53 trying to restart it).
 pub fn parse_ip_addr(output: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();

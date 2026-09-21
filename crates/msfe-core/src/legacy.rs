@@ -459,7 +459,7 @@ impl LegacyImport {
 mod tests {
     use super::*;
 
-    // gauss: a 2020 hand-written MailScanner.service pointing at the removed
+    // a migrated host: a 2020 hand-written MailScanner.service pointing at the removed
     // ConfigServer tree, enabled, failing at every boot next to the RPM's
     // mailscanner.service.
     #[test]
