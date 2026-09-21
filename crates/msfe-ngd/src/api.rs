@@ -635,6 +635,25 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             }
             Err(e) => Response::json(500, &format!("{{\"error\":\"configure: {e}\"}}")),
         },
+        // one proposed change, after the admin confirmed it in the doctor bar
+        ("POST", "/api/doctor/apply") => {
+            let v = Json::parse(&req.body).unwrap_or(Json::Null);
+            let name = v.str_field("name");
+            match msfe_core::doctor::apply(cfg, config_file, &name) {
+                Ok(lines) => Response::json(
+                    200,
+                    &Json::Object(vec![
+                        ("ok".into(), Json::Bool(true)),
+                        ("lines".into(), strs(&lines)),
+                    ])
+                    .to_string(),
+                ),
+                Err(e) => Response::json(
+                    400,
+                    &Json::Object(vec![("error".into(), Json::str(e))]).to_string(),
+                ),
+            }
+        }
         ("POST", "/api/doctor/fix") => {
             let done = msfe_core::doctor::fix(cfg, config_file);
             let checks = msfe_core::doctor::run(cfg, config_file);
@@ -668,6 +687,13 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                             c.fix.clone().map(Json::Str).unwrap_or(Json::Null),
                         ),
                         ("url".into(), c.url.map(Json::str).unwrap_or(Json::Null)),
+                        (
+                            "proposal".into(),
+                            c.proposal
+                                .as_ref()
+                                .map(|(s, _)| Json::str(s))
+                                .unwrap_or(Json::Null),
+                        ),
                     ])
                 })
                 .collect();

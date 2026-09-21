@@ -46,7 +46,7 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
         ("service", _) => Some(NONE),
         ("mailscanner", _) => Some(NONE),
         ("upgrade", _) => Some(&["--check"]),
-        ("doctor", _) => Some(&["--fix"]),
+        ("doctor", _) => Some(&["--fix", "--apply"]),
         ("resolver", _) => Some(NONE),
         ("snapshot", Some("export")) => Some(&["--only"]),
         ("snapshot", Some("import")) => Some(&["--dry-run", "--only", "--yes", "--no-lint"]),
@@ -114,7 +114,7 @@ fn usage_of(cmd: &str) -> &'static str {
         "legacy" => "msfe-ng legacy decommission [--run]",
         "autoban" => "msfe-ng autoban <status|run [--dry-run]|rules>",
         "upgrade" => "msfe-ng upgrade [--check]",
-        "doctor" => "msfe-ng doctor [--fix]",
+        "doctor" => "msfe-ng doctor [--fix | --apply <check name>]",
         "resolver" => "msfe-ng resolver <status|install>",
         "snapshot" => "msfe-ng snapshot <export [file] [--only mailscanner|msfe] | import <file> [--dry-run] [--only mailscanner|msfe] [--no-lint] [--yes] | list>",
         "backup" => "msfe-ng backup <file.tar.gz>   (alias: snapshot export --only msfe)",
@@ -177,7 +177,28 @@ fn main() -> ExitCode {
         "engine" => cmd_engine(args.get(1).map(String::as_str)),
         "legacy" => cmd_legacy(args.get(1).map(String::as_str)),
         "autoban" => cmd_autoban(args.get(1).map(String::as_str)),
-        "doctor" => cmd_doctor(args.iter().any(|a| a == "--fix")),
+        "doctor" => {
+            if let Some(i) = args.iter().position(|a| a == "--apply") {
+                let Some(name) = args.get(i + 1) else {
+                    eprintln!("usage: msfe-ng doctor --apply \"<check name>\"   (the proposals are listed as 'apply:' lines by msfe-ng doctor)");
+                    return ExitCode::from(2);
+                };
+                let cfg = Config::load(&config_path());
+                return match msfe_core::doctor::apply(&cfg, &config_path(), name) {
+                    Ok(lines) => {
+                        for l in lines {
+                            println!("{l}");
+                        }
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("msfe-ng doctor --apply: {e}");
+                        ExitCode::from(1)
+                    }
+                };
+            }
+            cmd_doctor(args.iter().any(|a| a == "--fix"))
+        }
         "backup" => cmd_backup(sub),
         "restore" => cmd_restore(sub, rest),
         "snapshot" => cmd_snapshot(sub, rest),
@@ -1025,6 +1046,12 @@ fn cmd_doctor(fix: bool) -> ExitCode {
         }
         if let Some(url) = c.url {
             println!("       see: {url}");
+        }
+        if let Some((summary, _)) = &c.proposal {
+            println!(
+                "       apply: {summary}   (msfe-ng doctor --apply \"{}\")",
+                c.name
+            );
         }
     }
     if doctor::healthy(&checks) {
@@ -2650,6 +2677,7 @@ COMMANDS:
     resolver <status|install>         Private DNS resolver (unbound on loopback) so the blocklists answer
     service <status|start|stop|reload|restart|queue-fix|spool-repair>   MailScanner service & queues
     doctor [--fix]      Check every link of the scanning chain; names each fix (--fix applies the mechanical ones)
+    doctor --apply <check name>   Apply the change a notice proposes (a decision made by you; validated, previous version kept)
     rules lint          Check managed ruleset files for unparsable lines
     rules adopt [--from <dir>]   Borrow existing on-disk rules into the custom store
     engine <status|install|configure|enable|disable|lint>   Manage the MailScanner engine itself

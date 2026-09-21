@@ -22,7 +22,12 @@ tab. Expand it to see each finding with its level (fail / warn), a one-line
 explanation and the **fix** — usually the exact CLI command or the button to
 click. **Fix what can be fixed** applies the mechanical ones in one go (see
 [Troubleshooting](Troubleshooting), *Start with the doctor*); what needs a
-decision stays listed. It disappears on its own once every check passes.
+decision stays listed — and where the decision is a concrete setting, the
+finding carries an **Apply: …** button: it states the change, asks you to
+confirm, and carries it out through the same validated save the Config tab
+uses (lint, previous version kept, reload or restart as the file requires)
+or runs the named commands. The banner disappears on its own once every
+check passes.
 
 ## Conventions
 

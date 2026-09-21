@@ -35,6 +35,26 @@ pub struct Check {
     pub fix: Option<String>,
     /// The procedure to read, when the fix is more than one command.
     pub url: Option<&'static str>,
+    /// A concrete change the admin can apply with one confirmation
+    /// (`doctor::apply`): the summary shown on the button, and what it does.
+    pub proposal: Option<(String, Proposal)>,
+}
+
+/// What an "Apply" does. Decisions the doctor never makes on its own, but
+/// can carry out once the admin says yes — through the same validated,
+/// history-keeping save path as the Config tab, or a short command list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Proposal {
+    /// Set one MailScanner.conf directive.
+    MsDirective { key: String, value: String },
+    /// Replace one exact line in a catalogued file (`ms:<rel>`).
+    LineReplace {
+        id: String,
+        from: String,
+        to: String,
+    },
+    /// Run these commands in order, stopping at the first failure.
+    Commands(Vec<Vec<String>>),
 }
 
 impl Check {
@@ -42,6 +62,14 @@ impl Check {
     pub fn url(mut self, url: &'static str) -> Self {
         if self.level != Level::Ok {
             self.url = Some(url);
+        }
+        self
+    }
+
+    /// Attach an applicable change (kept only while the check is not ok).
+    pub fn propose(mut self, summary: impl Into<String>, p: Proposal) -> Self {
+        if self.level != Level::Ok {
+            self.proposal = Some((summary.into(), p));
         }
         self
     }
@@ -54,6 +82,7 @@ fn check(name: &'static str, ok: bool, level: Level, detail: String, fix: &str) 
         detail,
         fix: if ok { None } else { Some(fix.to_string()) },
         url: None,
+        proposal: None,
     }
 }
 
@@ -361,14 +390,89 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
             })
             .unwrap_or_default();
         let (ok, detail) = spam_check_size_verdict(limit, &stats);
-        out.push(check(
+        let mut c = check(
             "large messages get spam-checked",
             ok,
             Level::Warn,
             detail,
             &spam_check_size_fix(limit, &stats),
-        ));
+        );
+        // a raised limit that is still short: the data names the value
+        if !ok && bytes > STOCK_SPAM_CHECK_SIZE {
+            if let Some((name, over)) = suggest_spam_check_size(&stats) {
+                if within_tolerance(over, stats.total) {
+                    c = c.propose(
+                        format!("set Max Spam Check Size = {name} and restart MailScanner"),
+                        Proposal::MsDirective {
+                            key: "Max Spam Check Size".into(),
+                            value: name.into(),
+                        },
+                    );
+                }
+            }
+        }
+        out.push(c);
     }
+    // Two stock settings that mangle legitimate mail: the 150-character
+    // filename rule (a 2001 Outlook Express defence that long descriptive
+    // PDF names trip) and the inline HTML warning MailScanner inserts before
+    // <head> when it removes an attachment (Outlook renders it as a wreck).
+    if let Some(rules_path) = mailscanner::get_directive(&conf, "Filename Rules")
+        .map(|v| mailscanner::expand_variables(&conf, v))
+        .filter(|v| v.starts_with('/'))
+    {
+        let text = std::fs::read_to_string(&rules_path).unwrap_or_default();
+        let (ok, detail, fix) = filename_length_verdict(&text);
+        let mut c = check(
+            "attachment filename length rule",
+            ok,
+            Level::Warn,
+            detail,
+            &fix,
+        );
+        if let Some((from, to)) = filename_length_fix(&text) {
+            let rel = Path::new(&rules_path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "filename.rules.conf".into());
+            c = c.propose(
+                "allow attachment names up to 255 characters (the rule keeps refusing anything longer)",
+                Proposal::LineReplace {
+                    id: format!("ms:{rel}"),
+                    from,
+                    to,
+                },
+            );
+        }
+        out.push(c);
+    }
+    {
+        let mark = mailscanner::get_directive(&conf, "Mark Infected Messages")
+            .map(|v| v.trim().to_ascii_lowercase())
+            .unwrap_or_else(|| "yes".into());
+        let ok = mark == "no";
+        out.push(
+            check(
+                "inline attachment-removed warning",
+                ok,
+                Level::Warn,
+                if ok {
+                    "Mark Infected Messages = no — a removed attachment is announced by the {Filename?} subject tag and the warning attachment, the message body is left as sent".into()
+                } else {
+                    "Mark Infected Messages = yes — when an attachment is removed, MailScanner inserts an inline warning into the HTML part right after <html>, before <head>; Outlook and Apple Mail render such messages as a wreck".into()
+                },
+                "set Mark Infected Messages = no in MailScanner.conf (Config tab) — the {Filename?} subject tag and the …-Attachment-Warning.txt attachment (Warning Is Attachment = yes) still tell the recipient what was removed and why",
+            )
+            .propose(
+                "set Mark Infected Messages = no and restart MailScanner",
+                Proposal::MsDirective {
+                    key: "Mark Infected Messages".into(),
+                    value: "no".into(),
+                },
+            ),
+        );
+    }
+
     // Misplaced spool files are invisible to delivery: Exim lists them but
     // computes their path from the message id, so they wait forever.
     let (_, outq) = service::queue_dirs(cfg);
@@ -420,13 +524,23 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
         } else {
             (ok, detail)
         };
-        out.push(check(
-            "cPanel virus scan in Exim (exiscan)",
-            ok,
-            Level::Warn,
-            detail,
-            "a policy choice, not applied by --fix: touch /etc/exiscandisable && /scripts/buildeximconf && /scripts/restartsrv_exim stops cPanel's SMTP-time ClamAV pass (MailScanner keeps scanning, and infected mail becomes visible in the Messages tab); to keep SMTP-time rejection instead, set accept_exiscan = true in config.toml (Config tab → msfe-ng config) and this notice goes away",
-        ));
+        out.push(
+            check(
+                "cPanel virus scan in Exim (exiscan)",
+                ok,
+                Level::Warn,
+                detail,
+                "a policy choice, not applied by --fix: touch /etc/exiscandisable && /scripts/buildeximconf && /scripts/restartsrv_exim stops cPanel's SMTP-time ClamAV pass (MailScanner keeps scanning, and infected mail becomes visible in the Messages tab); to keep SMTP-time rejection instead, set accept_exiscan = true in config.toml (Config tab → msfe-ng config) and this notice goes away",
+            )
+            .propose(
+                "turn off cPanel's ClamAV pass in Exim (touch /etc/exiscandisable, rebuild and restart Exim) — MailScanner stays the virus scanner",
+                Proposal::Commands(vec![
+                    vec!["touch".into(), "/etc/exiscandisable".into()],
+                    vec!["/scripts/buildeximconf".into()],
+                    vec!["/scripts/restartsrv_exim".into()],
+                ]),
+            ),
+        );
     }
     if cfg.panel == "cpanel" {
         // cPanel's Exim system filter rejects a list of attachment extensions
@@ -442,13 +556,29 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
             .map(|p| std::fs::read_to_string(p).unwrap_or_default())
             .unwrap_or_default();
         let (ok, detail) = exim_attachment_filter_verdict(&localopts, &filter, wired);
-        out.push(check(
-            "cPanel attachment filter in Exim",
-            ok,
-            Level::Warn,
-            detail,
-            "a policy choice, not applied by --fix: WHM → Exim Configuration Manager → Filters → untick \"Attachments: Filter messages with dangerous attachments\" (or: whmapi1 set_tweaksetting module=Mail key=filter_attachments value=0) — MailScanner's filename and filetype rules keep blocking dangerous attachments, per domain and visibly in the Messages log",
-        ));
+        out.push(
+            check(
+                "cPanel attachment filter in Exim",
+                ok,
+                Level::Warn,
+                detail,
+                "a policy choice, not applied by --fix: WHM → Exim Configuration Manager → Filters → untick \"Attachments: Filter messages with dangerous attachments\" (or: whmapi1 set_tweaksetting module=Mail key=filter_attachments value=0) — MailScanner's filename and filetype rules keep blocking dangerous attachments, per domain and visibly in the Messages log",
+            )
+            .propose(
+                "turn off cPanel's attachment filter in Exim (whmapi1 set_tweaksetting filter_attachments=0, rebuild and restart Exim) — MailScanner's filename rules take over",
+                Proposal::Commands(vec![
+                    vec![
+                        "whmapi1".into(),
+                        "set_tweaksetting".into(),
+                        "module=Mail".into(),
+                        "key=filter_attachments".into(),
+                        "value=0".into(),
+                    ],
+                    vec!["/scripts/buildeximconf".into()],
+                    vec!["/scripts/restartsrv_exim".into()],
+                ]),
+            ),
+        );
         let (ok, detail) = mailflow::cpanel_sa_verdict(&mailflow::cpanel_sa_state());
         out.push(check(
             "cPanel SpamAssassin double scan",
@@ -1332,6 +1462,172 @@ fn dnsbl_check(ms_conf: &str, conf_path: &Path) -> Check {
         .collect();
     let (ok, detail, fix) = dnsbl_verdict(&results, shared_resolver().as_deref());
     check("DNS blocklists answering", ok, Level::Warn, detail, &fix)
+}
+
+/// Names this long or longer are refused by the stock rule.
+const STOCK_FILENAME_LIMIT: u32 = 150;
+const SANE_FILENAME_LIMIT: u32 = 255;
+
+/// The `deny .{N,}` line of filename.rules.conf, with N.
+fn filename_length_rule(text: &str) -> Option<(String, u32)> {
+    text.lines().find_map(|l| {
+        let t = l.trim_start();
+        let rest = t.strip_prefix("deny")?.trim_start();
+        let n = rest
+            .strip_prefix(".{")?
+            .split_once(",}")?
+            .0
+            .parse::<u32>()
+            .ok()?;
+        Some((l.to_string(), n))
+    })
+}
+
+/// `(ok, detail, fix)` for the long-filename rule.
+pub fn filename_length_verdict(text: &str) -> (bool, String, String) {
+    match filename_length_rule(text) {
+        Some((_, n)) if n <= STOCK_FILENAME_LIMIT => (
+            false,
+            format!("attachments whose name is {n} characters or longer are removed (filename.rules.conf: \"Very long filename, possible OE attack\") — long descriptive PDF names trip it, and the recipient gets a mangled message with a warning instead"),
+            format!("raise the limit to {SANE_FILENAME_LIMIT} (a filesystem cannot even hold a longer name) or delete the line — Config tab → filename.rules.conf"),
+        ),
+        Some((_, n)) => (
+            true,
+            format!("attachment names are refused only from {n} characters"),
+            String::new(),
+        ),
+        None => (true, "no filename-length rule".into(), String::new()),
+    }
+}
+
+/// The exact line to replace and its replacement, when the rule is stock.
+pub fn filename_length_fix(text: &str) -> Option<(String, String)> {
+    let (line, n) = filename_length_rule(text)?;
+    (n <= STOCK_FILENAME_LIMIT).then(|| {
+        (
+            line.clone(),
+            line.replacen(
+                &format!(".{{{n},}}"),
+                &format!(".{{{SANE_FILENAME_LIMIT},}}"),
+                1,
+            ),
+        )
+    })
+}
+
+/// Carry out the proposal of the named check, after the admin agreed.
+/// MailScanner files go through the validated, history-keeping save (lint,
+/// rollback, reload or restart as the file requires); commands run in order.
+pub fn apply(cfg: &Config, config_file: &Path, name: &str) -> Result<Vec<String>, String> {
+    let checks = run(cfg, config_file);
+    let Some(c) = checks.iter().find(|c| c.name == name) else {
+        return Err(format!("no check named '{name}'"));
+    };
+    let Some((summary, proposal)) = &c.proposal else {
+        return Err(if c.level == Level::Ok {
+            format!("'{name}' is fine — nothing to apply")
+        } else {
+            format!("'{name}' has no applicable change")
+        });
+    };
+    let mut lines = vec![format!("apply: {summary}")];
+    match proposal {
+        Proposal::MsDirective { key, value } => {
+            let entry = crate::confcatalog::resolve(cfg, config_file, "ms:MailScanner.conf")
+                .ok_or("MailScanner.conf is not in the catalog")?;
+            let text = std::fs::read_to_string(&entry.path).map_err(|e| e.to_string())?;
+            let new_text =
+                crate::confsave::render_changes(&entry, &text, &[(key.clone(), value.clone())])
+                    .ok_or("MailScanner.conf is not a key/value file")?;
+            lines.extend(save_through(cfg, &entry, new_text)?);
+        }
+        Proposal::LineReplace { id, from, to } => {
+            let entry = crate::confcatalog::resolve(cfg, config_file, id)
+                .ok_or_else(|| format!("{id} is not in the catalog"))?;
+            let text = std::fs::read_to_string(&entry.path).map_err(|e| e.to_string())?;
+            if !text.lines().any(|l| l == from) {
+                return Err(format!("{id}: the line to change is no longer there"));
+            }
+            let new_text = text
+                .lines()
+                .map(|l| if l == from { to.as_str() } else { l })
+                .map(|l| format!("{l}\n"))
+                .collect::<String>();
+            lines.extend(save_through(cfg, &entry, new_text)?);
+        }
+        Proposal::Commands(cmds) => {
+            for argv in cmds {
+                let Some((bin, args)) = argv.split_first() else {
+                    continue;
+                };
+                lines.push(format!("$ {}", argv.join(" ")));
+                let out = Command::new(bin)
+                    .args(args)
+                    .output()
+                    .map_err(|e| format!("cannot run {bin}: {e}"))?;
+                for l in String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .chain(String::from_utf8_lossy(&out.stderr).lines())
+                    .filter(|l| !l.trim().is_empty())
+                    .take(20)
+                {
+                    lines.push(format!("  {l}"));
+                }
+                if !out.status.success() {
+                    return Err(format!(
+                        "{bin} failed (exit {}): {}",
+                        out.status.code().unwrap_or(-1),
+                        lines.join("\n")
+                    ));
+                }
+            }
+        }
+    }
+    Ok(lines)
+}
+
+/// One validated save; the report as lines, or the reason it was refused.
+fn save_through(
+    cfg: &Config,
+    entry: &crate::confcatalog::Entry,
+    new_text: String,
+) -> Result<Vec<String>, String> {
+    let r = crate::confsave::save(
+        cfg,
+        crate::confsave::SaveRequest {
+            entry,
+            new_text,
+            lint: crate::confsave::LintMode::Auto,
+            reload: crate::confsave::ReloadMode::Auto,
+            reason: "doctor",
+            expect_mtime: None,
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    if let Some(e) = r.error {
+        return Err(format!("{}: not saved — {e}", entry.rel));
+    }
+    let mut lines = vec![format!(
+        "{}: {}{}",
+        entry.rel,
+        if r.changed {
+            "saved"
+        } else {
+            "already as proposed"
+        },
+        r.backup_id
+            .as_ref()
+            .map(|b| format!(" (previous version kept as {b})"))
+            .unwrap_or_default()
+    )];
+    if r.reloaded.action != "none" {
+        lines.push(format!(
+            "MailScanner {}: {}",
+            r.reloaded.action,
+            if r.reloaded.ok { "ok" } else { "FAILED" }
+        ));
+    }
+    Ok(lines)
 }
 
 /// `(ok, detail)` for cPanel's system-filter attachment block: on when
@@ -2353,6 +2649,7 @@ mod tests {
             detail: String::new(),
             fix: None,
             url: None,
+            proposal: None,
         }
     }
 
@@ -2421,6 +2718,7 @@ mod tests {
             detail: String::new(),
             fix: Some(fix.into()),
             url: None,
+            proposal: None,
         };
         assert_eq!(
             plan(
@@ -2458,6 +2756,7 @@ mod tests {
                 },
             )),
             url: None,
+            proposal: None,
         };
         assert_eq!(plan(&[size("200k")], true), vec![Fix::EngineConfigure]);
         assert!(plan(&[size("2M")], true).is_empty());
@@ -2475,6 +2774,41 @@ mod tests {
         let (ok, d) = exiscan_verdict("primary_hostname = x\n", true);
         assert!(ok);
         assert!(d.starts_with("off"), "{d}");
+    }
+
+    #[test]
+    fn filename_length_rule_is_found_and_relaxed() {
+        let text = "# comment\ndeny\t\\.exe$\tprog\tprog\ndeny\t.{150,}\t\t\tVery long filename, possible OE attack\t\tlong names\nallow\t.*\t-\t-\n";
+        let (ok, d, fix) = filename_length_verdict(text);
+        assert!(
+            !ok && d.contains("150 characters") && fix.contains("255"),
+            "{d}"
+        );
+        let (from, to) = filename_length_fix(text).unwrap();
+        assert!(from.starts_with("deny\t.{150,}"));
+        assert!(
+            to.starts_with("deny\t.{255,}") && to.ends_with("long names"),
+            "{to}"
+        );
+        let relaxed = text.replace(".{150,}", ".{255,}");
+        assert!(filename_length_verdict(&relaxed).0);
+        assert!(filename_length_fix(&relaxed).is_none());
+        assert!(filename_length_verdict("allow\t.*\t-\t-\n").0);
+    }
+
+    #[test]
+    fn proposals_stick_only_to_findings() {
+        let p = Proposal::MsDirective {
+            key: "X".into(),
+            value: "y".into(),
+        };
+        let c = check("x", false, Level::Warn, String::new(), "f").propose("set X = y", p.clone());
+        assert_eq!(
+            c.proposal.as_ref().map(|(s, _)| s.as_str()),
+            Some("set X = y")
+        );
+        let c = check("x", true, Level::Warn, String::new(), "f").propose("set X = y", p);
+        assert!(c.proposal.is_none());
     }
 
     // a cPanel host receiving PEC: the system filter's attachment list has

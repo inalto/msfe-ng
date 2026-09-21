@@ -33,7 +33,14 @@ switch, cPanel SpamAssassin, cPanel's own ClamAV pass in Exim (*cPanel virus
 scan in Exim (exiscan)* — `touch /etc/exiscandisable` and rebuild Exim to
 stop the double virus scan, or keep it to reject infected mail at SMTP time),
 the DNS resolver, database creation, enabling message logging and config
-paths stay listed with their fix. The installer runs `doctor --fix` at the end of every install and
+paths stay listed with their fix. Findings whose fix is one concrete
+setting carry a proposal instead — **Apply: …** in the banner, `apply:` in
+the CLI output, `msfe-ng doctor --apply "<check name>"` from a shell — which
+does exactly the stated change after you confirm: `Max Spam Check Size` to
+the value the month's mail suggests, `Mark Infected Messages = no`, the
+255-character filename rule, switching off cPanel's ClamAV pass or its
+attachment filter in Exim. MailScanner files go through the validated save
+(lint, rollback, previous version kept in the file's history). The installer runs `doctor --fix` at the end of every install and
 upgrade, and the guided migration runs it as its last step.
 
 ## `spamassassin -r` says "no rules were found" / scores look thin
@@ -85,13 +92,15 @@ handed over by hand. Two stock settings are worth revisiting:
 
 - `filename.rules.conf` line *Very long filename, possible OE attack*
   (`deny .{150,}`) — a 2001-era Outlook Express defence that long
-  descriptive PDF names trip routinely. Raise it to `.{255,}` or delete it
-  (Config tab → the file → Save).
+  descriptive PDF names trip routinely (an encoded `=?iso-8859-1?Q?…?=` name
+  counts decoded). The doctor check *attachment filename length rule*
+  proposes `.{255,}`; **Apply** does it.
 - `Mark Infected Messages = yes` in `MailScanner.conf` inserts an inline
   warning into the HTML part — right after the `<html>` tag, before `<head>`
-  — which Outlook and Apple Mail render badly. Set it to `no`: the recipient
-  still gets the `{Filename?}` subject tag and the
-  `…-Attachment-Warning.txt` attachment saying what was removed and why.
+  — which Outlook and Apple Mail render badly. The doctor check *inline
+  attachment-removed warning* proposes `no`: the recipient still gets the
+  `{Filename?}` subject tag and the `…-Attachment-Warning.txt` attachment
+  saying what was removed and why.
 
 ## An auto-ban hit a legitimate sender
 

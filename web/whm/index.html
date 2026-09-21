@@ -3288,7 +3288,15 @@ async function refreshDoctor(){
     ...probs.map(c=>el('div',{style:'margin:.3rem 0 0 .5rem'},
       el('span',{class:'badge',style:'background:'+(c.level==='fail'?'var(--critical)':'var(--warning)')},c.level),
       ' ',el('b',{},c.name),' — ',c.detail,
-      c.fix?el('div',{class:'muted',style:'margin-left:2.6rem'},'fix: '+c.fix,c.url?el('span',{},' — ',el('a',{href:c.url,target:'_blank',rel:'noopener'},'procedure')):''):'')));
+      c.fix?el('div',{class:'muted',style:'margin-left:2.6rem'},'fix: '+c.fix,c.url?el('span',{},' — ',el('a',{href:c.url,target:'_blank',rel:'noopener'},'procedure')):''):'',
+      c.proposal?el('div',{style:'margin:.25rem 0 0 2.6rem'},Object.assign(el('button',{class:'act plain'},'Apply: '+c.proposal),{onclick:async e=>{
+        if(!confirm(`${c.name}\n\n${c.detail}\n\nApply this change?\n${c.proposal}\n\nMailScanner files are validated before going live and the previous version is kept.`))return;
+        e.target.disabled=true;e.target.textContent='Applying…';
+        const r=await api('/api/doctor/apply',{method:'POST',body:{name:c.name}});
+        if(r&&r.ok){toast('Applied — '+(r.lines||[]).slice(-1)[0]);alert((r.lines||[]).join('\n'));}
+        else{toast('Not applied');alert((r&&r.error)||'failed');e.target.disabled=false;e.target.textContent='Apply: '+c.proposal;}
+        refreshDoctor();
+      }})):'')));
   // the mechanical repairs (perl modules, engine configure, phishing lists,
   // rules, spool, start) in one go; decisions stay listed with their fix
   const fixBtn=el('button',{class:'act plain',style:'margin:.4rem 0 0 .5rem'},'Fix what can be fixed');
