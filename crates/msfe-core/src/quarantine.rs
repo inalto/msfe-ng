@@ -102,11 +102,72 @@ pub fn resolve_body(cfg: &crate::Config, message_id: &str, stored: &str) -> Opti
         let under_root = roots.iter().any(|r| p.starts_with(r));
         // `..` can only appear in a hand-edited value; reject rather than resolve
         let traversal = p.components().any(|c| c == std::path::Component::ParentDir);
-        if named_for_id && under_root && !traversal && p.exists() {
+        // a quarantine dir may hold only a removed attachment (a name-blocked
+        // message with `Quarantine Whole Message = no`): no message there —
+        // the archive copy is the one to show
+        if named_for_id && under_root && !traversal && p.exists() && holds_message(p) {
             return Some(p.to_path_buf());
         }
     }
-    roots.iter().find_map(|r| find_message(r, message_id))
+    roots
+        .iter()
+        .filter_map(|r| find_message(r, message_id))
+        .find(|p| holds_message(p))
+}
+
+/// Does this path give us a message? A file named for the id is one by
+/// MailScanner's own naming; a directory must contain one (it may hold only
+/// a removed attachment).
+fn holds_message(p: &Path) -> bool {
+    !p.is_dir() || message_file_in(p).is_some()
+}
+
+/// The message inside a MailScanner quarantine/archive directory: the Exim
+/// `-D` data file, a file named `message`, an `.eml`, or the first file that
+/// starts like RFC822 mail. `None` when the directory only holds removed
+/// attachments.
+fn message_file_in(dir: &Path) -> Option<PathBuf> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .collect();
+    files.sort();
+    let name = |p: &PathBuf| {
+        p.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    files
+        .iter()
+        .find(|p| name(p).ends_with("-D"))
+        .or_else(|| files.iter().find(|p| name(p) == "message"))
+        .or_else(|| files.iter().find(|p| name(p).ends_with(".eml")))
+        .or_else(|| files.iter().find(|p| looks_like_message(p)))
+        .cloned()
+}
+
+/// Do the first bytes read like a mail message (a header line, an mbox
+/// `From ` line, or an Exim `-D` id line)?
+fn looks_like_message(p: &Path) -> bool {
+    use std::io::Read;
+    if is_exim_data(p) {
+        return true;
+    }
+    let Ok(mut f) = std::fs::File::open(p) else {
+        return false;
+    };
+    let mut buf = [0u8; 512];
+    let n = f.read(&mut buf).unwrap_or(0);
+    let head = String::from_utf8_lossy(&buf[..n]);
+    let first = head.lines().next().unwrap_or("").trim_end();
+    first.starts_with("From ")
+        || first.split_once(':').is_some_and(|(k, v)| {
+            !k.is_empty()
+                && k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                && (v.starts_with(' ') || v.is_empty() || v.starts_with('\t'))
+        })
 }
 
 /// True when the message still has a body on disk (the only honest basis for
@@ -140,16 +201,12 @@ fn is_exim_data(path: &Path) -> bool {
 /// file (the leading id line is stripped, leaving the body).
 pub fn read_message(path: &Path) -> io::Result<Vec<u8>> {
     if path.is_dir() {
-        let mut files: Vec<PathBuf> = std::fs::read_dir(path)?
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.is_file())
-            .collect();
-        files.sort();
-        let pick = files
-            .into_iter()
-            .next()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "empty quarantine dir"))?;
+        let pick = message_file_in(path).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "no message in the quarantine directory — only removed attachments",
+            )
+        })?;
         return read_message(&pick);
     }
     let bytes = std::fs::read(path)?;
@@ -798,6 +855,39 @@ Hello world body
         assert!(!body_exists(&cfg, id, archived.to_str().unwrap()));
 
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    // A name-blocked message with `Quarantine Whole Message = no`: the
+    // quarantine dir holds only the removed PDF; the archive has the message.
+    #[test]
+    fn attachment_only_quarantine_dir_falls_back_to_the_archive_copy() {
+        let base = std::env::temp_dir().join(format!("msfe-qattach-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let id = "1x8e1Y-0000000BTzz-1Bn6";
+        let q = base.join("quarantine/20260921").join(id);
+        let a = base.join("archive/20260921");
+        std::fs::create_dir_all(&q).unwrap();
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::write(q.join("2026-09-147 Ac.pdf"), b"%PDF-1.7\n\x00\x01 binary").unwrap();
+        std::fs::write(a.join(format!("{id}-D")), format!("{id}-D\nhello body\n")).unwrap();
+        std::fs::write(a.join(format!("{id}-H")), "headers").unwrap();
+        let cfg = crate::Config {
+            quarantine_dir: base.join("quarantine").display().to_string(),
+            archive_dir: base.join("archive").display().to_string(),
+            ..crate::Config::default()
+        };
+        // the stored path is the attachment-only dir: skipped for the archive
+        let p = resolve_body(&cfg, id, &q.display().to_string()).expect("a body");
+        assert_eq!(p, a.join(format!("{id}-D")));
+        assert_eq!(read_message(&p).unwrap(), b"hello body\n");
+        // reading the attachment-only dir directly is refused, not garbage
+        assert!(read_message(&q).is_err());
+        // a real quarantined message dir still wins
+        std::fs::write(q.join("message"), "Received: from x\nSubject: hi\n\nbody\n").unwrap();
+        let p = resolve_body(&cfg, id, &q.display().to_string()).expect("a body");
+        assert_eq!(p, q);
+        assert!(read_message(&p).unwrap().starts_with(b"Received:"));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

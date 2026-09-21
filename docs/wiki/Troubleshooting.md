@@ -74,6 +74,25 @@ set_tweaksetting module=Mail key=filter_attachments value=0`): MailScanner's
 attachments, per domain and logged — and MailScanner's stock rules do not
 deny `.eml`. Editing the filter file itself is undone by cPanel updates.
 
+## A delivered message looks mangled and lost its attachment; the subject starts with `{Filename?}`
+
+MailScanner's filename rules removed an attachment (`nameinfected` in the
+log; the Messages tab shows *Other infected*). The removed file sits alone in
+the quarantine directory of that message — with `Quarantine Whole Message =
+no` the message itself is not stored there, so *release* cannot rebuild it;
+the archive copy is what the Messages view shows, and the file can be
+handed over by hand. Two stock settings are worth revisiting:
+
+- `filename.rules.conf` line *Very long filename, possible OE attack*
+  (`deny .{150,}`) — a 2001-era Outlook Express defence that long
+  descriptive PDF names trip routinely. Raise it to `.{255,}` or delete it
+  (Config tab → the file → Save).
+- `Mark Infected Messages = yes` in `MailScanner.conf` inserts an inline
+  warning into the HTML part — right after the `<html>` tag, before `<head>`
+  — which Outlook and Apple Mail render badly. Set it to `no`: the recipient
+  still gets the `{Filename?}` subject tag and the
+  `…-Attachment-Warning.txt` attachment saying what was removed and why.
+
 ## An auto-ban hit a legitimate sender
 
 Open Config → *Auto-ban spam sources* → **Recent auto-bans** and click
