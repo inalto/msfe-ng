@@ -13,7 +13,12 @@ The left column lists every file under MailScanner's configuration directory
 MSFE-NG's own `config.toml`, grouped by directory: the main files, `conf.d/`
 fragments, `mcp/`, `rules/`, `custom/` and the `reports/<language>/`
 notification templates. Each file carries a badge for the editor it gets and a
-lock when it is read-only:
+lock when it is read-only. **find a file…** filters the tree by name;
+**search in files…** (Enter) looks for a text, case-insensitively, inside every
+file: the results replace the tree, grouped by file with the line number and
+the line, and clicking one opens that file at that line (the raw editor,
+scrolled and selected). Escape or clearing the box brings the tree back.
+CLI: `msfe-ng conf grep <text>` prints `id:line: text` for the same search.
 
 | Badge | Files | Editor |
 |---|---|---|

@@ -59,6 +59,21 @@ perl cannot load; while cPanel's spamd is off (`/etc/spamddisable`) `doctor
 key=spamassassin_plugin_<Name> value=0`, otherwise the command is left to
 you.
 
+## "This message has been rejected because it has a potentially executable attachment postacert.eml"
+
+That wording is not MailScanner's: it is Exim's classic system filter, which
+cPanel ships as `/etc/cpanel_exim_system_filter` and enables with
+*Attachments: Filter messages with dangerous attachments* (`filter_attachments=1`
+in `exim.conf.localopts`). Its extension list includes `eml`, so every PEC
+(Italian certified mail) message — the original travels as `postacert.eml` —
+is refused at SMTP time, before MailScanner sees it, and nothing reaches the
+Messages log. The doctor check *cPanel attachment filter in Exim* names it.
+Turn it off in WHM → Exim Configuration Manager → Filters (or `whmapi1
+set_tweaksetting module=Mail key=filter_attachments value=0`): MailScanner's
+`filename.rules.conf` / `filetype.rules.conf` keep blocking dangerous
+attachments, per domain and logged — and MailScanner's stock rules do not
+deny `.eml`. Editing the filter file itself is undone by cPanel updates.
+
 ## An auto-ban hit a legitimate sender
 
 Open Config → *Auto-ban spam sources* → **Recent auto-bans** and click

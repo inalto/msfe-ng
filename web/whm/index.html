@@ -2833,11 +2833,43 @@ async function renderConfig(){
 
   // ---- tree -----------------------------------------------------------------
   const tfilter=el('input',{placeholder:'find a file…',class:'tfilter'});
+  const tsearch=el('input',{placeholder:'search in files… (Enter)',class:'tfilter',title:'Case-insensitive text search through every configuration file; a hit opens the file at that line'});
   const tlist=el('div',{class:'tlist'});
   const newBtn=el('button',{class:'act plain',title:'Create a conf.d fragment or a new ruleset'},'+ New');
-  tree.append(el('div',{class:'ctl',style:'margin-bottom:.4rem'},tfilter,newBtn),tlist);
+  tree.append(el('div',{class:'ctl',style:'margin-bottom:.4rem'},tfilter,newBtn),el('div',{class:'ctl',style:'margin-bottom:.4rem'},tsearch),tlist);
+  // content search: results replace the tree until the box is cleared
+  let searchHits=null;
+  tsearch.onkeydown=async e=>{
+    if(e.key==='Escape'){tsearch.value='';searchHits=null;drawTree();return;}
+    if(e.key!=='Enter')return;
+    const q=tsearch.value.trim();
+    if(!q){searchHits=null;drawTree();return;}
+    tlist.innerHTML='';tlist.append(el('div',{class:'muted',style:'padding:.5rem'},'Searching…'));
+    const r=await api('/api/conf/search?q='+encodeURIComponent(q));
+    if(!r||r.error){tlist.innerHTML='';tlist.append(el('div',{class:'muted',style:'padding:.5rem'},(r&&r.error)||'search failed'));return;}
+    searchHits=r;drawTree();
+  };
+  tsearch.oninput=()=>{if(!tsearch.value.trim()&&searchHits){searchHits=null;drawTree();}};
+  function drawSearch(){
+    const r=searchHits;
+    tlist.append(el('div',{class:'grp'},`${r.hits.length}${r.truncated?'+':''} hit(s) for “${r.query}” in ${r.files} file(s)`,
+      Object.assign(el('a',{class:'iplink',style:'margin-left:.5rem;font-size:.75rem'},'clear'),{onclick:()=>{tsearch.value='';searchHits=null;drawTree();}})));
+    if(!r.hits.length){tlist.append(el('div',{class:'muted',style:'padding:.5rem'},'No file contains that text.'));return;}
+    const byFile=new Map();
+    r.hits.forEach(h=>{if(!byFile.has(h.id))byFile.set(h.id,{rel:h.rel,hits:[]});byFile.get(h.id).hits.push(h);});
+    byFile.forEach((g,id)=>{
+      tlist.append(el('div',{class:'dir'},g.rel+' ('+g.hits.length+')'));
+      g.hits.forEach(h=>{
+        const b=el('button',{'data-id':id,title:`${g.rel}:${h.line}`},
+          el('span',{class:'name',style:'font-family:var(--font-mono);font-size:.72rem;white-space:pre;overflow:hidden;text-overflow:ellipsis'},String(h.line).padStart(4)+'  '+h.text));
+        b.onclick=()=>openFinding(id,null,h.line);
+        tlist.append(b);
+      });
+    });
+  }
   function drawTree(){
     tlist.innerHTML='';
+    if(searchHits){drawSearch();return;}
     const q=tfilter.value.toLowerCase();
     state.roots.forEach(root=>{
       const files=state.files.filter(f=>f.root===root.id&&(!q||f.rel.toLowerCase().includes(q)));

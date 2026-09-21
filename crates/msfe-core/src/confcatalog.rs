@@ -632,3 +632,95 @@ mod tests {
         );
     }
 }
+
+// ---- search ---------------------------------------------------------------------
+
+/// One line of one configuration file that contains the query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hit {
+    pub id: String,
+    pub rel: String,
+    /// 1-based.
+    pub line: usize,
+    pub text: String,
+}
+
+/// Every line of every catalogued file containing `query`, case-insensitive,
+/// in catalog order, at most `limit` hits. Binary-looking files (a NUL in
+/// the first block) are skipped.
+pub fn search(cat: &Catalog, query: &str, limit: usize) -> Vec<Hit> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for e in &cat.entries {
+        let Ok(bytes) = std::fs::read(&e.path) else {
+            continue;
+        };
+        if bytes.iter().take(4096).any(|&b| b == 0) {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&bytes);
+        for (i, line) in text.lines().enumerate() {
+            if line.to_lowercase().contains(&q) {
+                out.push(Hit {
+                    id: e.id.clone(),
+                    rel: e.rel.clone(),
+                    line: i + 1,
+                    text: line.trim_end().chars().take(300).collect(),
+                });
+                if out.len() >= limit {
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    #[test]
+    fn search_finds_lines_case_insensitively_across_the_catalog() {
+        let base = std::env::temp_dir().join(format!("msfe-confsearch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let etc = base.join("etc/MailScanner");
+        std::fs::create_dir_all(etc.join("rules")).unwrap();
+        std::fs::create_dir_all(base.join("etc/msfe-ng")).unwrap();
+        std::fs::write(
+            etc.join("MailScanner.conf"),
+            "%org-name% = acme\nMax Spam Check Size = 2M\nFilename Rules = %etc-dir%/filename.rules.conf\n",
+        )
+        .unwrap();
+        std::fs::write(
+            etc.join("filename.rules.conf"),
+            "deny\t\\.exe$\tprog\tprog\nallow\t\\.eml$\t-\t-\n",
+        )
+        .unwrap();
+        std::fs::write(etc.join("rules/spam.rules"), "FromOrTo: default yes\n").unwrap();
+        std::fs::write(base.join("etc/msfe-ng/config.toml"), "panel = \"cpanel\"\n").unwrap();
+        let cfg = Config {
+            mailscanner_conf: etc.join("MailScanner.conf").display().to_string(),
+            mailscanner_rules_dir: etc.join("rules").display().to_string(),
+            ..Config::default()
+        };
+        let cat = scan(&cfg, &base.join("etc/msfe-ng/config.toml"));
+        let hits = search(&cat, "EML", 100);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].rel, "filename.rules.conf");
+        assert_eq!(hits[0].line, 2);
+        assert!(hits[0].text.starts_with("allow"));
+        let hits = search(&cat, "filename", 100);
+        assert!(
+            hits.iter()
+                .any(|h| h.rel == "MailScanner.conf" && h.line == 3),
+            "{hits:?}"
+        );
+        assert_eq!(search(&cat, "filename", 1).len(), 1, "limit");
+        assert!(search(&cat, "   ", 100).is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}

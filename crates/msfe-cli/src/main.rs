@@ -55,6 +55,7 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
         ("restore", _) => Some(&["--yes"]),
         ("conf", Some("test")) => Some(&["--no-lint", "--json", "--with"]),
         ("conf", Some("test-message")) => Some(&["--offline", "--json"]),
+        ("conf", Some("grep")) => Some(NONE),
         ("conf", _) => Some(NONE),
         ("delivery", Some("test")) => Some(&[
             "--ip",
@@ -118,7 +119,7 @@ fn usage_of(cmd: &str) -> &'static str {
         "snapshot" => "msfe-ng snapshot <export [file] [--only mailscanner|msfe] | import <file> [--dry-run] [--only mailscanner|msfe] [--no-lint] [--yes] | list>",
         "backup" => "msfe-ng backup <file.tar.gz>   (alias: snapshot export --only msfe)",
         "restore" => "msfe-ng restore <file.tar.gz> [--yes]   (alias: snapshot import --only msfe)",
-        "conf" => "msfe-ng conf <test [--no-lint] [--json] [--with <id>=<file>]... | test-message <clean|gtube|eicar|file.eml> [--offline] [--json]>",
+        "conf" => "msfe-ng conf <test [--no-lint] [--json] [--with <id>=<file>]... | test-message <clean|gtube|eicar|file.eml> [--offline] [--json] | grep <text>>",
         "delivery" => "msfe-ng delivery <test <address> [--ip <sending ip>] [--selector <dkim selector>] [--audit] [--days <1-7>] [--json | --html] [--force] | eml <file.eml> [--bounce] [--address <a>] [--ip <ip>] [--selector <s>] [--audit] [--json | --html] | inbox <install [--dry-run] | uninstall [--dry-run] | status | new | poll <token> [--json] | remove <token> | sweep> | testmail --from <local address> --to <address> [--tag <t>] [--follow <secs>] [--json] | monitor <list [--json] | add <address> [--interval-mins n] [--audit] [--ip ..] [--selector ..] [--days n] | remove <id|address> | run [--dry-run] [--id n]>>",
         _ => "msfe-ng help",
     }
@@ -1221,6 +1222,31 @@ fn cmd_conf(sub: Option<&str>, rest: &[String]) -> ExitCode {
     use msfe_core::conftest::{self, Level, Parts, PendingEdit};
     if sub == Some("test-message") {
         return cmd_conf_test_message(rest);
+    }
+    if sub == Some("grep") {
+        let Some(q) = rest.iter().find(|a| !a.starts_with("--")) else {
+            eprintln!(
+                "usage: msfe-ng conf grep <text>   (case-insensitive, every configuration file)"
+            );
+            return ExitCode::from(2);
+        };
+        let cfg = Config::load(&config_path());
+        let cat = msfe_core::confcatalog::scan(&cfg, &config_path());
+        let hits = msfe_core::confcatalog::search(&cat, q, 500);
+        for h in &hits {
+            println!("{}:{}: {}", h.id, h.line, h.text);
+        }
+        println!(
+            "{} hit(s) in {} file(s){}",
+            hits.len(),
+            cat.entries.len(),
+            if hits.len() >= 500 {
+                " (first 500)"
+            } else {
+                ""
+            }
+        );
+        return ExitCode::SUCCESS;
     }
     if sub != Some("test") {
         eprintln!("usage: {}", usage_of("conf"));
@@ -2597,6 +2623,7 @@ COMMANDS:
     conf test           Test the MailScanner configuration: lint + cross-file checks
                         (--with ms:<file>=<candidate> tests an edit on a staged copy)
     conf test-message   Simulate what the chain does with a message (clean|gtube|eicar|file.eml)
+    conf grep <text>    Find a text in every configuration file (case-insensitive; id:line: text)
     snapshot export     Snapshot MailScanner's etc tree + /etc/msfe-ng into one tar.gz
     snapshot import     Compare a snapshot with this host and import chosen files (--dry-run first)
     snapshot list       Snapshots kept in backup_dir/snapshots

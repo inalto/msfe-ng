@@ -23,6 +23,38 @@ pub fn handle(
     match (method, path) {
         // /api/snapshot/* is routed here too (same module, same helpers)
         ("GET", "/api/conf/tree") => tree(cfg, config_file),
+        ("GET", "/api/conf/search") => {
+            let q = req.query_param("q").unwrap_or_default();
+            if q.trim().is_empty() {
+                return Response::json(400, r#"{"error":"q is empty"}"#);
+            }
+            let cat = confcatalog::scan(cfg, config_file);
+            let hits = confcatalog::search(&cat, &q, 500);
+            Response::json(
+                200,
+                &Json::Object(vec![
+                    ("query".into(), Json::str(&q)),
+                    ("files".into(), Json::Int(cat.entries.len() as i64)),
+                    ("truncated".into(), Json::Bool(hits.len() >= 500)),
+                    (
+                        "hits".into(),
+                        Json::Array(
+                            hits.iter()
+                                .map(|h| {
+                                    Json::Object(vec![
+                                        ("id".into(), Json::str(&h.id)),
+                                        ("rel".into(), Json::str(&h.rel)),
+                                        ("line".into(), Json::Int(h.line as i64)),
+                                        ("text".into(), Json::str(&h.text)),
+                                    ])
+                                })
+                                .collect(),
+                        ),
+                    ),
+                ])
+                .to_string(),
+            )
+        }
         ("GET", "/api/conf/file") => file(req, cfg, config_file),
         ("PUT", "/api/conf/file") => save(req, cfg, config_file),
         ("POST", "/api/conf/create") => create(req, cfg, config_file),
