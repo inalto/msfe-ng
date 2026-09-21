@@ -752,7 +752,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // gauss: SpamAssassin 4.0.2 wanted /var/lib/spamassassin/4.000002, which
+    // a CPAN SpamAssassin 4.0.2 wanted /var/lib/spamassassin/4.000002, which
     // never existed — only cPanel's 4.000001 did.
     #[test]
     fn upstream_rules_missing_stale_or_fresh() {
@@ -800,9 +800,9 @@ mod tests {
 
     #[test]
     fn extracts_header_ips() {
-        let h = "Received: from [49.12.174.167] (port=58074 helo=bassetto.eu)\n    by gauss with esmtpsa\nReceived: from x [10.0.0.1]\n";
+        let h = "Received: from [203.0.113.7] (port=58074 helo=sender.example)\n    by mail.example with esmtpsa\nReceived: from x [10.0.0.1]\n";
         let ips = header_ips(h);
-        assert_eq!(ips[0].ip, "49.12.174.167");
+        assert_eq!(ips[0].ip, "203.0.113.7");
         assert_eq!(ips[0].host, "bassetto.eu");
         assert_eq!(ips[1].ip, "10.0.0.1");
     }

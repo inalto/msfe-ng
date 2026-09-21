@@ -696,11 +696,11 @@ pub fn start_job() -> io::Result<()> {
 mod tests {
     use super::*;
 
-    // gauss: `ip -o -4 addr` lists 49.12.174.167 twice (peer route + /32)
+    // a Hetzner host: `ip -o -4 addr` lists the same IPv4 twice (peer route + /32)
     #[test]
     fn ip_addr_parsing_lists_each_address_once() {
-        let out = "2: eno1    inet 49.12.174.167 peer 49.12.174.129/32 brd 49.12.174.167 scope global eno1\\       valid_lft forever preferred_lft forever\n2: eno1    inet 49.12.174.167/32 scope global eno1\\       valid_lft forever preferred_lft forever\n3: eno2    inet 203.0.113.9/24 brd 203.0.113.255 scope global eno2\n";
-        assert_eq!(parse_ip_addr(out), vec!["49.12.174.167", "203.0.113.9"]);
+        let out = "2: eno1    inet 203.0.113.7 peer 49.12.174.129/32 brd 203.0.113.7 scope global eno1\\       valid_lft forever preferred_lft forever\n2: eno1    inet 203.0.113.7/32 scope global eno1\\       valid_lft forever preferred_lft forever\n3: eno2    inet 203.0.113.9/24 brd 203.0.113.255 scope global eno2\n";
+        assert_eq!(parse_ip_addr(out), vec!["203.0.113.7", "203.0.113.9"]);
     }
 
     #[test]
