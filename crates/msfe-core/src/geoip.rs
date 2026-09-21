@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn parses_ipwhois_shape() {
-        let body = r#"{"ip":"49.12.174.167","success":true,"country":"Germany","country_code":"DE",
+        let body = r#"{"ip":"203.0.113.7","success":true,"country":"Germany","country_code":"DE",
             "region":"Bavaria","city":"Nuremberg","latitude":49.45,"longitude":11.07,
             "connection":{"asn":24940,"org":"Hetzner Online GmbH","isp":"Hetzner"},"timezone":{"id":"Europe/Berlin"}}"#;
         let v = Json::parse(body).unwrap();

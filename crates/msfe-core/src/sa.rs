@@ -803,7 +803,7 @@ mod tests {
         let h = "Received: from [203.0.113.7] (port=58074 helo=sender.example)\n    by mail.example with esmtpsa\nReceived: from x [10.0.0.1]\n";
         let ips = header_ips(h);
         assert_eq!(ips[0].ip, "203.0.113.7");
-        assert_eq!(ips[0].host, "bassetto.eu");
+        assert_eq!(ips[0].host, "sender.example");
         assert_eq!(ips[1].ip, "10.0.0.1");
     }
 

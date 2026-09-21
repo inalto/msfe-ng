@@ -483,8 +483,8 @@ mod tests {
     fn validates_addresses_and_masks() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("MSFE_NG_OWN_IPS", "203.0.113.5");
-        assert!(validate_target("49.12.174.167", false).is_ok());
-        assert!(validate_target("49.12.174.0/24", false).is_ok());
+        assert!(validate_target("203.0.113.7", false).is_ok());
+        assert!(validate_target("203.0.113.0/24", false).is_ok());
         // wide networks need force
         assert!(validate_target("49.12.0.0/16", false).is_err());
         assert!(validate_target("49.12.0.0/16", true).is_ok());
