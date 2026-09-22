@@ -705,6 +705,8 @@ pub struct SpfResult {
     pub expected: String,
     pub ip: Option<IpAddr>,
     pub records: Vec<String>,
+    /// cPanel's explanation for a record that does not pass (`INVALID`).
+    pub reason: Option<String>,
     pub error: Option<String>,
 }
 
@@ -768,11 +770,23 @@ pub fn parse_validate_spfs(v: &Json) -> Result<Vec<(String, SpfResult)>, String>
                     .and_then(Json::as_str)
                     .and_then(|s| s.trim().parse().ok()),
                 records: current_records(e),
+                reason: record_reason(e),
                 error: error_field(e),
             },
         ));
     }
     Ok(out)
+}
+
+/// The first `records[].reason` of a validator entry, if any.
+fn record_reason(e: &Json) -> Option<String> {
+    e.get("records")
+        .and_then(Json::as_array)?
+        .iter()
+        .filter_map(|r| r.get("reason").and_then(Json::as_str))
+        .map(str::trim)
+        .find(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// `validate_current_dkims` → (domain, result) pairs; the reply's `domain` is
@@ -1074,7 +1088,7 @@ fn record_bits(records: &[String]) -> Option<u32> {
 /// work without a local zone.
 fn fix_note(zone: &Zone, generates_key: bool) -> Option<String> {
     let ns = if zone.nameservers.is_empty() {
-        "unknown name servers".to_string()
+        "not this server".to_string()
     } else {
         zone.nameservers.join(", ")
     };
@@ -1137,18 +1151,24 @@ pub fn classify_spf(domain: &str, zone: &Zone, res: &SpfResult, notes: &[Note]) 
             ),
             ..Check::default()
         },
-        "MISMATCH" => Check {
+        // MISMATCH: the expected mechanism is absent; INVALID: cPanel evaluated
+        // the record for this server's address and it did not pass.
+        "MISMATCH" | "INVALID" => Check {
             state: State::Mismatch,
             level: Level::Fail,
             summary: "server IP not authorized".into(),
             detail: format!(
                 "{domain} publishes an SPF record, but it does not authorize this server \
-                 ({}): mail sent from here fails SPF.",
+                 ({}): mail sent from here fails SPF.{}",
                 if res.expected.is_empty() {
                     "the mechanism cPanel expects is missing"
                 } else {
                     res.expected.as_str()
-                }
+                },
+                res.reason
+                    .as_deref()
+                    .map(|r| format!(" cPanel: {r}"))
+                    .unwrap_or_default()
             ),
             ..Check::default()
         },
@@ -1386,6 +1406,20 @@ fn pick<T: Clone>(res: &Result<Vec<(String, T)>, String>, domain: &str) -> Resul
     }
 }
 
+/// cPanel names no name servers for a subdomain; take those of the zone that
+/// holds it when that zone was answered in the same call.
+fn inherit_nameservers(mut z: Zone, auth: &Result<Vec<(String, Zone)>, String>) -> Zone {
+    if z.nameservers.is_empty() {
+        if let (Some(name), Ok(list)) = (&z.name, auth) {
+            if let Some((_, parent)) = list.iter().find(|(d, _)| d == name) {
+                z.nameservers = parent.nameservers.clone();
+                z.local_authority = z.local_authority || parent.local_authority;
+            }
+        }
+    }
+    z
+}
+
 /// Check every domain: cPanel's three validators in chunks of 25, then our own
 /// DMARC lookup and notes per domain. Returns the rows and the errors of the
 /// calls that failed (one per chunk, for `Scan::errors`).
@@ -1429,7 +1463,7 @@ pub fn validate(cp: &Cp, client: &Client, domains: &[Domain]) -> (Vec<Row>, Vec<
         note_error(dkims.as_ref().err());
         note_error(auth.as_ref().err());
         for d in chunk {
-            let zone = pick(&auth, &d.domain);
+            let zone = pick(&auth, &d.domain).map(|z| inherit_nameservers(z, &auth));
             let z = zone.clone().unwrap_or_default();
             let mut spf = match pick(&spfs, &d.domain) {
                 Err(why) => Check::unknown(why),
@@ -2368,9 +2402,26 @@ mod tests {
             expected: "ip4:192.0.2.10".into(),
             ip: Some("192.0.2.10".parse().unwrap()),
             records: Vec::new(),
+            reason: None,
             error: None,
         };
         let ok = classify_spf("example.com", &zone_here(), &res("VALID"), &[]);
+        let invalid = SpfResult {
+            reason: Some("mechanism '~all' matched".into()),
+            records: vec!["v=spf1 +a ~all".into()],
+            ..res("INVALID")
+        };
+        let inv = classify_spf("example.com", &zone_here(), &invalid, &[]);
+        assert_eq!((inv.state, inv.level), (State::Mismatch, Level::Fail));
+        assert!(
+            inv.detail.contains("cPanel: mechanism '~all' matched"),
+            "{}",
+            inv.detail
+        );
+        assert_eq!(
+            inv.suggested_value.as_deref(),
+            Some("v=spf1 +a ip4:192.0.2.10 ~all")
+        );
         assert_eq!((ok.state, ok.level), (State::Ok, Level::Ok));
         assert_eq!(ok.raw_state, "VALID");
         assert!(!ok.fixable && ok.suggested.is_none());
