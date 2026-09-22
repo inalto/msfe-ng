@@ -108,6 +108,16 @@ pub fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''"))
 }
 
+/// A quoted `LIKE` pattern matching `needle` anywhere, with the wildcard
+/// characters of the needle itself escaped (MySQL's default `\` escape).
+pub fn like_contains(needle: &str) -> String {
+    let escaped = needle
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    quote(&format!("%{escaped}%"))
+}
+
 /// Read a global key from the `msfe_config` kv table (daemon-writable state:
 /// alert cooldowns, last-run summaries). `None` when unset or the DB is down.
 pub fn kv_get(cfg: &Config, ckey: &str) -> Option<String> {
@@ -186,6 +196,14 @@ pub fn exec_stdin(cfg: &Config, sql: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn like_contains_escapes_wildcards_and_quotes() {
+        assert_eq!(like_contains("bob"), "'%bob%'");
+        assert_eq!(like_contains("50%_off"), "'%50\\\\%\\\\_off%'");
+        assert_eq!(like_contains("o'neil"), "'%o''neil%'");
+        assert_eq!(like_contains("a\\b"), "'%a\\\\\\\\b%'");
+    }
     use std::os::unix::fs::PermissionsExt;
 
     /// A `headers` column folded with a tab and spanning lines must come back

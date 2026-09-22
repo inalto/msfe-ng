@@ -947,7 +947,26 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
         ("GET", "/api/quarantine") => {
             let limit =
                 stats::clamp_int(req.query_param("limit").as_deref(), 1000, 1, 5000) as usize;
-            quarantine_listing(cfg, limit)
+            let q = req.query_param("q").unwrap_or_default();
+            let q = q.trim();
+            if q.chars().count() > 200 {
+                return Response::json(400, r#"{"error":"search text too long (200 chars)"}"#);
+            }
+            let kind = req
+                .query_param("kind")
+                .filter(|k| k == "spam" || k == "held");
+            let date = |key: &str| {
+                req.query_param(key)
+                    .filter(|v| !v.trim().is_empty())
+                    .map(|v| quarantine::filter_date(&v).ok_or(()))
+            };
+            let (from, to) = match (date("from"), date("to")) {
+                (Some(Err(())), _) | (_, Some(Err(()))) => {
+                    return Response::json(400, r#"{"error":"dates must be YYYY-MM-DD"}"#)
+                }
+                (f, t) => (f.and_then(Result::ok), t.and_then(Result::ok)),
+            };
+            quarantine_listing(cfg, limit, q, kind, from, to)
         }
         ("GET", "/api/quarantine/message") => {
             let date = req.query_param("date").unwrap_or_default();
@@ -1427,8 +1446,40 @@ fn rules_adopt(req: &Request, cfg: &Config, config_file: &Path) -> Response {
 /// Disk listing of the quarantine, enriched from `maillog` where a row
 /// exists. Ids are inlined into the IN clause only when their charset is
 /// SQL-safe (they are filesystem names, not trusted input).
-fn quarantine_listing(cfg: &Config, limit: usize) -> Response {
-    let l = quarantine::list_quarantine(Path::new(&cfg.quarantine_dir), limit);
+/// The quarantine as the tab shows it: everything on disk, or — with `q` —
+/// the items whose id holds the text or whose log row matches it on sender,
+/// recipient or subject; `kind` and the date window narrow it further.
+fn quarantine_listing(
+    cfg: &Config,
+    limit: usize,
+    q: &str,
+    kind: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+) -> Response {
+    let mut filter = quarantine::ListFilter {
+        kind,
+        from,
+        to,
+        ..Default::default()
+    };
+    if !q.is_empty() {
+        let like = msfe_core::db::like_contains(q);
+        let mut ids = std::collections::HashSet::new();
+        if let Ok(rows) = msfe_core::db::query(
+            cfg,
+            &format!(
+                "SELECT message_id FROM maillog WHERE from_address LIKE {like} \
+                 OR to_address LIKE {like} OR subject LIKE {like} \
+                 ORDER BY msg_ts DESC LIMIT 20000"
+            ),
+        ) {
+            ids.extend(rows.into_iter().filter_map(|r| r.into_iter().next()));
+        }
+        filter.id_contains = Some(q.to_string());
+        filter.ids = Some(ids);
+    }
+    let l = quarantine::list_quarantine_where(Path::new(&cfg.quarantine_dir), limit, &filter);
     let sql_safe = |id: &str| {
         !id.is_empty()
             && id
@@ -1483,6 +1534,17 @@ fn quarantine_listing(cfg: &Config, limit: usize) -> Response {
         &Json::Object(vec![
             ("total".into(), Json::Int(l.total as i64)),
             ("bytes".into(), Json::Int(l.bytes as i64)),
+            ("disk_total".into(), Json::Int(l.disk_total as i64)),
+            ("disk_bytes".into(), Json::Int(l.disk_bytes as i64)),
+            (
+                "filtered".into(),
+                Json::Bool(
+                    !q.is_empty()
+                        || filter.kind.is_some()
+                        || filter.from.is_some()
+                        || filter.to.is_some(),
+                ),
+            ),
             ("truncated".into(), Json::Bool(l.truncated)),
             ("entries".into(), Json::Array(entries)),
         ])

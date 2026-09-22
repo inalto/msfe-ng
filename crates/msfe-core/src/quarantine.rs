@@ -395,10 +395,57 @@ pub struct QuarantineEntry {
 }
 
 pub struct QuarantineListing {
+    /// Items matching the filter (all of them, not just the capped page).
     pub total: usize,
     pub bytes: u64,
+    /// Everything found on disk, filter or not.
+    pub disk_total: usize,
+    pub disk_bytes: u64,
     pub truncated: bool,
     pub entries: Vec<QuarantineEntry>,
+}
+
+/// What a listing keeps. Dates are `YYYYMMDD`, inclusive. When either
+/// `id_contains` or `ids` is set, an entry must satisfy one of them: its id
+/// holds the text (case-insensitive) or is in the set (ids the message log
+/// matched on sender, recipient or subject).
+#[derive(Debug, Clone, Default)]
+pub struct ListFilter {
+    pub kind: Option<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub id_contains: Option<String>,
+    pub ids: Option<std::collections::HashSet<String>>,
+}
+
+impl ListFilter {
+    fn is_empty(&self) -> bool {
+        self.kind.is_none()
+            && self.from.is_none()
+            && self.to.is_none()
+            && self.id_contains.is_none()
+            && self.ids.is_none()
+    }
+    fn date_ok(&self, date: &str) -> bool {
+        self.from.as_deref().map_or(true, |f| date >= f)
+            && self.to.as_deref().map_or(true, |t| date <= t)
+    }
+    fn keep(&self, e: &QuarantineEntry) -> bool {
+        if self.kind.as_deref().is_some_and(|k| k != e.kind) {
+            return false;
+        }
+        if !self.date_ok(&e.date) {
+            return false;
+        }
+        match (&self.id_contains, &self.ids) {
+            (None, None) => true,
+            (needle, set) => {
+                needle.as_deref().is_some_and(|n| {
+                    !n.is_empty() && e.id.to_ascii_lowercase().contains(&n.to_ascii_lowercase())
+                }) || set.as_ref().is_some_and(|s| s.contains(&e.id))
+            }
+        }
+    }
 }
 
 pub struct PurgeReport {
@@ -411,7 +458,22 @@ pub struct PurgeReport {
 /// `cap` entries (`total`/`bytes` always reflect everything found). The disk
 /// is the source of truth here: files the DB never logged still appear.
 pub fn list_quarantine(base: &Path, cap: usize) -> QuarantineListing {
+    list_quarantine_where(base, cap, &ListFilter::default())
+}
+
+/// `list_quarantine` keeping only what `filter` accepts; the cap applies to
+/// the matches, so a search reaches the whole quarantine. `disk_total` and
+/// `disk_bytes` still describe everything found.
+pub fn list_quarantine_where(base: &Path, cap: usize, filter: &ListFilter) -> QuarantineListing {
     let mut entries: Vec<QuarantineEntry> = Vec::new();
+    let (mut disk_total, mut disk_bytes) = (0usize, 0u64);
+    let mut push = |e: QuarantineEntry| {
+        disk_total += 1;
+        disk_bytes += e.size;
+        if filter.is_empty() || filter.keep(&e) {
+            entries.push(e);
+        }
+    };
     for date in date_dirs(base) {
         let ddir = base.join(&date);
         let Ok(rd) = std::fs::read_dir(&ddir) else {
@@ -423,7 +485,7 @@ pub fn list_quarantine(base: &Path, cap: usize) -> QuarantineListing {
             if name == "spam" && is_dir {
                 if let Ok(sd) = std::fs::read_dir(e.path()) {
                     for s in sd.flatten() {
-                        entries.push(entry_for(
+                        push(entry_for(
                             &date,
                             &s.file_name().to_string_lossy(),
                             "spam",
@@ -432,7 +494,7 @@ pub fn list_quarantine(base: &Path, cap: usize) -> QuarantineListing {
                     }
                 }
             } else {
-                entries.push(entry_for(&date, &name, "held", &e.path()));
+                push(entry_for(&date, &name, "held", &e.path()));
             }
         }
     }
@@ -445,9 +507,18 @@ pub fn list_quarantine(base: &Path, cap: usize) -> QuarantineListing {
     QuarantineListing {
         total,
         bytes,
+        disk_total,
+        disk_bytes,
         truncated,
         entries,
     }
+}
+
+/// A `YYYYMMDD` date for the listing filter from user input: `YYYYMMDD` or
+/// `YYYY-MM-DD`; anything else is `None`.
+pub fn filter_date(s: &str) -> Option<String> {
+    let d: String = s.trim().chars().filter(|c| *c != '-').collect();
+    (d.len() == 8 && d.bytes().all(|b| b.is_ascii_digit())).then_some(d)
 }
 
 /// `YYYYMMDD`-named subdirectories of the quarantine root.
@@ -675,6 +746,63 @@ mod tests {
         assert_eq!(capped.total, 3);
         assert!(capped.truncated);
         assert_eq!(capped.entries.len(), 1);
+        assert_eq!((capped.disk_total, capped.disk_bytes), (3, 30));
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn filtered_listing_searches_the_whole_quarantine() {
+        let base = fixture("filter");
+        let by = |f: ListFilter| list_quarantine_where(&base, 1, &f);
+        // kind + the cap on the matches, not on the disk
+        let spam = by(ListFilter {
+            kind: Some("spam".into()),
+            ..Default::default()
+        });
+        assert_eq!((spam.total, spam.bytes, spam.disk_total), (2, 13, 3));
+        assert!(spam.truncated && spam.entries.len() == 1);
+        // date window, inclusive
+        let old = by(ListFilter {
+            to: Some("20260801".into()),
+            ..Default::default()
+        });
+        assert_eq!(old.total, 1);
+        assert_eq!(old.entries[0].id, "1waaaa-000000000001-aaaa");
+        let none = by(ListFilter {
+            from: Some("20260805".into()),
+            ..Default::default()
+        });
+        assert_eq!((none.total, none.disk_total), (0, 3));
+        // id substring, case-insensitive
+        let sub = by(ListFilter {
+            id_contains: Some("CCCC".into()),
+            ..Default::default()
+        });
+        assert_eq!(sub.total, 1);
+        assert_eq!(sub.entries[0].kind, "held");
+        // ids the message log matched, or the substring — either suffices
+        let mut set = std::collections::HashSet::new();
+        set.insert("1waaaa-000000000001-aaaa".to_string());
+        let either = list_quarantine_where(
+            &base,
+            10,
+            &ListFilter {
+                id_contains: Some("bbbb".into()),
+                ids: Some(set),
+                ..Default::default()
+            },
+        );
+        assert_eq!(either.total, 2);
+        // an empty needle with an empty set matches nothing, not everything
+        let nothing = by(ListFilter {
+            id_contains: Some(String::new()),
+            ids: Some(Default::default()),
+            ..Default::default()
+        });
+        assert_eq!(nothing.total, 0);
+        assert_eq!(filter_date("2026-08-04").as_deref(), Some("20260804"));
+        assert_eq!(filter_date(" 20260804 ").as_deref(), Some("20260804"));
+        assert_eq!(filter_date("2026-8-4"), None);
         std::fs::remove_dir_all(&base).unwrap();
     }
 

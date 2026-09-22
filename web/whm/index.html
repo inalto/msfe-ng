@@ -1778,12 +1778,27 @@ async function renderQuarantine(){
   const ctl=el('div',{class:'ctl'},purgeSel,
     el('span',{class:'muted',style:'margin-left:1rem'},'Older than'),days,
     el('span',{class:'muted'},'days:'),prevBtn,oldBtn,totals);
-  card.append(ctl,out,table);
+  // search: the whole quarantine, not just the loaded page — the daemon matches
+  // the id on disk and sender / recipient / subject in the message log
+  const qtext=el('input',{placeholder:'search sender / recipient / subject / id…',style:'flex:1;min-width:14rem;max-width:24rem',autocomplete:'off',spellcheck:'false'});
+  const qkind=el('select');[['','spam and held'],['spam','spam only'],['held','held only']].forEach(([v,l])=>qkind.append(el('option',{value:v},l)));
+  const qfrom=el('input',{type:'date',title:'from date'}),qto=el('input',{type:'date',title:'to date'});
+  const qgo=el('button',{class:'act plain'},'Search');
+  const qclear=el('button',{class:'act plain',style:'display:none'},'Clear');
+  const search=el('div',{class:'ctl'},qtext,qkind,el('span',{class:'muted',style:'font-size:.8rem'},'from'),qfrom,el('span',{class:'muted',style:'font-size:.8rem'},'to'),qto,qgo,qclear);
+  card.append(search,ctl,out,table);
+  const filtering=()=>!!(qtext.value.trim()||qkind.value||qfrom.value||qto.value);
+  let qTimer=null;
+  qtext.oninput=()=>{clearTimeout(qTimer);qTimer=setTimeout(load,400);};
+  qtext.onkeydown=e=>{if(e.key==='Enter'){clearTimeout(qTimer);load();}if(e.key==='Escape'){qtext.value='';load();}};
+  qkind.onchange=qfrom.onchange=qto.onchange=()=>load();
+  qgo.onclick=()=>{clearTimeout(qTimer);load();};
+  qclear.onclick=()=>{qtext.value='';qkind.value='';qfrom.value='';qto.value='';load();};
 
   function draw(){
     table.innerHTML='';
-    table.append(el('tr',{},el('th',{},''),...['Date','Message','Type','Size','From','Subject','Score'].map(h=>el('th',{},h))));
-    if(!ENTRIES.length){table.append(el('tr',{},el('td',{colspan:'8',class:'empty'},'Quarantine is empty.')));return;}
+    table.append(el('tr',{},el('th',{},''),...['Date','Message','Type','Size','From','To','Subject','Score'].map(h=>el('th',{},h))));
+    if(!ENTRIES.length){table.append(el('tr',{},el('td',{colspan:'9',class:'empty'},filtering()?'Nothing in the quarantine matches the search.':'Quarantine is empty.')));return;}
     ENTRIES.forEach(e=>{
       const cb=el('input',{type:'checkbox',...(SEL.has(key(e))?{checked:'checked'}:{})});
       cb.onchange=()=>{cb.checked?SEL.add(key(e)):SEL.delete(key(e));purgeSel.textContent=SEL.size?`Purge selected (${SEL.size})`:'Purge selected';};
@@ -1793,6 +1808,7 @@ async function renderQuarantine(){
         el('td',{},el('span',{class:'badge',style:'background:'+(e.kind==='spam'?'var(--warning)':'var(--ink2)')},e.kind)),
         el('td',{class:'num'},fmtB(e.size)),
         el('td',{},e.from||el('span',{class:'muted'},'—')),
+        el('td',{},e.to||el('span',{class:'muted'},'—')),
         el('td',{},e.subject||el('span',{class:'muted'},'(not in message log)')),
         el('td',{class:'num'},e.sascore||'—'));
       row.style.cursor='pointer';
@@ -1808,9 +1824,16 @@ async function renderQuarantine(){
   }
   async function load(){
     table.innerHTML='';table.append(el('tr',{},el('td',{class:'empty'},'Loading…')));
-    const d=await api('/api/quarantine?limit=2000');
+    const p=new URLSearchParams({limit:'2000'});
+    if(qtext.value.trim())p.set('q',qtext.value.trim());if(qkind.value)p.set('kind',qkind.value);
+    if(qfrom.value)p.set('from',qfrom.value);if(qto.value)p.set('to',qto.value);
+    const d=await api('/api/quarantine?'+p.toString());
+    if(d&&d.error){toast(d.error);}
     ENTRIES=(d&&d.entries)||[];SEL=new Set();purgeSel.textContent='Purge selected';
-    totals.textContent=d?`${d.total} item(s), ${fmtB(d.bytes)}${d.truncated?' — showing first '+ENTRIES.length:''}`:'';
+    qclear.style.display=filtering()?'':'none';
+    totals.textContent=d&&!d.error?(d.filtered
+      ?`${d.total} match(es), ${fmtB(d.bytes)} — of ${d.disk_total} item(s), ${fmtB(d.disk_bytes)} on disk${d.truncated?' — showing first '+ENTRIES.length:''}`
+      :`${d.total} item(s), ${fmtB(d.bytes)}${d.truncated?' — showing first '+ENTRIES.length:''}`):'';
     draw();
   }
   purgeSel.onclick=async()=>{
