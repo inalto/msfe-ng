@@ -669,8 +669,77 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                 .to_string(),
             )
         }
-        ("GET", "/api/doctor") => {
+        // acknowledge a notice: hidden for `days` (or for good) while it does
+        // not get worse; the list keeps it
+        ("POST", "/api/doctor/ack") => {
+            let v = Json::parse(&req.body).unwrap_or(Json::Null);
+            let name = v.str_field("name");
+            let forever = matches!(v.get("forever"), Some(Json::Bool(true)));
+            let days = match v.get("days") {
+                Some(Json::Int(n)) => Some(*n),
+                Some(Json::Num(s)) => s.parse().ok(),
+                _ => None,
+            };
+            let days = if forever {
+                None
+            } else {
+                Some(days.filter(|d| (1..=3650).contains(d)).unwrap_or(30) as u32)
+            };
             let checks = msfe_core::doctor::run(cfg, config_file);
+            let Some(c) = checks.iter().find(|c| c.name == name) else {
+                return Response::json(404, r#"{"error":"no such notice"}"#);
+            };
+            let path = msfe_core::acknowledge::file_for(config_file);
+            match msfe_core::acknowledge::ack(
+                &path,
+                c,
+                days,
+                &v.str_field("note"),
+                msfe_core::delivery::now_secs(),
+            ) {
+                Ok(a) => Response::json(
+                    200,
+                    &Json::Object(vec![
+                        ("ok".into(), Json::Bool(true)),
+                        ("name".into(), Json::str(&a.name)),
+                        (
+                            "until".into(),
+                            a.until.map(|u| Json::Int(u as i64)).unwrap_or(Json::Null),
+                        ),
+                    ])
+                    .to_string(),
+                ),
+                Err(e) => Response::json(
+                    400,
+                    &Json::Object(vec![("error".into(), Json::str(e))]).to_string(),
+                ),
+            }
+        }
+        ("POST", "/api/doctor/unack") => {
+            let v = Json::parse(&req.body).unwrap_or(Json::Null);
+            let name = v.str_field("name");
+            let path = msfe_core::acknowledge::file_for(config_file);
+            match msfe_core::acknowledge::unack(&path, &name) {
+                Ok(found) => Response::json(
+                    200,
+                    &Json::Object(vec![
+                        ("ok".into(), Json::Bool(true)),
+                        ("found".into(), Json::Bool(found)),
+                    ])
+                    .to_string(),
+                ),
+                Err(e) => Response::json(
+                    400,
+                    &Json::Object(vec![("error".into(), Json::str(e))]).to_string(),
+                ),
+            }
+        }
+        ("GET", "/api/doctor") => {
+            let split = msfe_core::acknowledge::split_for(
+                config_file,
+                msfe_core::doctor::run(cfg, config_file),
+            );
+            let checks = split.shown;
             let items: Vec<Json> = checks
                 .iter()
                 .map(|c| {
@@ -701,6 +770,10 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                         Json::Bool(msfe_core::doctor::healthy(&checks)),
                     ),
                     ("checks".into(), Json::Array(items)),
+                    (
+                        "acknowledged".into(),
+                        Json::Array(split.acknowledged.iter().map(|e| e.to_json()).collect()),
+                    ),
                 ])
                 .to_string(),
             )

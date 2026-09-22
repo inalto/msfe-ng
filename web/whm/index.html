@@ -2615,6 +2615,11 @@ async function renderAcctDns(v){
       b.onclick=e=>{e.stopPropagation();acdRepair(n);};
       return b;
     }
+    if(ACD_CHECKS.some(([k])=>(r[k]||{}).editable)){
+      const b=el('button',{class:'act plain',title:'Change the SPF or DMARC record of this domain (nothing is wrong with them)'},'Edit');
+      b.onclick=e=>{e.stopPropagation();acdRepair(n);};
+      return b;
+    }
     const recs=acdSuggested(r);
     if(recs.length){
       const b=el('button',{class:'act plain',title:'Copy the record(s) to publish at this domain’s DNS host'},'copy records');
@@ -2671,6 +2676,10 @@ async function renderAcctDns(v){
         const ap=el('button',{class:'act plain'},acdDmarcAction(c)+'…');
         ap.onclick=e=>{e.stopPropagation();acdRepair(n,'dmarc');};
         b.append(el('div',{class:'ctl',style:'margin:.4rem 0 0'},ap));
+      }else if(!c.fixable&&c.editable){
+        const ed=el('button',{class:'act plain'},'Change the '+label+' record…');
+        ed.onclick=e=>{e.stopPropagation();acdRepair(n,k);};
+        b.append(el('div',{class:'ctl',style:'margin:.4rem 0 0'},ed));
       }else if(c.fixable){
         const ap=el('button',{class:'act plain'},'Apply '+label);
         const out=el('pre',{class:'log',style:'display:none'});
@@ -2777,9 +2786,11 @@ async function renderAcctDns(v){
     const parts=[];
     ACD_CHECKS.forEach(([k,label])=>{
       const c=r[k]||{};
-      if(!c.fixable)return;
-      const cb=el('input',{type:'checkbox',...(!only||only===k?{checked:'checked'}:{})});
-      const action=k==='dmarc'?acdDmarcAction(c):(ACD_ACTION[k]||'');
+      if(!c.fixable&&!c.editable)return;
+      const editOnly=!c.fixable;
+      const checked=only?only===k:!editOnly;
+      const cb=el('input',{type:'checkbox',...(checked?{checked:'checked'}:{})});
+      const action=editOnly?'Change the '+label+' record (nothing is wrong with it)':k==='dmarc'?acdDmarcAction(c):(ACD_ACTION[k]||'');
       let ta,form=null;
       if(k==='dmarc'){
         const cur=c.current||[];
@@ -2799,7 +2810,8 @@ async function renderAcctDns(v){
         }
       }else{
         ta=el('textarea',{class:'mono',rows:'3',spellcheck:'false',...(k==='dkim'?{readonly:'readonly'}:{})});
-        ta.value=c.suggested||c.expected||'';
+        // a repair proposes a record; an edit starts from what is published
+        ta.value=c.suggested||(c.current||[])[0]||c.expected||'';
       }
       m.body.append(el('div',{class:'acct-detail'},
         el('label',{class:'acct-head'},cb,el('b',{},label),el('span',{class:'muted',style:'font-weight:400'},action)),
@@ -2813,7 +2825,7 @@ async function renderAcctDns(v){
         acdGuide(k)));
       parts.push({k,label,cb,value:()=>form?form.value():ta.value.trim()});
     });
-    if(!parts.length){m.body.append(el('div',{class:'empty'},'Nothing on this domain can be repaired from this server.'));return;}
+    if(!parts.length){m.body.append(el('div',{class:'empty'},'Nothing on this domain can be repaired or changed from this server (its zone is elsewhere).'));return;}
     const out=el('pre',{class:'log',style:'display:none'});
     const go=el('button',{class:'act'},'Apply selected');
     const close=el('button',{class:'act plain'},'Close');
@@ -3735,26 +3747,84 @@ function setRailHealth(color,text){
   const h=$('#railhealth');if(!h)return;
   h.innerHTML='';
   h.append(el('span',{class:'dot',style:`width:8px;height:8px;border-radius:50%;background:${color}`}),el('span',{},text));
+  h.title='Click for the notices and the acknowledged ones';
+  h.style.cursor='pointer';
+  h.onclick=()=>showNotices();
+}
+let DOCTOR_LAST=null; // the last /api/doctor answer, for the notices dialog
+// Acknowledge a notice: hidden while it stays at its level (or improves),
+// for a while or for good, with a note for whoever looks later.
+function ackDialog(c){
+  const m=modal('Acknowledge: '+c.name);
+  m.body.append(el('div',{class:'muted',style:'font-size:.85rem;margin-bottom:.5rem'},c.detail),
+    el('div',{class:'muted',style:'font-size:.8rem;margin-bottom:.6rem'},'The notice leaves the banner and the health dot while it stays a '+c.level+' (a warning that becomes a failure shows again at once). It stays listed under the health dot with your note.'));
+  const dur=el('select');[['7','for 7 days'],['30','for 30 days'],['90','for 90 days'],['forever','for good']].forEach(([v,l])=>dur.append(el('option',{value:v,...(v==='30'?{selected:'selected'}:{})},l)));
+  const note=el('input',{type:'text',placeholder:'why (optional, e.g. "1 % unscored is fine here")',style:'flex:1;min-width:16rem',maxlength:'300'});
+  const go=el('button',{class:'act'},'Acknowledge');
+  m.body.append(el('div',{class:'ctl'},dur,note),el('div',{class:'ctl',style:'margin-top:.6rem'},go));
+  go.onclick=async()=>{
+    go.disabled=true;
+    const body={name:c.name,note:note.value.trim()};
+    if(dur.value==='forever')body.forever=true;else body.days=+dur.value;
+    const r=await api('/api/doctor/ack',{method:'POST',body});
+    if(r&&r.ok){toast('Acknowledged — listed under the health dot');m.close();refreshDoctor();}
+    else{toast((r&&r.error)||'not acknowledged');go.disabled=false;}
+  };
+}
+// The dialog behind the health dot: current notices, then every
+// acknowledgement — active (hiding a notice), expired (showing again), resolved.
+async function showNotices(){
+  const d=DOCTOR_LAST||await api('/api/doctor');
+  const m=modal('Notices');
+  const probs=(d.checks||[]).filter(c=>c.level!=='ok');
+  const acks=d.acknowledged||[];
+  m.body.append(el('h3',{style:'margin:.2rem 0 .3rem'},probs.length?probs.length+' current notice(s)':'No current notices'));
+  probs.forEach(c=>m.body.append(el('div',{style:'margin:.25rem 0;font-size:.85rem'},
+    el('span',{class:'badge',style:'background:'+(c.level==='fail'?'var(--critical)':'var(--warning)')},c.level),' ',el('b',{},c.name),' — ',c.detail,' ',
+    Object.assign(el('button',{class:'act plain',style:'margin-left:.4rem'},'Acknowledge…'),{onclick:()=>{m.close();ackDialog(c);}}))));
+  m.body.append(el('h3',{style:'margin:.8rem 0 .3rem'},acks.length?acks.length+' acknowledged notice(s)':'No acknowledged notices'));
+  if(acks.length){
+    const t=el('table',{class:'dlv-table'});
+    t.append(el('tr',{},...['status','notice','acknowledged','until','note',''].map(h=>el('th',{},h))));
+    const STATUS={active:['hidden','var(--good)'],expired:['showing again','var(--warning)'],resolved:['resolved','var(--muted)']};
+    acks.forEach(a=>{
+      const [lbl,col]=STATUS[a.status]||[a.status,'var(--muted)'];
+      const un=el('button',{class:'act plain'},'Unacknowledge');
+      un.onclick=async()=>{un.disabled=true;const r=await api('/api/doctor/unack',{method:'POST',body:{name:a.name}});if(r&&r.ok){toast('It is a notice again');m.close();DOCTOR_LAST=null;await refreshDoctor();showNotices();}else{toast((r&&r.error)||'failed');un.disabled=false;}};
+      t.append(el('tr',{},
+        el('td',{},el('span',{class:'badge',style:'background:'+col},lbl),a.status==='expired'&&a.now?el('div',{class:'muted',style:'font-size:.72rem'},'now '+a.now+(a.now!==a.level?' (was '+a.level+')':'')):''),
+        el('td',{},el('b',{},a.name),el('div',{class:'muted',style:'font-size:.76rem;max-width:28rem;white-space:normal'},a.detail)),
+        el('td',{},fmtTime(a.at)),
+        el('td',{},a.until?fmtTime(a.until):'for good'),
+        el('td',{style:'white-space:normal;max-width:16rem'},a.note||el('span',{class:'muted'},'—')),
+        el('td',{},un)));
+    });
+    m.body.append(t);
+  }
 }
 async function refreshDoctor(){
   const bar=$('#doctorbar');
   const d=await api('/api/doctor');
+  DOCTOR_LAST=d;
   const checks=d.checks||[];
   const probs=checks.filter(c=>c.level!=='ok');
   const fails=probs.filter(c=>c.level==='fail').length;
-  if(!checks.length) setRailHealth('var(--muted)','status unknown');
-  else if(fails) setRailHealth('var(--critical)',`${fails} problem${fails>1?'s':''}`);
-  else if(probs.length) setRailHealth('var(--warning)',`${probs.length} notice${probs.length>1?'s':''}`);
-  else setRailHealth('var(--good)','all systems ok');
+  const acked=(d.acknowledged||[]).filter(a=>a.status==='active').length;
+  const ackNote=acked?` · ${acked} acknowledged`:'';
+  if(!checks.length&&!acked) setRailHealth('var(--muted)','status unknown');
+  else if(fails) setRailHealth('var(--critical)',`${fails} problem${fails>1?'s':''}${ackNote}`);
+  else if(probs.length) setRailHealth('var(--warning)',`${probs.length} notice${probs.length>1?'s':''}${ackNote}`);
+  else setRailHealth('var(--good)','all systems ok'+ackNote);
   if(!probs.length){bar.style.display='none';return;}
   bar.style.display='';bar.innerHTML='';
   bar.style.background=fails?'color-mix(in srgb, var(--critical) 12%, var(--surface))':'color-mix(in srgb, var(--warning) 14%, var(--surface))';
   const det=el('details',{},
     el('summary',{style:'cursor:pointer;font-weight:600;color:'+(fails?'var(--critical)':'var(--ink)')},
-      (fails?`⚠ ${fails} problem(s) need attention`:`${probs.length} notice(s)`)+' — click for details and fixes'),
+      (fails?`⚠ ${fails} problem(s) need attention`:`${probs.length} notice(s)`)+' — click for details and fixes'+(acked?` · ${acked} acknowledged`:'')),
     ...probs.map(c=>el('div',{style:'margin:.3rem 0 0 .5rem'},
       el('span',{class:'badge',style:'background:'+(c.level==='fail'?'var(--critical)':'var(--warning)')},c.level),
       ' ',el('b',{},c.name),' — ',c.detail,
+      Object.assign(el('button',{class:'act plain',style:'margin-left:.5rem;font-size:.75rem;padding:.1rem .45rem',title:'Hide this notice for a while or for good; it stays listed under the health dot'},'Acknowledge…'),{onclick:e=>{e.stopPropagation();ackDialog(c);}}),
       c.fix?el('div',{class:'muted',style:'margin-left:2.6rem'},'fix: '+c.fix,c.url?el('span',{},' — ',el('a',{href:c.url,target:'_blank',rel:'noopener'},'procedure')):''):'',
       c.proposal?el('div',{style:'margin:.25rem 0 0 2.6rem'},Object.assign(el('button',{class:'act plain'},'Apply: '+c.proposal),{onclick:async e=>{
         if(!confirm(`${c.name}\n\n${c.detail}\n\nApply this change?\n${c.proposal}\n\nMailScanner files are validated before going live and the previous version is kept.`))return;

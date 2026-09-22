@@ -48,7 +48,9 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
         ("service", _) => Some(NONE),
         ("mailscanner", _) => Some(NONE),
         ("upgrade", _) => Some(&["--check"]),
-        ("doctor", _) => Some(&["--fix", "--apply"]),
+        ("doctor", Some("ack")) => Some(&["--days", "--forever", "--note"]),
+        ("doctor", Some("unack" | "acks")) => Some(NONE),
+        ("doctor", _) => Some(&["--fix", "--apply", "--all"]),
         ("resolver", _) => Some(NONE),
         ("snapshot", Some("export")) => Some(&["--only"]),
         ("snapshot", Some("import")) => Some(&["--dry-run", "--only", "--yes", "--no-lint"]),
@@ -119,7 +121,7 @@ fn usage_of(cmd: &str) -> &'static str {
         "legacy" => "msfe-ng legacy decommission [--run]",
         "autoban" => "msfe-ng autoban <status|run [--dry-run]|rules>",
         "upgrade" => "msfe-ng upgrade [--check]",
-        "doctor" => "msfe-ng doctor [--fix | --apply <check name>]",
+        "doctor" => "msfe-ng doctor [--fix | --apply <check name> | --all | ack <check name> [--days <n> | --forever] [--note <text>] | unack <check name> | acks]",
         "resolver" => "msfe-ng resolver <status|install>",
         "snapshot" => "msfe-ng snapshot <export [file] [--only mailscanner|msfe] | import <file> [--dry-run] [--only mailscanner|msfe] [--no-lint] [--yes] | list>",
         "backup" => "msfe-ng backup <file.tar.gz>   (alias: snapshot export --only msfe)",
@@ -184,6 +186,9 @@ fn main() -> ExitCode {
         "legacy" => cmd_legacy(args.get(1).map(String::as_str)),
         "autoban" => cmd_autoban(args.get(1).map(String::as_str)),
         "doctor" => {
+            if matches!(sub, Some("ack" | "unack" | "acks")) {
+                return cmd_doctor_ack(sub.unwrap_or_default(), rest);
+            }
             if let Some(i) = args.iter().position(|a| a == "--apply") {
                 let Some(name) = args.get(i + 1) else {
                     eprintln!("usage: msfe-ng doctor --apply \"<check name>\"   (the proposals are listed as 'apply:' lines by msfe-ng doctor)");
@@ -203,7 +208,10 @@ fn main() -> ExitCode {
                     }
                 };
             }
-            cmd_doctor(args.iter().any(|a| a == "--fix"))
+            cmd_doctor(
+                args.iter().any(|a| a == "--fix"),
+                args.iter().any(|a| a == "--all"),
+            )
         }
         "backup" => cmd_backup(sub),
         "restore" => cmd_restore(sub, rest),
@@ -1026,7 +1034,118 @@ fn cmd_digest(flag: Option<&str>) -> ExitCode {
 
 /// One pass over every link of the scanning chain; each problem names its fix.
 /// Exit code 1 when anything FAILS (warnings alone stay 0).
-fn cmd_doctor(fix: bool) -> ExitCode {
+/// `doctor ack|unack|acks`: silence a notice you have decided to live with,
+/// take that back, or list what is silenced.
+fn cmd_doctor_ack(sub: &str, rest: &[String]) -> ExitCode {
+    use msfe_core::acknowledge as ak;
+    let cfg = Config::load(&config_path());
+    let path = ak::file_for(&config_path());
+    match sub {
+        "acks" => {
+            let split = ak::split_for(&config_path(), msfe_core::doctor::run(&cfg, &config_path()));
+            if split.acknowledged.is_empty() {
+                println!("no acknowledged notices");
+                return ExitCode::SUCCESS;
+            }
+            for e in &split.acknowledged {
+                println!(
+                    "[{:<8}] {} — acknowledged as {} on {}{}{}",
+                    e.status.as_str(),
+                    e.ack.name,
+                    e.ack.level.as_str(),
+                    fmt_epoch(e.ack.at),
+                    match e.ack.until {
+                        Some(u) => format!(", until {}", fmt_epoch(u)),
+                        None => ", for good".to_string(),
+                    },
+                    if e.ack.note.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" — {}", e.ack.note)
+                    }
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        "ack" => {
+            let mut name: Option<&str> = None;
+            let (mut days, mut forever, mut note) = (None::<u32>, false, String::new());
+            let mut it = rest.iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--days" => days = it.next().and_then(|d| d.parse().ok()),
+                    "--forever" => forever = true,
+                    "--note" => note = it.next().cloned().unwrap_or_default(),
+                    x if !x.starts_with('-') && name.is_none() => name = Some(x),
+                    _ => {}
+                }
+            }
+            let Some(name) = name else {
+                eprintln!("usage: {}", usage_of("doctor"));
+                return ExitCode::from(2);
+            };
+            let checks = msfe_core::doctor::run(&cfg, &config_path());
+            let Some(c) = checks.iter().find(|c| c.name == name) else {
+                eprintln!(
+                    "msfe-ng doctor ack: no notice named \"{name}\" (msfe-ng doctor lists them)"
+                );
+                return ExitCode::from(1);
+            };
+            let days = if forever {
+                None
+            } else {
+                Some(days.unwrap_or(30))
+            };
+            match ak::ack(&path, c, days, &note, msfe_core::delivery::now_secs()) {
+                Ok(a) => {
+                    println!(
+                        "acknowledged \"{}\" ({}) {} — hidden while it stays {} or better; msfe-ng doctor acks lists it",
+                        a.name,
+                        a.level.as_str(),
+                        match a.until {
+                            Some(u) => format!("until {}", fmt_epoch(u)),
+                            None => "for good".to_string(),
+                        },
+                        a.level.as_str()
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("msfe-ng doctor ack: {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        _ => {
+            let Some(name) = rest.first() else {
+                eprintln!("usage: {}", usage_of("doctor"));
+                return ExitCode::from(2);
+            };
+            match ak::unack(&path, name) {
+                Ok(true) => {
+                    println!("\"{name}\" is a notice again");
+                    ExitCode::SUCCESS
+                }
+                Ok(false) => {
+                    eprintln!("msfe-ng doctor unack: \"{name}\" was not acknowledged");
+                    ExitCode::from(1)
+                }
+                Err(e) => {
+                    eprintln!("msfe-ng doctor unack: {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+    }
+}
+
+/// `YYYY-MM-DD` of an epoch second (UTC), for the doctor's lines.
+fn fmt_epoch(secs: u64) -> String {
+    let d = msfe_core::civil::Date::from_unix(secs);
+    format!("{:04}-{:02}-{:02}", d.y, d.m, d.d)
+}
+
+fn cmd_doctor(fix: bool, all: bool) -> ExitCode {
     use msfe_core::doctor::{self, Level};
     let cfg = Config::load(&config_path());
     if fix {
@@ -1040,7 +1159,9 @@ fn cmd_doctor(fix: bool) -> ExitCode {
         }
         println!();
     }
-    let checks = doctor::run(&cfg, &config_path());
+    let split =
+        msfe_core::acknowledge::split_for(&config_path(), doctor::run(&cfg, &config_path()));
+    let checks = split.shown;
     for c in &checks {
         let tag = match c.level {
             Level::Ok => " OK ",
@@ -1059,6 +1180,41 @@ fn cmd_doctor(fix: bool) -> ExitCode {
                 "       apply: {summary}   (msfe-ng doctor --apply \"{}\")",
                 c.name
             );
+        }
+    }
+    let active: Vec<_> = split
+        .acknowledged
+        .iter()
+        .filter(|e| e.status == msfe_core::acknowledge::Status::Active)
+        .collect();
+    if !active.is_empty() {
+        println!(
+            "acknowledged ({}): {}{}",
+            active.len(),
+            active
+                .iter()
+                .map(|e| format!("\"{}\"", e.ack.name))
+                .collect::<Vec<_>>()
+                .join(", "),
+            if all {
+                ""
+            } else {
+                "   (msfe-ng doctor --all shows them, doctor acks the details)"
+            }
+        );
+        if all {
+            for e in &active {
+                println!(
+                    "[ACK ] {} — {}{}",
+                    e.ack.name,
+                    e.ack.detail,
+                    if e.ack.note.is_empty() {
+                        String::new()
+                    } else {
+                        format!("   note: {}", e.ack.note)
+                    }
+                );
+            }
         }
     }
     if doctor::healthy(&checks) {
@@ -2950,6 +3106,8 @@ COMMANDS:
     service <status|start|stop|reload|restart|queue-fix|spool-repair>   MailScanner service & queues
     doctor [--fix]      Check every link of the scanning chain; names each fix (--fix applies the mechanical ones)
     doctor --apply <check name>   Apply the change a notice proposes (a decision made by you; validated, previous version kept)
+    doctor ack <check name> [--days <n> | --forever] [--note <text>]   Acknowledge a notice: hidden while it stays at that level (30 days by default)
+    doctor unack <check name> / doctor acks   Take an acknowledgement back / list them (active, expired, resolved); doctor --all prints the hidden ones too
     rules lint          Check managed ruleset files for unparsable lines
     rules adopt [--from <dir>]   Borrow existing on-disk rules into the custom store
     engine <status|install|configure|enable|disable|lint>   Manage the MailScanner engine itself

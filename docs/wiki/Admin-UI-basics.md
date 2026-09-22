@@ -13,7 +13,11 @@ every tab is described on its own wiki page.
   [delivery test](Delivery-test) for one address) and *Account DNS*
   ([SPF, DKIM and DMARC for every hosted domain](Account-DNS)).
 - **Health dot** (bottom) — mirrors `msfe-ng doctor`, refreshed every minute:
-  green *all systems ok*, amber *N notices*, red *N problems*.
+  green *all systems ok*, amber *N notices*, red *N problems*, plus
+  *· N acknowledged* when notices are silenced. **Click it** for the notices
+  dialog: the current notices with an *Acknowledge…* button each, and every
+  acknowledged notice with its status (*hidden*, *showing again*, *resolved*),
+  when and until when, your note, and *Unacknowledge*.
 - **Theme** — cycles Auto → Light → Dark; remembered in the browser.
 - **Version** — the running daemon's version, with links to the project on
   GitHub, this wiki and the issue tracker.
@@ -29,7 +33,20 @@ decision stays listed — and where the decision is a concrete setting, the
 finding carries an **Apply: …** button: it states the change, asks you to
 confirm, and carries it out through the same validated save the Config tab
 uses (lint, previous version kept, reload or restart as the file requires)
-or runs the named commands. The banner disappears on its own once every
+or runs the named commands.
+
+A notice you have looked at and decided to live with — a raised limit that is
+fine at 1 %, a kept exiscan — can be **acknowledged**: *Acknowledge…* on the
+finding asks for how long (7, 30, 90 days or for good) and an optional note.
+The notice then leaves the banner and the health dot while it stays at that
+level or improves; a warning that turns into a failure shows again at once,
+and so does an expired acknowledgement. Nothing is forgotten: the health dot's
+dialog lists every acknowledgement, and `msfe-ng doctor` prints the count
+(`--all` shows them, `doctor acks` the details, `doctor ack` / `doctor unack`
+do the same from a shell). Acknowledgements live in
+`/etc/msfe-ng/acknowledged.json`.
+
+The banner disappears on its own once every
 check passes.
 
 ## Conventions

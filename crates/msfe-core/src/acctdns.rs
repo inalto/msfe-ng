@@ -247,6 +247,9 @@ pub struct Check {
     pub suggested_value: Option<String>,
     /// An Apply button makes sense.
     pub fixable: bool,
+    /// The record can be changed from here even when nothing is wrong (the
+    /// zone is on this server): SPF and DMARC, never DKIM.
+    pub editable: bool,
     /// Why a fix is limited or impossible.
     pub fix_note: Option<String>,
     pub notes: Vec<String>,
@@ -265,6 +268,7 @@ impl Default for Check {
             suggested: None,
             suggested_value: None,
             fixable: false,
+            editable: false,
             fix_note: None,
             notes: Vec::new(),
         }
@@ -306,6 +310,7 @@ impl Check {
             ("suggested".into(), opt(&self.suggested)),
             ("suggested_value".into(), opt(&self.suggested_value)),
             ("fixable".into(), Json::Bool(self.fixable)),
+            ("editable".into(), Json::Bool(self.editable)),
             ("fix_note".into(), opt(&self.fix_note)),
             (
                 "notes".into(),
@@ -335,6 +340,7 @@ impl Check {
             suggested: opt("suggested"),
             suggested_value: opt("suggested_value"),
             fixable: matches!(v.get("fixable"), Some(Json::Bool(true))),
+            editable: matches!(v.get("editable"), Some(Json::Bool(true))),
             fix_note: opt("fix_note"),
             notes: strs("notes"),
         }
@@ -1190,6 +1196,7 @@ pub fn classify_spf(domain: &str, zone: &Zone, res: &SpfResult, notes: &[Note]) 
         c.suggested_value = Some(value);
     }
     set_fixability(&mut c, zone, false);
+    c.editable = zone.name.is_some() && !matches!(c.state, State::Unknown);
     c.with_notes(notes)
 }
 
@@ -1389,6 +1396,7 @@ pub fn dmarc_check(client: &Client, domain: &str, zone: &Zone) -> Check {
         c.fixable = false;
         c.fix_note = None;
     }
+    c.editable = zone.name.is_some() && own;
     c
 }
 

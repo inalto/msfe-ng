@@ -92,6 +92,11 @@ with reports to `quarantine` and `reject`, `sp=` for unused subdomains,
 external report authorization). The card header has a short *About SPF, DKIM
 and DMARC* panel with the order to fix them in.
 
+A green SPF or DMARC cell can still be changed: the row's **Edit** button (or
+*Change the … record…* in the details) opens the same dialog with the current
+record, unticked until you choose it — for a policy upgrade, a new include, a
+report address. DKIM is never edited by hand: cPanel owns the key.
+
 *Apply selected* runs the chosen changes one after another and shows each
 installer's transcript — the command and cPanel's own reply — then re-checks the
 domain and replaces the row, in the table and in the saved scan (a reload
