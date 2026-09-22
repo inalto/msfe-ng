@@ -8,6 +8,7 @@
 //! of the original `msbe.pl` / `msrules.pl` / `mschange.pl` and on MailWatch,
 //! but no original code is copied. See CONTRIBUTING.md.
 
+pub mod acctdns;
 pub mod authchecks;
 pub mod autoban;
 pub mod b64;
