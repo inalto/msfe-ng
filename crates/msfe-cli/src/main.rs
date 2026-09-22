@@ -89,6 +89,9 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
             "--html",
         ]),
         ("delivery", _) => Some(NONE),
+        ("acctdns", Some("scan")) => Some(&["--user", "--domain", "--all", "--json"]),
+        ("acctdns", Some("fix")) => Some(&["--record", "--json"]),
+        ("acctdns", _) => Some(NONE),
         _ => None,
     }
 }
@@ -121,6 +124,7 @@ fn usage_of(cmd: &str) -> &'static str {
         "restore" => "msfe-ng restore <file.tar.gz> [--yes]   (alias: snapshot import --only msfe)",
         "conf" => "msfe-ng conf <test [--no-lint] [--json] [--with <id>=<file>]... | test-message <clean|gtube|eicar|file.eml> [--offline] [--json] | grep <text>>",
         "delivery" => "msfe-ng delivery <test <address> [--ip <sending ip>] [--selector <dkim selector>] [--audit] [--days <1-7>] [--json | --html] [--force] | eml <file.eml> [--bounce] [--address <a>] [--ip <ip>] [--selector <s>] [--audit] [--json | --html] | inbox <install [--dry-run] | uninstall [--dry-run] | status | new | poll <token> [--json] | remove <token> | sweep> | testmail --from <local address> --to <address> [--tag <t>] [--follow <secs>] [--json] | monitor <list [--json] | add <address> [--interval-mins n] [--audit] [--ip ..] [--selector ..] [--days n] | remove <id|address> | run [--dry-run] [--id n]>>",
+        "acctdns" => "msfe-ng acctdns <scan [--user <account>] [--domain <domain>] [--all] [--json] | fix <domain> <spf|dkim|dmarc> [--record <record>] [--json]>",
         _ => "msfe-ng help",
     }
 }
@@ -203,6 +207,7 @@ fn main() -> ExitCode {
         "restore" => cmd_restore(sub, rest),
         "snapshot" => cmd_snapshot(sub, rest),
         "delivery" => cmd_delivery(sub, rest),
+        "acctdns" => cmd_acctdns(sub, rest),
         "help" | "--help" | "-h" => {
             print_help();
             ExitCode::SUCCESS
@@ -2604,6 +2609,203 @@ fn cmd_delivery_inbox(rest: &[String]) -> ExitCode {
     }
 }
 
+/// Account DNS from the shell. `scan` runs the same checks as the Delivery
+/// tab's Account DNS view, but inline in this process: no daemon, no scan
+/// registry, nothing cached — the shell wants the answer, not an id to poll.
+fn cmd_acctdns(sub: Option<&str>, rest: &[String]) -> ExitCode {
+    match sub {
+        Some("scan") => cmd_acctdns_scan(rest),
+        Some("fix") => cmd_acctdns_fix(rest),
+        _ => {
+            eprintln!("usage: {}", usage_of("acctdns"));
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// One line per check of one domain, the way the table reads it.
+fn acctdns_line(row: &msfe_core::acctdns::Row) -> String {
+    let cell = |c: &msfe_core::acctdns::Check| {
+        if c.summary.is_empty() {
+            c.state.as_str().to_string()
+        } else {
+            c.summary.clone()
+        }
+    };
+    format!(
+        "[{}] {}  spf: {}  dkim: {}  dmarc: {}",
+        row.level.as_str().to_uppercase(),
+        row.domain.domain,
+        cell(&row.spf),
+        cell(&row.dkim),
+        cell(&row.dmarc)
+    )
+}
+
+fn cmd_acctdns_scan(rest: &[String]) -> ExitCode {
+    use msfe_core::acctdns::{self, Kind, Level};
+    use msfe_core::cpaudit::Cp;
+    use msfe_core::dns::Client;
+    use msfe_core::json::Json;
+    let (mut user, mut domain, mut all, mut json) = (None, None, false, false);
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--user" => user = it.next().map(String::as_str),
+            "--domain" => domain = it.next().map(String::as_str),
+            "--all" => all = true,
+            "--json" => json = true,
+            _ => {}
+        }
+    }
+    if let Some(u) = user {
+        if !msfe_core::users::valid_username(u) {
+            eprintln!("msfe-ng acctdns scan: '{u}' is not an account name");
+            return ExitCode::from(2);
+        }
+    }
+    let wanted = match domain {
+        Some(d) => {
+            let d = d.trim().trim_end_matches('.').to_ascii_lowercase();
+            if !msfe_core::netguard::valid_hostname(&d) {
+                eprintln!("msfe-ng acctdns scan: '{d}' is not a domain name");
+                return ExitCode::from(2);
+            }
+            Some(d)
+        }
+        None => None,
+    };
+    let cp = Cp::detect();
+    if !acctdns::supported(&cp) {
+        eprintln!(
+            "msfe-ng acctdns scan: Account DNS needs cPanel (this host: {})",
+            acctdns::panel_name(&cp)
+        );
+        return ExitCode::from(3);
+    }
+    // cPanel signs and validates every subdomain, and most never send mail:
+    // they are noise unless they were asked for by name or with --all.
+    let subs_too = all || wanted.is_some();
+    let asked: Vec<_> = acctdns::list_domains(&cp)
+        .into_iter()
+        .filter(|d| match user {
+            Some(u) => d.user == u,
+            None => true,
+        })
+        .filter(|d| match wanted.as_deref() {
+            Some(w) => d.domain == w,
+            None => true,
+        })
+        .collect();
+    let hidden = if subs_too {
+        0
+    } else {
+        asked.iter().filter(|d| d.kind == Kind::Sub).count()
+    };
+    let domains: Vec<_> = asked
+        .into_iter()
+        .filter(|d| subs_too || d.kind != Kind::Sub)
+        .collect();
+    let (rows, errors) = acctdns::validate(&cp, &Client::system(), &domains);
+    if json {
+        println!(
+            "{}",
+            Json::Object(vec![
+                (
+                    "rows".into(),
+                    Json::Array(rows.iter().map(|r| r.to_json()).collect()),
+                ),
+                (
+                    "errors".into(),
+                    Json::Array(errors.iter().map(Json::str).collect()),
+                ),
+            ])
+        );
+    } else {
+        for row in &rows {
+            println!("{}", acctdns_line(row));
+        }
+        for e in &errors {
+            println!("note: {e}");
+        }
+        let count = |l: Level| rows.iter().filter(|r| r.level == l).count();
+        println!(
+            "{} domain{} · {} fail · {} warn · {} unknown{}",
+            rows.len(),
+            if rows.len() == 1 { "" } else { "s" },
+            count(Level::Fail),
+            count(Level::Warn),
+            count(Level::Unknown),
+            if hidden > 0 {
+                format!(
+                    " · {hidden} subdomain{} not checked (--all)",
+                    if hidden == 1 { "" } else { "s" }
+                )
+            } else {
+                String::new()
+            }
+        );
+    }
+    if rows.iter().any(|r| r.level == Level::Fail) {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+fn cmd_acctdns_fix(rest: &[String]) -> ExitCode {
+    use msfe_core::acctdns::{self, What};
+    use msfe_core::cpaudit::Cp;
+    let (mut record, mut json) = (None, false);
+    let mut positional: Vec<&String> = Vec::new();
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--record" => record = it.next().map(String::as_str),
+            "--json" => json = true,
+            x if !x.starts_with('-') => positional.push(a),
+            _ => {}
+        }
+    }
+    let (Some(domain), Some(what)) = (positional.first(), positional.get(1)) else {
+        eprintln!("usage: {}", usage_of("acctdns"));
+        return ExitCode::from(2);
+    };
+    let Some(what) = What::parse(what) else {
+        eprintln!(
+            "msfe-ng acctdns fix: '{what}' is not a record to install\nusage: {}",
+            usage_of("acctdns")
+        );
+        return ExitCode::from(2);
+    };
+    match acctdns::fix(&Cp::detect(), domain, what, record) {
+        Ok(r) => {
+            if json {
+                println!("{}", r.to_json());
+            } else {
+                for a in &r.actions {
+                    println!("{a}");
+                }
+                if let Some(row) = &r.row {
+                    println!("{}", acctdns_line(row));
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            if json {
+                println!("{}", e.to_json());
+            } else {
+                for a in &e.actions {
+                    println!("{a}");
+                }
+                eprintln!("msfe-ng acctdns fix: {e}");
+            }
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn fmt_size(n: u64) -> String {
     if n >= 1_048_576 {
         format!("{:.1} MB", n as f64 / 1_048_576.0)
@@ -2665,6 +2867,10 @@ COMMANDS:
     delivery inbox <install|uninstall|status|new|poll <token>|remove <token>|sweep>
                         The diagnostic inbox: one-time dt-<token>@<host> addresses wired into
                         Exim via /etc/exim.conf.local; `new` prints one, `poll` analyses what arrived
+    acctdns scan        SPF, DKIM and DMARC for every domain hosted here, from cPanel's own validators
+                        (--user, --domain, --all for subdomains, --json)
+    acctdns fix <domain> <spf|dkim|dmarc>   Install the missing record with cPanel's installer (--record
+                        to publish your own; nothing is hand-edited in a zone file)
     digest [--dry-run]  Email quarantine digests to digest-enabled domains
     housekeeping        Prune old mail-log rows (cleanmysql retention)
     monitor [--dry-run] Auto-clean the delivery queue, fix misfiled spool files, send Telegram alerts (cron)

@@ -367,3 +367,156 @@ fn autoban_status_is_off_by_default_and_flags_are_checked() {
     assert_eq!(out.status.code(), Some(2));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A resolver on loopback that answers every query NXDOMAIN at once, so the
+/// DMARC lookups of a scan neither reach the network nor wait for a timeout.
+fn nxdomain_resolver() -> String {
+    let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let addr = sock.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 1500];
+        while let Ok((n, from)) = sock.recv_from(&mut buf) {
+            if n < 12 {
+                continue;
+            }
+            let mut reply = buf[..n].to_vec();
+            reply[2] = 0x80; // QR: an answer
+            reply[3] = 3; // NXDOMAIN
+            reply[6..12].fill(0); // no answer, authority or additional records
+            let _ = sock.send_to(&reply, from);
+        }
+    });
+    addr
+}
+
+fn write_at(root: &std::path::Path, rel: &str, text: &str) {
+    let p = root.join(rel.trim_start_matches('/'));
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(p, text).unwrap();
+}
+
+/// A cPanel-shaped tree: one account, its main domain and one subdomain, with
+/// the three validators answering MISSING for everything.
+fn cpanel_tree(root: &std::path::Path) {
+    write_at(
+        root,
+        "/etc/userdomains",
+        "example.com: alice\nshop.example.com: alice\n*: nobody\n",
+    );
+    write_at(root, "/etc/trueuserdomains", "example.com: alice\n");
+    write_at(
+        root,
+        "/var/cpanel/userdata/alice/main",
+        "main_domain: example.com\naddon_domains: []\nparked_domains: []\nsub_domains:\n  - shop.example.com\n",
+    );
+    write_at(root, "/etc/localdomains", "example.com\nshop.example.com\n");
+    let entry = |d: &str| {
+        format!("{{\"domain\":\"{d}\",\"state\":\"MISSING\",\"expected\":\"ip4:192.0.2.10\",\"ip_address\":\"192.0.2.10\",\"ip_version\":4,\"records\":[],\"error\":null}}")
+    };
+    write_at(
+        root,
+        "/_cmd/acctdns_spfs.txt",
+        &format!(
+            "{{\"metadata\":{{\"reason\":\"OK\",\"result\":1}},\"data\":{{\"payload\":[{},{}]}}}}",
+            entry("example.com"),
+            entry("shop.example.com")
+        ),
+    );
+    write_at(
+        root,
+        "/_cmd/acctdns_dkims.txt",
+        &format!(
+            "{{\"metadata\":{{\"reason\":\"OK\",\"result\":1}},\"data\":{{\"payload\":[{},{}]}}}}",
+            entry("default._domainkey.example.com"),
+            entry("default._domainkey.shop.example.com")
+        ),
+    );
+    write_at(
+        root,
+        "/_cmd/acctdns_authority.txt",
+        r#"{"metadata":{"reason":"OK","result":1},"data":{"records":[
+          {"domain":"example.com","zone":"example.com","local_authority":1,"nameservers":["ns1.example.com"],"error":null},
+          {"domain":"shop.example.com","zone":"example.com","local_authority":1,"nameservers":["ns1.example.com"],"error":null}
+        ]}}"#,
+    );
+}
+
+/// `acctdns`: the flags of each subcommand are checked before anything runs,
+/// and a scan over a fixture tree reports every account domain (subdomains
+/// only when asked).
+#[test]
+fn acctdns_checks_its_flags_and_scans_a_fixture_tree() {
+    let d = tmp("acctdns");
+    let out = msfe_ng(&d, &["acctdns", "scan", "--bogus"]);
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--bogus") && err.contains("usage:"), "{err}");
+    // `fix` needs a domain and a record kind
+    let out = msfe_ng(&d, &["acctdns", "fix"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("usage: msfe-ng acctdns"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = msfe_ng(&d, &["acctdns", "fix", "example.com", "rrsig"]);
+    assert_eq!(out.status.code(), Some(2));
+    let out = msfe_ng(&d, &["acctdns", "wipe"]);
+    assert_eq!(out.status.code(), Some(2));
+
+    // a fixture tree that looks like cPanel: the scan runs inline
+    let root = d.join("root");
+    cpanel_tree(&root);
+    let out = Command::new(env!("CARGO_BIN_EXE_msfe-ng"))
+        .args(["acctdns", "scan", "--json"])
+        .env("MSFE_NG_CONFIG", d.join("config.toml"))
+        .env("MSFE_NG_CPANEL_ROOT", &root)
+        .env("MSFE_NG_RESOLVER", nxdomain_resolver())
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    // everything is missing, so the row fails
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{text}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("\"rows\":["), "{text}");
+    assert!(text.contains("\"domain\":\"example.com\""), "{text}");
+    assert!(text.contains("\"user\":\"alice\""), "{text}");
+    assert!(
+        !text.contains("shop.example.com"),
+        "subdomains are noise unless asked for: {text}"
+    );
+
+    // --all brings the subdomain in, and the plain output is one line per domain
+    let out = Command::new(env!("CARGO_BIN_EXE_msfe-ng"))
+        .args(["acctdns", "scan", "--all"])
+        .env("MSFE_NG_CONFIG", d.join("config.toml"))
+        .env("MSFE_NG_CPANEL_ROOT", &root)
+        .env("MSFE_NG_RESOLVER", nxdomain_resolver())
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("[FAIL] example.com  spf: "), "{text}");
+    assert!(text.contains("[FAIL] shop.example.com  spf: "), "{text}");
+    assert!(text.contains("2 domains · 2 fail"), "{text}");
+
+    // a host that is not cPanel says so and runs nothing
+    let bare = d.join("bare");
+    std::fs::create_dir_all(&bare).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_msfe-ng"))
+        .args(["acctdns", "scan"])
+        .env("MSFE_NG_CONFIG", d.join("config.toml"))
+        .env("MSFE_NG_CPANEL_ROOT", &bare)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("needs cPanel"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}

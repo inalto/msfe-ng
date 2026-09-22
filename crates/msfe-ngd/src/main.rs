@@ -11,6 +11,7 @@
 //! config or drive the queue never interleave, exactly as when the daemon was
 //! single-threaded.
 
+mod acctdns_api;
 mod api;
 mod conf_api;
 mod delivery_api;

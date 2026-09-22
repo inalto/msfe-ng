@@ -1045,6 +1045,9 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
         (m, p) if p.starts_with("/api/delivery/") => {
             crate::delivery_api::handle(m, p, req, cfg, config_file)
         }
+        (m, p) if p.starts_with("/api/acctdns/") => {
+            crate::acctdns_api::handle(m, p, req, cfg, config_file)
+        }
         ("GET", "/api/engine/migrate") => engine_migrate_preflight(cfg, config_file),
         ("GET", "/api/legacy/decommission") => legacy_decommission_preflight(cfg, config_file),
         ("GET", "/api/autoban") => autoban_state(cfg, config_file),
