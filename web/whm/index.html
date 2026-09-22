@@ -2536,7 +2536,7 @@ async function renderAcctDns(v){
     n.tr.innerHTML='';
     const kb=[];
     if(ACD_KIND[d.kind])kb.push(el('span',{class:'kb'},ACD_KIND[d.kind]));
-    if(d.mail&&d.mail!=='local'&&d.mail!=='unknown')kb.push(el('span',{class:'kb pend',title:'this server does not deliver the domain’s mail locally ('+d.mail+')'},'mail elsewhere'));
+    if(d.mail&&d.mail!=='local'&&d.mail!=='unknown'&&d.mail!=='not listed')kb.push(el('span',{class:'kb pend',title:'this server does not deliver the domain’s mail locally ('+d.mail+')'},'mail elsewhere'));
     const dns=acdDns(r.zone);
     n.tr.append(
       el('td',{class:'acct-dom'},
@@ -2580,7 +2580,7 @@ async function renderAcctDns(v){
           const text=(((res&&res.actions)||[]).join('\n')||(res&&res.error)||'no output');
           if(res&&res.ok){
             toast('Repaired — rescan later if a resolver still shows the old record');
-            if(res.row){n.row=res.row;fillRow(n);order();draw();}
+            if(res.row){n.row=acdNorm(res.row);fillRow(n);order();draw();}
             drawDetail(n);
           }else{
             ap.disabled=false;ap.textContent='Apply '+label;
@@ -2602,7 +2602,13 @@ async function renderAcctDns(v){
     };
     n.cell.append(el('div',{class:'ctl',style:'margin:.5rem 0 0'},re));
   }
+  // The daemon flattens the domain fields onto the row; the view keeps them under `domain`.
+  function acdNorm(row){
+    if(row&&typeof row.domain==='string')row={...row,domain:{domain:row.domain,user:row.user,kind:row.kind,mail:row.mail}};
+    return row;
+  }
   function upsert(row){
+    row=acdNorm(row);
     const key=(row&&row.domain&&row.domain.domain)||'';
     if(!key)return;
     let n=nodes.get(key);
@@ -2697,7 +2703,7 @@ async function renderAcctDns(v){
         out.textContent+='# '+p.label+'\n';
         const res=await acdFix(d,p.k,p.k==='dkim'?null:(p.ta.value.trim()||null));
         out.textContent+=(((res&&res.actions)||[]).join('\n')||(res&&res.error)||'no output')+'\n\n';
-        if(res&&res.ok){if(res.row){n.row=res.row;fillRow(n);order();draw();if(n.open)drawDetail(n);}}
+        if(res&&res.ok){if(res.row){n.row=acdNorm(res.row);fillRow(n);order();draw();if(n.open)drawDetail(n);}}
         else bad++;
       }
       go.disabled=false;
