@@ -195,6 +195,10 @@ sub extract_row {
 
     my $spamreport = clean($m->{spamreport});
     my $mcpreport  = clean($m->{mcpreport});
+    # Why the message was flagged: MailScanner's per-attachment verdicts
+    # (virus, filename and content checks combined), one line each.
+    my $reports = $m->{allreports} || {};
+    my $report  = join "\n", grep { $_ ne '' } map { clean($reports->{$_}) =~ s/\s+$//r } sort keys %$reports;
     my $clientip   = $m->{clientip} // '';
     $clientip =~ s/^(\d+\.\d+\.\d+\.\d+)\.\d+$/$1/;   # strip trailing port octet
 
@@ -232,7 +236,7 @@ sub extract_row {
         virusinfected   => $m->{virusinfected} // 0,
         nameinfected    => $m->{nameinfected} // 0,
         otherinfected   => $m->{otherinfected} // 0,
-        report          => clean($m->{report}),
+        report          => $report,
         ismcp           => $m->{ismcp} // 0,
         ishighmcp       => $m->{ishighmcp} // 0,
         issamcp         => $m->{issamcp} // 0,

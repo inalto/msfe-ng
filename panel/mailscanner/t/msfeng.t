@@ -104,6 +104,26 @@ MailScanner::CustomConfig::EndMSFENGLogging();
 MailScanner::CustomConfig::MSFENGLogging(message('m4'));
 ok((grep { $_ eq 'm4' } rows()), 'reconnects after End');
 
+# --- the scan report is MailScanner's per-attachment verdicts ------------------
+# MailScanner keeps them in {allreports} (filename => text, after CombineReports);
+# the row stores one line per attachment, in filename order, so the front-end
+# can show why a message was flagged.
+{
+    my %row = MailScanner::CustomConfig::extract_row({ %{ message('m5') },
+        nameinfected => 1,
+        allreports   => {
+            'x.pdf.exe' => "MailScanner: Attempt to hide real filename extension (x.pdf.exe)\n",
+            'eicar.com' => "ClamAV: eicar.com contains Eicar-Test-Signature\n",
+        },
+    });
+    is($row{report},
+        "ClamAV: eicar.com contains Eicar-Test-Signature\n"
+      . "MailScanner: Attempt to hide real filename extension (x.pdf.exe)",
+        'report is one line per flagged attachment');
+    my %clean = MailScanner::CustomConfig::extract_row(message('m6'));
+    is($clean{report}, '', 'a clean message has an empty report');
+}
+
 # Release the plugin's connection before global destruction: DBD::SQLite on
 # perl 5.26 (EL8) can segfault when a live handle is torn down at exit,
 # which would fail the run after every test passed.

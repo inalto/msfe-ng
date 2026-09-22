@@ -122,11 +122,7 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                             .unwrap_or("")
                             .to_string()
                     };
-                    (
-                        format!("{} {}", get("spamreport"), get("report")),
-                        get("headers"),
-                        get("body_path"),
-                    )
+                    (get("spamreport"), get("headers"), get("body_path"))
                 };
                 // spam-report component rows (rule / score / description)
                 let comps: Vec<Json> = msfe_core::sa::parse_report(&report)

@@ -34,8 +34,11 @@ shown for anything that could not be released.
 ## Message view
 
 Click a row (opens in place, or in a new window per Settings). It shows the
-scan status, envelope, size, client IP, spam report and RBL report, the
-SpamAssassin **component scores** (rule, score, description), the **header
+scan status, envelope, size, client IP, the **scan report** for an infected
+message (MailScanner's verdict per attachment — the virus signature, or the
+filename/content rule that matched — as logged from the current plugin
+onwards), spam report and RBL report, the SpamAssassin **component scores**
+(rule, score, description), the **header
 IPs** from the `Received:` chain (only the last one outside your network can
 be trusted) and the full **headers**.
 

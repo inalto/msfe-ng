@@ -922,6 +922,10 @@ async function renderMessageView(id){
   if(d.clientip&&String(d.clientip).trim()!=='')
     dt.append(el('tr',{},el('th',{style:'width:12rem'},'Client IP'),el('td',{},ipLink(d.clientip),el('span',{class:'muted'},'  (click for details and firewall actions)'))));
   row('Scanned on',d.hostname);
+  // MailScanner's per-attachment verdicts (virus, filename and content checks), one per line
+  if(d.report&&String(d.report).trim()!=='')
+    dt.append(el('tr',{},el('th',{style:'width:12rem'},'Scan report'),
+      el('td',{style:'word-break:break-word;white-space:pre-wrap;color:var(--critical)'},String(d.report))));
   row('Spam report',d.spamreport);row('RBL report',d.rblreport);
   card.append(dt);
 
