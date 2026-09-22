@@ -36,6 +36,7 @@ msfe-ng spambox <enable|disable|status>
 
 msfe-ng db-migrate [--status]       apply / list SQL migrations
 msfe-ng db <backup|fix|bayes-repair|bayes-recreate>
+msfe-ng db import-legacy [--database <name>] [--dry-run]   dump ConfigServer's MailControl database (default `mailscanner`) into backup_dir and copy the rows MSFE-NG does not have into its own maillog
 msfe-ng conf test [--no-lint] [--json] [--with <id>=<file>]   lint + cross-file checks as findings (exit 1 on a failure)
 msfe-ng conf grep <text>            find a text in every configuration file (case-insensitive; id:line: text)
 msfe-ng conf test-message <clean|gtube|eicar|file.eml> [--offline] [--json]   what the chain would do with a message

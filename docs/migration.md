@@ -54,7 +54,9 @@ across, then takes over rule generation and the UI. It shares MailScanner and th
 6. **Decommission the old front-end.** Once satisfied, remove the legacy plugin
    with its own uninstaller (`/usr/msfe/uninstall.msfe.sh`). MSFE-NG does not
    depend on any `/usr/msfe` file after import — but **that uninstaller also
-   removes the bundled `/usr/mailscanner` engine**, so install the MailScanner
+   removes the bundled `/usr/mailscanner` engine and drops the `mailscanner`
+   MySQL database (the MailControl history)**: run `msfe-ng db import-legacy`
+   before it, or use the guided migration, which does. Then install the MailScanner
    RPM right after it (`msfe-ng engine install`, `msfe-ng engine configure`,
    check the wiring with `msfe-ng doctor`, re-run `msfe-ng mailscanner
    enable-logging`). The wiki's *Migration* page has the exact order; the
@@ -67,7 +69,7 @@ across, then takes over rule generation and the UI. It shares MailScanner and th
 | Global scan/action/score settings (`msconfig.txt`) | The obfuscated UI/licensing (gone by design) |
 | System white/black lists (`mailscannerbw`) | Per-user `~/.mailscanner*` dotfiles (set per-domain in the new UI) |
 | Digest domains (`digestdomains`) | The old MailControl logger (replaced by MSFE-NG's plugin) |
-| Existing `maillog` history (if you reuse the DB) | — |
+| Existing `maillog` history — the guided migration dumps the `mailscanner` database and copies its rows into MSFE-NG's `maillog` before ConfigServer's uninstaller drops it (`msfe-ng db import-legacy` does the same by hand) | — |
 
 Per-domain overrides are now managed by account holders in the user UI (or by the
 admin), and stored under `/etc/msfe-ng/policy/domains/`.

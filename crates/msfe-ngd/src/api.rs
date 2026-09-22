@@ -2328,6 +2328,14 @@ fn engine_migrate_preflight(cfg: &Config, config_file: &Path) -> Response {
             ("ok".into(), Json::Bool(pf.ok())),
             ("blockers".into(), strs(&pf.blockers)),
             ("warnings".into(), strs(&pf.warnings)),
+            (
+                "history".into(),
+                Json::str(msfe_core::engine_migration::history_note(&pf, cfg)),
+            ),
+            (
+                "history_rows".into(),
+                Json::Int(pf.legacy_history.as_ref().map_or(0, |h| h.rows as i64)),
+            ),
         ])
         .to_string(),
     )

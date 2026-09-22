@@ -38,6 +38,8 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
         ("engine", Some("wire" | "unwire")) => Some(DRY),
         ("engine", Some("migrate-legacy")) => Some(&["--run"]),
         ("legacy", Some("decommission")) => Some(&["--run"]),
+        ("db", Some("import-legacy")) => Some(&["--database", "--dry-run"]),
+        ("db", _) => Some(NONE),
         ("autoban", Some("run")) => Some(DRY),
         ("autoban", _) => Some(NONE),
         ("legacy", _) => Some(NONE),
@@ -1159,6 +1161,7 @@ fn cmd_engine(sub: Option<&str>) -> ExitCode {
                     pf.policy_imported,
                     pf.wiring.as_deref().unwrap_or("none")
                 );
+                println!("history: {}", mig::history_note(&pf, &cfg));
                 for w in &pf.warnings {
                     println!("note: {w}");
                 }
@@ -1796,9 +1799,72 @@ fn cmd_db(sub: Option<&str>) -> ExitCode {
                 ExitCode::from(1)
             }
         }
+        Some("import-legacy") => cmd_db_import_legacy(&cfg),
         _ => {
-            eprintln!("usage: msfe-ng db <backup|fix|bayes-repair|bayes-recreate>");
+            eprintln!("usage: msfe-ng db <backup|fix|bayes-repair|bayes-recreate|import-legacy [--database <name>] [--dry-run]>");
             ExitCode::from(2)
+        }
+    }
+}
+
+/// `db import-legacy`: dump ConfigServer's MailControl database, then copy
+/// the rows MSFE-NG does not have into its own maillog.
+fn cmd_db_import_legacy(cfg: &Config) -> ExitCode {
+    use msfe_core::legacy_history as lh;
+    let args: Vec<String> = std::env::args().skip(3).collect();
+    let mut database = lh::LEGACY_DB.to_string();
+    let mut dry = false;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--database" => database = it.next().cloned().unwrap_or_default(),
+            "--dry-run" => dry = true,
+            _ => {}
+        }
+    }
+    let Some(h) = lh::detect(cfg, &database) else {
+        eprintln!("msfe-ng db import-legacy: no `{database}` database with a maillog table on this host (or it is MSFE-NG's own)");
+        return ExitCode::from(1);
+    };
+    println!("{}", h.describe());
+    if !cfg.db_configured() {
+        eprintln!("msfe-ng db import-legacy: MSFE-NG's database is not configured");
+        return ExitCode::from(1);
+    }
+    if dry {
+        println!("dry run: would dump it to {} and copy the rows MSFE-NG does not have into `{}`.maillog", cfg.backup_dir, cfg.db_name);
+        return ExitCode::SUCCESS;
+    }
+    match lh::dump(std::path::Path::new(&cfg.backup_dir), &database) {
+        Ok(p) => println!("dumped to {}", p.display()),
+        Err(e) => {
+            eprintln!("msfe-ng db import-legacy: {e}");
+            return ExitCode::from(1);
+        }
+    }
+    match lh::import(cfg, &database) {
+        Ok(r) => {
+            println!(
+                "copied {} of {} row(s) into `{}`.maillog ({} columns: {})",
+                r.inserted,
+                r.legacy_rows,
+                cfg.db_name,
+                r.columns.len(),
+                r.columns
+                    .iter()
+                    .map(|(l, o)| if l == o {
+                        l.clone()
+                    } else {
+                        format!("{l}→{o}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("msfe-ng db import-legacy: {e}");
+            ExitCode::from(1)
         }
     }
 }
@@ -2896,6 +2962,7 @@ COMMANDS:
     db fix              Apply migrations + optimize/analyze MSFE-NG tables
     db bayes-repair     Expire & sync the SpamAssassin Bayes database
     db bayes-recreate   Back up, then wipe Bayes so it retrains from scratch
+    db import-legacy [--database <name>] [--dry-run]   Dump ConfigServer's MailControl database and copy its history into MSFE-NG's message log
     mailscanner status  Show MailScanner logging plugin state
     mailscanner enable-logging   Hook the logging plugin into MailScanner.conf
     mailscanner disable-logging  Unhook it (restart MailScanner after either)

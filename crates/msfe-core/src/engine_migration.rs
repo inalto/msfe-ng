@@ -67,6 +67,9 @@ pub struct Preflight {
     /// How Exim routes mail through MailScanner now, if at all.
     pub wiring: Option<String>,
     pub latest_rpm: Option<String>,
+    /// The legacy MailControl history found in MySQL, saved and copied before
+    /// the uninstaller drops its database.
+    pub legacy_history: Option<crate::legacy_history::LegacyHistory>,
     /// Reasons the migration cannot start.
     pub blockers: Vec<String>,
     /// Things worth knowing before starting.
@@ -104,6 +107,7 @@ pub fn preflight_for(cfg: &Config, config_file: &Path, starting: bool) -> Prefli
         queue_incoming: service::count_queue(&inc),
         wiring: engine::exim_method(cfg).map(|m| m.describe().to_string()),
         latest_rpm: None,
+        legacy_history: crate::legacy_history::detect(cfg, crate::legacy_history::LEGACY_DB),
         blockers: Vec::new(),
         warnings: Vec::new(),
     };
@@ -134,7 +138,31 @@ pub fn preflight_for(cfg: &Config, config_file: &Path, starting: bool) -> Prefli
     if p.wiring.is_none() {
         p.warnings.push("Exim is not routing mail through MailScanner; the named-queue wiring is set up at the end".into());
     }
+    if let Some(h) = &p.legacy_history {
+        if !p.db_configured {
+            p.warnings.push(format!(
+                "{} — it is dumped to {} but cannot be copied into MSFE-NG's tables until the database is configured",
+                h.describe(),
+                cfg.backup_dir
+            ));
+        }
+    }
     p
+}
+
+/// What the migration does with the legacy history, for the preflight.
+pub fn history_note(p: &Preflight, cfg: &Config) -> String {
+    match &p.legacy_history {
+        Some(h) => format!(
+            "{}: dumped to {} and copied into MSFE-NG's message log before ConfigServer's uninstaller drops that database",
+            h.describe(),
+            cfg.backup_dir
+        ),
+        None => format!(
+            "no legacy message history (no `{}` database with a maillog table)",
+            crate::legacy_history::LEGACY_DB
+        ),
+    }
 }
 
 fn step(n: usize, what: &str) {
@@ -215,12 +243,48 @@ pub fn run(config_file: &Path) -> io::Result<()> {
         }
     }
 
-    step(4, "remove the ConfigServer front-end and engine");
+    step(4, "save the legacy message history");
+    // ConfigServer's uninstaller drops its MailControl database: dump it and
+    // copy its rows first, and stop here if either fails — nothing has been
+    // removed yet.
+    match &pf.legacy_history {
+        None => println!("  no legacy message history database — skipped"),
+        Some(h) => {
+            println!("  {}", h.describe());
+            let path = crate::legacy_history::dump(Path::new(&cfg.backup_dir), &h.database)
+                .map_err(|e| {
+                    fail(format!(
+                        "{e} — nothing was removed; fix MySQL root access and re-run"
+                    ))
+                })?;
+            println!("  dumped to {}", path.display());
+            if cfg.db_configured() {
+                match crate::legacy_history::import(&cfg, &h.database) {
+                    Ok(r) => println!(
+                        "  copied {} of {} row(s) into MSFE-NG's maillog ({} columns)",
+                        r.inserted,
+                        r.legacy_rows,
+                        r.columns.len()
+                    ),
+                    Err(e) => {
+                        return Err(fail(format!(
+                            "copying the history into MSFE-NG's maillog failed: {e} — nothing was removed; the dump is at {}; fix the cause and re-run (or `msfe-ng db import-legacy`)",
+                            path.display()
+                        )))
+                    }
+                }
+            } else {
+                println!("  database not configured: the dump is kept, run `msfe-ng db import-legacy` once it is");
+            }
+        }
+    }
+
+    step(5, "remove the ConfigServer front-end and engine");
     for l in remove_legacy(&root, live)? {
         println!("  {l}");
     }
 
-    step(5, "install the MailScanner RPM");
+    step(6, "install the MailScanner RPM");
     let latest = if live {
         service::latest_release(service::MAILSCANNER_REPO)
     } else {
@@ -238,7 +302,7 @@ pub fn run(config_file: &Path) -> io::Result<()> {
         ));
     }
 
-    step(6, "point MSFE-NG at the new engine");
+    step(7, "point MSFE-NG at the new engine");
     // config.toml may still name /usr/mailscanner; the RPM conf is what is
     // left and what Config::load already falls back to — make it explicit.
     let cfg = Config::load(config_file);
@@ -259,7 +323,7 @@ pub fn run(config_file: &Path) -> io::Result<()> {
     }
     println!("  mailscanner_conf = {}", cfg.mailscanner_conf);
 
-    step(7, "carry the site identity over");
+    step(8, "carry the site identity over");
     let ms_text = std::fs::read_to_string(&cfg.mailscanner_conf)?;
     let (ms_text, carried) = carry_identity(&legacy_conf, &ms_text);
     for l in &carried {
@@ -267,7 +331,7 @@ pub fn run(config_file: &Path) -> io::Result<()> {
     }
     service::save_conf(Path::new(&cfg.mailscanner_conf), &ms_text)?;
 
-    step(8, "configure the engine for Exim");
+    step(9, "configure the engine for Exim");
     let r = engine::configure(&cfg)?;
     for l in r
         .set
@@ -281,16 +345,16 @@ pub fn run(config_file: &Path) -> io::Result<()> {
         println!("  warning: {w}");
     }
 
-    step(9, "hook the message logging plugin");
+    step(10, "hook the message logging plugin");
     for l in setup::enable_logging(&cfg)? {
         println!("  {l}");
     }
 
-    step(10, "write the rule files");
+    step(11, "write the rule files");
     let s = sync::run(&cfg, config_file, None)?;
     println!("  {} rule files ({} changed)", s.files, s.changed);
 
-    step(11, "Exim wiring");
+    step(12, "Exim wiring");
     match engine::exim_method(&cfg) {
         Some(m) => println!("  kept: {}", m.describe()),
         None => {
@@ -301,7 +365,7 @@ pub fn run(config_file: &Path) -> io::Result<()> {
         }
     }
 
-    step(12, "start the new engine");
+    step(13, "start the new engine");
     if live {
         if let Err(e) = service::set_engine_run(&cfg, true) {
             println!("  startup latch: {e}");
@@ -319,7 +383,7 @@ pub fn run(config_file: &Path) -> io::Result<()> {
         }
     }
 
-    step(13, "doctor (repairing what is mechanical first)");
+    step(14, "doctor (repairing what is mechanical first)");
     for l in crate::doctor::fix(&cfg, config_file) {
         println!("  fix: {l}");
     }

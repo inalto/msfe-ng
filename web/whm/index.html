@@ -1517,6 +1517,7 @@ async function renderService(){
     if(!p||p.error||!p.legacy_engine){mig.style.display='none';return;}
     mig.style.display='';migInfo.textContent=`${p.engine}. This replaces ConfigServer's bundled engine and front-end with the MailScanner RPM in one run: backup, snapshot of /usr/mailscanner/etc, stop, ConfigServer's uninstaller${p.uninstaller?'':' (not found — the tree is removed directly)'}, RPM install, configure for Exim carrying the org name over, logging plugin, rules, wiring${p.wiring?' (kept: '+p.wiring+')':' (set up)'}, start, doctor. Mail queues meanwhile — nothing is lost.`;
     migList.innerHTML='';
+    if(p.history)migList.append(el('li',{},p.history));
     (p.warnings||[]).forEach(w=>migList.append(el('li',{style:'color:var(--warning)'},w)));
     (p.blockers||[]).forEach(b=>migList.append(el('li',{style:'color:var(--critical)'},b)));
     if(p.remnants&&p.remnants.length)migList.append(el('li',{},'Legacy files found: '+p.remnants.join(', ')));

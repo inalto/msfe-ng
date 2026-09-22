@@ -93,7 +93,18 @@ first failure:
 2. copy of `/usr/mailscanner/etc` to `/etc/msfe-ng/legacy-engine-etc` (org
    name, custom rules, `spamassassin.conf` — for reference afterwards)
 3. stop the legacy MailScanner
-4. ConfigServer's uninstaller (any `/usr/msfe/uninstall*.sh`, answering *yes*
+4. **the legacy message history is saved**: ConfigServer's MailControl logged
+   into the MySQL database `mailscanner`, and its uninstaller *drops that
+   database*. When it exists, the job dumps it into the backup dir
+   (`legacy-mailscanner-<time>.sql.gz`) and copies every row MSFE-NG does not
+   have yet into its own `maillog` (`timestamp`→`msg_ts`, `id`→`message_id`,
+   the shared columns as they are), so the Messages tab keeps the history
+   from before the switch. If the dump or the copy fails the migration
+   **stops here, before anything is removed**. With the database not yet
+   configured, the dump is kept and `msfe-ng db import-legacy` copies it
+   later. (Hosts migrated before 1.0.70 lost that history — the uninstaller
+   had already dropped the database.)
+5. ConfigServer's uninstaller (any `/usr/msfe/uninstall*.sh`, answering *yes*
    to its prompts), then whatever it left: `/usr/mailscanner`, `/usr/msfe`,
    every cron entry referencing `/usr/msfe` (`/etc/cron.d/msfe.sh`,
    `/etc/cron.hourly/msdigest.pl`, `/etc/cron.daily/mailscanner_daily.cron`,
@@ -102,17 +113,17 @@ first failure:
    `/etc/msfe-ng/legacy-engine-etc/`), root's crontab lines, the legacy WHM
    plugin registration. `csget` (ConfigServer's shared updater, used by csf
    too) is never touched.
-5. `msfe-ng engine install` at the latest MailScanner v5 release
-6. `config.toml` pointed at `/etc/MailScanner/MailScanner.conf`
-7. `%org-name%`, `%org-long-name%`, `%web-site%` carried over from the legacy conf
-8. `msfe-ng engine configure` (queues, run-as user, shared SA state, Razor/Pyzor
+6. `msfe-ng engine install` at the latest MailScanner v5 release
+7. `config.toml` pointed at `/etc/MailScanner/MailScanner.conf`
+8. `%org-name%`, `%org-long-name%`, `%web-site%` carried over from the legacy conf
+9. `msfe-ng engine configure` (queues, run-as user, shared SA state, Razor/Pyzor
    homes, `envelope_sender_header`)
-9. `msfe-ng mailscanner enable-logging`
-10. `msfe-ng sync`
-11. Exim wiring: the two-config layout is kept if the uninstaller left it;
+10. `msfe-ng mailscanner enable-logging`
+11. `msfe-ng sync`
+12. Exim wiring: the two-config layout is kept if the uninstaller left it;
     otherwise the named-queue wiring is set up
-12. startup latch on, unit enabled, MailScanner (re)started
-13. `msfe-ng doctor --fix` — the mechanical repairs first (among them the
+13. startup latch on, unit enabled, MailScanner (re)started
+14. `msfe-ng doctor --fix` — the mechanical repairs first (among them the
     upstream SpamAssassin ruleset for the SpamAssassin the new engine loads,
     see below), then anything still not OK is printed with its fix
 
