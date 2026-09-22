@@ -2515,7 +2515,8 @@ function acdDmarcForm(domain,current){
   const p=pol('p',t.p||'none');
   const sp=pol('sp',t.sp||'',[['','same as the domain policy']]);
   const pct=el('input',{type:'number',min:'1',max:'100',value:String(t.pct||100),style:'width:5.5rem'});
-  const rua=el('input',{type:'text',value:mails(t.rua)||('postmaster@'+domain),placeholder:'aggregate report address(es)',style:'width:100%'});
+  // a report address is proposed for a fresh record only; a kept record stays as it is
+  const rua=el('input',{type:'text',value:mails(t.rua)||(String(current||'').trim()?'':'postmaster@'+domain),placeholder:'aggregate report address(es) — optional',style:'width:100%'});
   const ruf=el('input',{type:'text',value:mails(t.ruf),placeholder:'optional',style:'width:100%'});
   const align=(name,val)=>{const sel=el('select',{name});[['r','relaxed (default)'],['s','strict']].forEach(([v,l])=>sel.append(el('option',{value:v,...(v===val?{selected:'selected'}:{})},l)));return sel;};
   const adkim=align('adkim',(t.adkim||'r').toLowerCase()),aspf=align('aspf',(t.aspf||'r').toLowerCase());
@@ -2531,6 +2532,8 @@ function acdDmarcForm(domain,current){
     if(rua.value.trim())parts.push('rua='+list(rua.value));
     if(ruf.value.trim())parts.push('ruf='+list(ruf.value));
     if(adkim.value==='s')parts.push('adkim=s');if(aspf.value==='s')parts.push('aspf=s');
+    // tags the form has no field for (fo=, rf=, ri=, …) travel along unchanged
+    Object.keys(t).forEach(k=>{if(!['v','p','sp','pct','rua','ruf','adkim','aspf'].includes(k)&&t[k])parts.push(k+'='+t[k]);});
     return parts.join('; ');
   }
   function refresh(){pHint.textContent=hint[p.value]||'';if(!hand.checked)ta.value=build();}
@@ -2779,8 +2782,21 @@ async function renderAcctDns(v){
       const action=k==='dmarc'?acdDmarcAction(c):(ACD_ACTION[k]||'');
       let ta,form=null;
       if(k==='dmarc'){
-        form=acdDmarcForm(d,(c.current||[])[0]||c.suggested_value||'');
-        ta=form.wrap;
+        const cur=c.current||[];
+        const holder=el('div');
+        const mount=rec=>{holder.innerHTML='';form=acdDmarcForm(d,rec);holder.append(form.wrap);};
+        if(cur.length>1){
+          // two (or more) records: receivers ignore all of them — the admin
+          // picks the one to keep; the others are removed with the repair
+          const pick=el('div',{class:'acct-pick'},el('div',{class:'muted',style:'font-size:.78rem;margin-bottom:.3rem'},
+            cur.length+' records are published at _dmarc.'+d+', so receivers ignore the policy entirely. Choose the one to keep — the other'+(cur.length>2?'s are':' is')+' removed — or start from a fresh record. Everything at that name is replaced by the record below.'));
+          cur.forEach((rec,i)=>{const rb=el('input',{type:'radio',name:'acd-pick-'+d,...(i===0?{checked:'checked'}:{})});rb.onchange=()=>mount(rec);pick.append(el('label',{class:'acct-pickrow'},rb,el('span',{},el('b',{},'keep record '+(i+1)),el('code',{class:'mono'},rec))));});
+          const fresh=el('input',{type:'radio',name:'acd-pick-'+d});fresh.onchange=()=>mount(c.suggested_value||'');
+          pick.append(el('label',{class:'acct-pickrow'},fresh,el('span',{},el('b',{},'a fresh record'),el('span',{class:'muted'},' — p=none with reports, built below'))));
+          ta=el('div',{},pick,holder);mount(cur[0]);
+        }else{
+          mount(cur[0]||c.suggested_value||'');ta=holder;
+        }
       }else{
         ta=el('textarea',{class:'mono',rows:'3',spellcheck:'false',...(k==='dkim'?{readonly:'readonly'}:{})});
         ta.value=c.suggested||c.expected||'';
@@ -2791,7 +2807,7 @@ async function renderAcctDns(v){
         ta,
         el('div',{class:'muted',style:'font-size:.76rem'},k==='dkim'
           ?'cPanel generates the key and publishes it; this record cannot be edited here.'
-          :k==='dmarc'?((c.current||[]).length?'The existing record is removed from the zone and this one added in its place.':'Choose the policy and the report address; the record updates as you go.')
+          :k==='dmarc'?((c.current||[]).length>1?'Every _dmarc record in the zone is removed and the record above added in its place.':(c.current||[]).length?'The existing record is removed from the zone and this one added in its place.':'Choose the policy and the report address; the record updates as you go.')
           :'Edit the record before applying if you need to.'),
         c.fix_note?el('div',{class:'muted',style:'font-size:.78rem'},c.fix_note):'',
         acdGuide(k)));

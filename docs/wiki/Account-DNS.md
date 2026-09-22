@@ -74,8 +74,12 @@ publishes it. The **DMARC section is a small form** rather than a text box:
 | Failure reports `ruf=` | per-message forensic reports; optional, few receivers send them |
 | DKIM / SPF alignment | relaxed (default) or strict |
 
-The record is built as you change the fields; *edit the record by hand instead*
-switches to a free text box. When the domain already publishes a DMARC record
+The record is built as you change the fields; tags the form has no field for
+(`fo=`, `rf=`, `ri=`) are carried along unchanged; *edit the record by hand
+instead* switches to a free text box. When the domain publishes **two or more
+DMARC records** (receivers then ignore the policy entirely), the dialog lists
+them and you choose the one to keep — the form starts from it and the others
+are removed — or start from a fresh record. When the domain already publishes a DMARC record
 (a `p=none` row, or two records), the form starts from what is published and
 the repair **replaces** it: the old `_dmarc` lines are removed from the zone
 (`dumpzone` + `removezonerecord`) before the new one is added, so the zone
