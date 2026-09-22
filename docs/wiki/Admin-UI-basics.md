@@ -7,8 +7,11 @@ every tab is described on its own wiki page.
 
 ## The rail
 
-- **Tabs** — Dashboard, Service, Messages, Lists, Rules, Queues, Delivery test,
-  Quarantine, Logs, Settings, Config.
+- **Tabs** — Dashboard, Service, Messages, Lists, Rules, Queues, Delivery,
+  Quarantine, Logs, Settings, Config. **Delivery** holds two views, switched by
+  the pills at the top: *Address test* (the
+  [delivery test](Delivery-test) for one address) and *Account DNS*
+  ([SPF, DKIM and DMARC for every hosted domain](Account-DNS)).
 - **Health dot** (bottom) — mirrors `msfe-ng doctor`, refreshed every minute:
   green *all systems ok*, amber *N notices*, red *N problems*.
 - **Theme** — cycles Auto → Light → Dark; remembered in the browser.

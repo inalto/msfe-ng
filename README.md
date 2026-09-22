@@ -97,6 +97,14 @@ per tab of the admin UI, plus the end-user panel, CLI and troubleshooting.
   apart, a **diagnostic inbox** (one-time addresses that report how a message
   arrives), a real **test message** followed through Exim's log, and
   **monitors** that re-test on a schedule and alert on regressions.
+- **Account DNS** — the same tab's second view answers the server-wide
+  question: one scan over **every domain of every account** reporting SPF,
+  DKIM and DMARC, with cPanel's own validators behind the SPF and DKIM
+  verdicts, subdomain noise hidden by default, and **Repair** running cPanel's
+  installers (`install_spf_records`, `ensure_dkim_keys_exist` + `enable_dkim`,
+  `addzonerecord`) — nothing hand-edited. Domains whose DNS is hosted
+  elsewhere get the exact record to publish, with a copy button
+  (`msfe-ng acctdns scan`).
 - **Doctor** — `msfe-ng doctor` checks every link of the scanning chain (engine,
   wiring, queue flow, spool placement, quarantine writability, DB, logging,
   DNS blocklists, Telegram) and pairs each finding with the exact command that
@@ -142,6 +150,7 @@ any time with `msfe-ng health`.
 
 Full documentation: **[Usage wiki](https://github.com/inalto/msfe-ng/wiki)** ·
 **[Delivery test](https://github.com/inalto/msfe-ng/wiki/Delivery-test)** ·
+**[Account DNS](https://github.com/inalto/msfe-ng/wiki/Account-DNS)** ·
 **[Admin guide](docs/admin-guide.md)** ·
 **[User guide](docs/user-guide.md)** · **[Migration guide](docs/migration.md)** ·
 **[Architecture](docs/architecture.md)**.

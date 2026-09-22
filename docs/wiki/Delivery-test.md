@@ -8,6 +8,10 @@ to it. Type the address, press *Run test*, and the report fills in as the
 checks finish (a run takes a few seconds; up to a minute when a mail server
 delays its greeting).
 
+The rail calls the tab **Delivery**; the pills at the top of it switch between
+this *Address test* and [Account DNS](Account-DNS), which checks SPF, DKIM and
+DMARC for every domain hosted on this server in one scan.
+
 Every check ends in one of five verdicts:
 
 | Verdict | Meaning |

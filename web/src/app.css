@@ -961,6 +961,99 @@
     cursor: pointer;
     font-size: 0.8rem;
   }
+
+  /* ---- Account DNS ------------------------------------------------------- */
+  /* the two views of the Delivery tab, as a segmented control */
+  .dlv-views {
+    display: inline-flex;
+    gap: 0.25rem;
+    margin-bottom: 0.9rem;
+    padding: 0.2rem;
+    border: 1px solid var(--line);
+    border-radius: 11px;
+    background: var(--surface);
+  }
+  .dlv-views button {
+    border: 0;
+    background: none;
+    padding: 0.3rem 0.85rem;
+    border-radius: 8px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--ink2);
+    cursor: pointer;
+  }
+  .dlv-views button:hover {
+    background: var(--surface-2);
+  }
+  .dlv-views button[aria-selected="true"] {
+    background: var(--accent-weak);
+    color: var(--accent);
+  }
+  .dlv-table .dot.ok {
+    background: var(--good);
+  }
+  .acct-table {
+    width: 100%;
+  }
+  .acct-table th {
+    font-size: 0.74rem;
+  }
+  .acct-table td {
+    vertical-align: top;
+  }
+  .acct-table td.acct-dom {
+    width: 24%;
+  }
+  .acct-table td.acct-dns {
+    width: 9rem;
+    font-size: 0.78rem;
+    color: var(--ink2);
+  }
+  .acct-table td.acct-act {
+    width: 7rem;
+  }
+  .acct-name {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    flex-wrap: wrap;
+    word-break: break-all;
+  }
+  .acct-sub {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    flex-wrap: wrap;
+    font-size: 0.74rem;
+    margin-top: 0.1rem;
+  }
+  .acct-cell .dot {
+    margin-right: 0.4rem;
+  }
+  .acct-detail {
+    border-left: 3px solid var(--line);
+    padding: 0.35rem 0 0.35rem 0.7rem;
+    margin: 0.5rem 0;
+    font-size: 0.82rem;
+  }
+  .acct-detail .acct-head {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.25rem;
+  }
+  .acct-lbl {
+    color: var(--muted);
+    font-size: 0.76rem;
+    margin-top: 0.35rem;
+  }
+  textarea.mono {
+    min-height: 3.4rem;
+    font-size: 0.8rem;
+    margin: 0.3rem 0 0.2rem;
+  }
   details.maint > summary {
     cursor: pointer;
     font-weight: 650;
@@ -1304,6 +1397,56 @@
     .card .dlv-table {
       width: 100%;
       min-width: 0;
+    }
+    /* Account DNS: every row becomes a small two-column grid — the domain,
+       the zone and the actions span it, the three checks stack with their
+       label. The table also drops the nowrap/ellipsis rule above. */
+    .card .acct-table {
+      width: 100%;
+      min-width: 0;
+    }
+    .acct-table tr:first-child {
+      display: none;
+    }
+    .acct-table tr.dlv-row {
+      display: grid;
+      grid-template-columns: 3.6rem 1fr;
+      gap: 0.1rem 0.4rem;
+      padding: 0.45rem 0;
+      border-top: 1px solid var(--line);
+    }
+    .acct-table tr.dlv-row > td {
+      border: 0;
+      padding: 0.1rem 0;
+      width: auto;
+      max-width: none;
+      white-space: normal;
+      overflow: visible;
+      text-overflow: clip;
+      grid-column: 1 / -1;
+    }
+    .acct-table tr.dlv-row > td.acct-cell {
+      display: flex;
+      align-items: baseline;
+      gap: 0.2rem;
+    }
+    .acct-table td.acct-cell::before {
+      content: attr(data-lbl);
+      flex: 0 0 3.2rem;
+      color: var(--muted);
+      font-size: 0.72rem;
+    }
+    .acct-table tr.dlv-row > td.acct-act:empty {
+      display: none;
+    }
+    .acct-table tr.acct-row-detail {
+      display: block;
+    }
+    .acct-table tr.acct-row-detail > td {
+      display: block;
+      max-width: none;
+      white-space: normal;
+      overflow: visible;
     }
   }
 

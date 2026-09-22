@@ -15,6 +15,7 @@ Admin tabs
 - [Logs](Logs)
 - [Queues](Queues)
 - [Delivery test](Delivery-test)
+  - [Account DNS](Account-DNS)
 - [Quarantine](Quarantine)
 - [Config](Config)
 

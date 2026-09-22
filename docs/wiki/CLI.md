@@ -48,6 +48,8 @@ msfe-ng delivery eml <file.eml> [--bounce] [--address <a>] [--ip <ip>] [--select
 msfe-ng delivery inbox <install [--dry-run] | uninstall [--dry-run] | status | new | poll <token> [--json] | remove <token> | sweep>   the diagnostic inbox (dt-<token>@<host> addresses via exim.conf.local)
 msfe-ng delivery testmail --from <hosted address> --to <address> [--tag <t>] [--follow <secs>] [--json]   send a real test message and follow it through the Exim log
 msfe-ng delivery monitor <list [--json] | add <address> [--interval-mins n] [--audit] [--ip ..] [--selector ..] | remove <id|address> | run [--dry-run] [--id n]>   scheduled re-tests (history in MySQL, regressions to Telegram)
+msfe-ng acctdns scan [--user <u>] [--domain <d>] [--all] [--json]   SPF, DKIM and DMARC for every domain hosted here (subdomains with --all; exit 1 on a failure, 3 on a non-cPanel host)
+msfe-ng acctdns fix <domain> <spf|dkim|dmarc> [--record <r>] [--json]   install the record through cPanel's own installer (exit 1 when it refused)
 ```
 
 Environment: `MSFE_NG_SOCKET` (daemon socket), `MSFE_NG_CONFIG` (config file),
