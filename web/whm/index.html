@@ -2459,6 +2459,73 @@ async function renderDeliveryTest(v){
 const ACD_ORDER={fail:0,warn:1,unknown:2,ok:3};
 const ACD_CHECKS=[['spf','SPF'],['dkim','DKIM'],['dmarc','DMARC']];
 const ACD_ACTION={spf:'Install the SPF record',dkim:'Generate the DKIM key and publish it',dmarc:'Add a DMARC record'};
+// what the DMARC repair does depends on what is published now
+function acdDmarcAction(c){c=c||{};if((c.current||[]).length>1||c.state==='error')return 'Replace the DMARC record';if((c.current||[]).length&&c.state!=='missing'&&c.state!=='na')return 'Change the DMARC policy';return 'Add a DMARC record';}
+// Good practice, in the words an admin needs while deciding — shown under each check and in the Repair dialog.
+const ACD_GUIDE={
+  spf:['Publish exactly one v=spf1 TXT record per domain; two records make receivers ignore both.',
+    'List only the hosts that really send mail for the domain: this server (ip4:/mx/a), plus an include: for each provider that sends on your behalf (newsletter, ticketing, CRM).',
+    'Stay under 10 DNS lookups (include:, a, mx, redirect= each count); flatten or drop includes you no longer use.',
+    'End with ~all (softfail) while you are unsure the list is complete, then -all once every legitimate sender is covered. Never +all, and avoid ptr.',
+    'A subdomain that never sends mail is safest with "v=spf1 -all".'],
+  dkim:['Sign with a 2048-bit RSA key; 1024-bit keys are treated as weak by large receivers.',
+    'The key in DNS must be the one this server signs with — after a migration or a key rotation, regenerate or re-publish, never leave an old key behind.',
+    'Every provider that sends for the domain needs its own selector; cPanel uses "default". Do not remove a provider’s selector while it still sends.',
+    'Rotate keys about once a year: publish the new selector, switch signing, keep the old record a few days for mail in transit.',
+    'Remove t=y (testing) once verification works; receivers treat it as unaudited.'],
+  dmarc:['Start with p=none and an aggregate report address (rua=) — nothing is blocked and the reports show every source that sends as the domain.',
+    'Read the reports for two or three weeks; fix or add SPF/DKIM for every legitimate source you find (forms, invoicing, newsletters).',
+    'Then move to p=quarantine, optionally with pct= below 100 to ramp up, and to p=reject once the reports are clean. Gmail and Yahoo require at least p=none for bulk senders.',
+    'sp= sets the policy for subdomains; use sp=reject when no subdomain sends mail — spoofers pick unused subdomains.',
+    'Relaxed alignment (adkim=r, aspf=r) is right for most setups; strict (s) only when the From domain is exactly the signing/SPF domain.',
+    'Reports sent to another domain need an authorization record at that domain (<domain>._report._dmarc.<report domain>). Forensic reports (ruf=) are rarely honoured — optional.']
+};
+const ACD_ABOUT='SPF says which servers may send mail for the domain (a TXT record at the domain). DKIM signs every message with a key whose public half is in DNS (default._domainkey), so receivers can tell the mail was not altered. DMARC (a TXT record at _dmarc) tells receivers what to do when neither matches the From address — report only, quarantine, or reject — and where to send reports. Gmail, Yahoo and Microsoft now filter or refuse mail from domains that lack them.';
+function acdGuide(k){const g=ACD_GUIDE[k]||[];if(!g.length)return '';return el('details',{class:'acct-guide'},el('summary',{},'Good practice for '+k.toUpperCase()),el('ul',{},...g.map(t=>el('li',{},t))));}
+// The DMARC policy builder: fields → record, with a by-hand escape hatch.
+function acdParseDmarc(raw){const t={};String(raw||'').split(';').forEach(x=>{const i=x.indexOf('=');if(i>0)t[x.slice(0,i).trim().toLowerCase()]=x.slice(i+1).trim();});return t;}
+function acdDmarcForm(domain,current){
+  const t=acdParseDmarc(current);
+  const mails=v=>String(v||'').split(',').map(x=>x.trim().replace(/^mailto:/i,'')).filter(Boolean).join(', ');
+  const pol=(name,val,extra)=>{const sel=el('select',{name});(extra||[]).concat([['none','none — monitor only'],['quarantine','quarantine — into spam'],['reject','reject — refuse']]).forEach(([v,l])=>sel.append(el('option',{value:v,...(v===val?{selected:'selected'}:{})},l)));return sel;};
+  const p=pol('p',t.p||'none');
+  const sp=pol('sp',t.sp||'',[['','same as the domain policy']]);
+  const pct=el('input',{type:'number',min:'1',max:'100',value:String(t.pct||100),style:'width:5.5rem'});
+  const rua=el('input',{type:'text',value:mails(t.rua)||('postmaster@'+domain),placeholder:'aggregate report address(es)',style:'width:100%'});
+  const ruf=el('input',{type:'text',value:mails(t.ruf),placeholder:'optional',style:'width:100%'});
+  const align=(name,val)=>{const sel=el('select',{name});[['r','relaxed (default)'],['s','strict']].forEach(([v,l])=>sel.append(el('option',{value:v,...(v===val?{selected:'selected'}:{})},l)));return sel;};
+  const adkim=align('adkim',(t.adkim||'r').toLowerCase()),aspf=align('aspf',(t.aspf||'r').toLowerCase());
+  const hand=el('input',{type:'checkbox'});
+  const ta=el('textarea',{class:'mono',rows:'2',spellcheck:'false',readonly:'readonly'});
+  const hint={none:'Nothing is blocked; receivers only send reports. The right start when SPF/DKIM are not yet clean.',quarantine:'Mail that fails goes to the spam folder. Use once the reports show only your own senders.',reject:'Mail that fails is refused. The goal — after quarantine has run clean for a while.'};
+  const pHint=el('div',{class:'acct-hint'});
+  function build(){
+    const parts=['v=DMARC1','p='+p.value];
+    if(sp.value)parts.push('sp='+sp.value);
+    const n=Math.min(100,Math.max(1,parseInt(pct.value,10)||100));if(n!==100)parts.push('pct='+n);
+    const list=v=>v.split(',').map(x=>x.trim()).filter(Boolean).map(x=>'mailto:'+x.replace(/^mailto:/i,'')).join(',');
+    if(rua.value.trim())parts.push('rua='+list(rua.value));
+    if(ruf.value.trim())parts.push('ruf='+list(ruf.value));
+    if(adkim.value==='s')parts.push('adkim=s');if(aspf.value==='s')parts.push('aspf=s');
+    return parts.join('; ');
+  }
+  function refresh(){pHint.textContent=hint[p.value]||'';if(!hand.checked)ta.value=build();}
+  [p,sp,pct,rua,ruf,adkim,aspf].forEach(x=>{x.oninput=refresh;x.onchange=refresh;});
+  hand.onchange=()=>{const h=hand.checked;[p,sp,pct,rua,ruf,adkim,aspf].forEach(x=>x.disabled=h);if(h)ta.removeAttribute('readonly');else{ta.setAttribute('readonly','readonly');refresh();}};
+  const row=(label,ctl,help)=>el('div',{class:'acct-frow'},el('label',{},label),el('div',{},ctl,help?el('div',{class:'acct-hint'},help):''));
+  const wrap=el('div',{class:'acct-form'},
+    row('Policy (p=)',p,pHint),
+    row('Subdomains (sp=)',sp,'What receivers do with mail from subdomains without their own record. sp=reject is safe when no subdomain sends mail.'),
+    row('Apply to (pct=)',pct,'% of failing mail the policy applies to. Below 100 only while ramping up quarantine or reject.'),
+    row('Reports to (rua=)',rua,'Aggregate reports, daily, from every large receiver — the only way to see who sends as the domain. Another domain needs an authorization record there.'),
+    row('Failure reports (ruf=)',ruf,'Per-message forensic reports; few receivers send them. Leave empty unless you have a tool that reads them.'),
+    row('DKIM alignment',adkim,'Relaxed accepts a subdomain of the From domain in the signature; strict wants the exact domain.'),
+    row('SPF alignment',aspf,'Same rule for the envelope sender used by SPF.'),
+    el('label',{class:'muted',style:'font-size:.78rem;display:flex;gap:.35rem;align-items:center;margin-top:.3rem'},hand,' edit the record by hand instead'),
+    ta);
+  refresh();
+  return {wrap,value:()=>ta.value.trim()};
+}
 const ACD_KIND={addon:'addon',parked:'parked',sub:'sub'};
 const acdAge=s=>{s=Math.max(0,+s||0);return s<90?'just now':s<5400?Math.round(s/60)+' min ago':s<172800?Math.round(s/3600)+' h ago':Math.round(s/86400)+' days ago';};
 // Where the zone that holds this name lives, in one short phrase.
@@ -2477,6 +2544,9 @@ async function renderAcctDns(v){
     'One pass over every domain of every account on this server: whether an SPF record is published and authorizes this server, whether the DKIM key in DNS is the key cPanel signs with, and whether a DMARC record exists. SPF and DKIM verdicts come from cPanel’s own validators, so what this calls missing is exactly what cPanel would install.',
     el('br'),
     'Repair runs those installers — no zone file is hand-edited and every change is confirmed first. When a domain’s DNS is hosted elsewhere, the record to publish there is shown with a copy button instead.'));
+  card.append(el('details',{class:'acct-guide',style:'margin-bottom:.5rem'},el('summary',{},'About SPF, DKIM and DMARC — and the order to fix them in'),
+    el('p',{},ACD_ABOUT),
+    el('p',{},'Fix them in this order: SPF first (authorize this server), then DKIM (publish the key cPanel signs with), then DMARC — start at p=none with a report address, and tighten to quarantine and reject once the reports show only your own senders. Each check below has its own good-practice notes.')));
   v.append(card);
 
   const scanBtn=el('button',{class:'act'},'Scan');
@@ -2569,7 +2639,12 @@ async function renderAcctDns(v){
         el('div',{class:'dlv-rec'},el('pre',{class:'log mono'},c.suggested),copyBtn(c.suggested)));
       else if(c.expected)b.append(el('div',{class:'muted',style:'font-size:.78rem'},'expected: '+c.expected));
       if(c.fix_note)b.append(el('div',{class:'muted',style:'font-size:.78rem;margin-top:.3rem'},c.fix_note));
-      if(c.fixable){
+      b.append(acdGuide(k));
+      if(c.fixable&&k==='dmarc'){
+        const ap=el('button',{class:'act plain'},acdDmarcAction(c)+'…');
+        ap.onclick=e=>{e.stopPropagation();acdRepair(n,'dmarc');};
+        b.append(el('div',{class:'ctl',style:'margin:.4rem 0 0'},ap));
+      }else if(c.fixable){
         const ap=el('button',{class:'act plain'},'Apply '+label);
         const out=el('pre',{class:'log',style:'display:none'});
         ap.onclick=async e=>{
@@ -2667,7 +2742,7 @@ async function renderAcctDns(v){
     if(record)body.record=record;
     return await api('/api/acctdns/fix',{method:'POST',body});
   }
-  function acdRepair(n){
+  function acdRepair(n,only){
     const r=n.row,d=(r.domain||{}).domain||'',dns=acdDns(r.zone);
     const m=modal('Repair '+d);
     m.body.append(el('div',{class:'muted',style:'font-size:.8rem;margin-bottom:.5rem'},
@@ -2676,18 +2751,27 @@ async function renderAcctDns(v){
     ACD_CHECKS.forEach(([k,label])=>{
       const c=r[k]||{};
       if(!c.fixable)return;
-      const cb=el('input',{type:'checkbox',checked:'checked'});
-      const ta=el('textarea',{class:'mono',rows:'3',spellcheck:'false',...(k==='dkim'?{readonly:'readonly'}:{})});
-      ta.value=c.suggested||c.expected||'';
+      const cb=el('input',{type:'checkbox',...(!only||only===k?{checked:'checked'}:{})});
+      const action=k==='dmarc'?acdDmarcAction(c):(ACD_ACTION[k]||'');
+      let ta,form=null;
+      if(k==='dmarc'){
+        form=acdDmarcForm(d,(c.current||[])[0]||c.suggested_value||'');
+        ta=form.wrap;
+      }else{
+        ta=el('textarea',{class:'mono',rows:'3',spellcheck:'false',...(k==='dkim'?{readonly:'readonly'}:{})});
+        ta.value=c.suggested||c.expected||'';
+      }
       m.body.append(el('div',{class:'acct-detail'},
-        el('label',{class:'acct-head'},cb,el('b',{},label),el('span',{class:'muted',style:'font-weight:400'},ACD_ACTION[k]||'')),
-        c.summary?el('div',{class:'muted',style:'font-size:.8rem'},'now: '+c.summary):'',
+        el('label',{class:'acct-head'},cb,el('b',{},label),el('span',{class:'muted',style:'font-weight:400'},action)),
+        c.summary?el('div',{class:'muted',style:'font-size:.8rem'},'now: '+c.summary+((c.current||[]).length&&k==='dmarc'?' — '+(c.current||[])[0]:'')):'',
         ta,
         el('div',{class:'muted',style:'font-size:.76rem'},k==='dkim'
           ?'cPanel generates the key and publishes it; this record cannot be edited here.'
+          :k==='dmarc'?((c.current||[]).length?'The existing record is removed from the zone and this one added in its place.':'Choose the policy and the report address; the record updates as you go.')
           :'Edit the record before applying if you need to.'),
-        c.fix_note?el('div',{class:'muted',style:'font-size:.78rem'},c.fix_note):''));
-      parts.push({k,label,cb,ta});
+        c.fix_note?el('div',{class:'muted',style:'font-size:.78rem'},c.fix_note):'',
+        acdGuide(k)));
+      parts.push({k,label,cb,value:()=>form?form.value():ta.value.trim()});
     });
     if(!parts.length){m.body.append(el('div',{class:'empty'},'Nothing on this domain can be repaired from this server.'));return;}
     const out=el('pre',{class:'log',style:'display:none'});
@@ -2701,7 +2785,7 @@ async function renderAcctDns(v){
       let bad=0;
       for(const p of chosen){
         out.textContent+='# '+p.label+'\n';
-        const res=await acdFix(d,p.k,p.k==='dkim'?null:(p.ta.value.trim()||null));
+        const res=await acdFix(d,p.k,p.k==='dkim'?null:(p.value()||null));
         out.textContent+=(((res&&res.actions)||[]).join('\n')||(res&&res.error)||'no output')+'\n\n';
         if(res&&res.ok){if(res.row){n.row=acdNorm(res.row);fillRow(n);order();draw();if(n.open)drawDetail(n);}}
         else bad++;

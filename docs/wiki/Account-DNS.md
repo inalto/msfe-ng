@@ -58,14 +58,35 @@ that states the change and shows the record.
 |---|---|
 | SPF | `install_spf_records` for the domain, with the record shown in the dialog |
 | DKIM | `ensure_dkim_keys_exist` — which generates the key pair when there is none — then `enable_dkim`, which publishes the public key and turns on signing |
-| DMARC | `addzonerecord` on the local zone: `_dmarc.<domain>` TXT, TTL 14400, with the record shown in the dialog |
+| DMARC | `addzonerecord` on the local zone: `_dmarc.<domain>` TXT, TTL 14400, with the record built in the dialog; an existing record is removed first (`dumpzone`, `removezonerecord`) |
 
 The Repair dialog has one section per repairable check, each with a checkbox
-(ticked) and the record in an editable box. **SPF and DMARC records can be
-edited before applying** — the proposed DMARC record is the safe first one,
-`v=DMARC1; p=none; rua=mailto:postmaster@<domain>`, and tightening it to
-`quarantine` or `reject` later is a one-line change. The DKIM record is
-read-only: cPanel generates the key and publishes it.
+(ticked) and the record to install. The **SPF record can be edited before
+applying**. The DKIM record is read-only: cPanel generates the key and
+publishes it. The **DMARC section is a small form** rather than a text box:
+
+| Field | What it decides |
+|---|---|
+| Policy `p=` | `none` (monitor only — nothing blocked, reports flow), `quarantine` (failing mail goes to spam), `reject` (failing mail is refused). Each choice shows when it is the right one |
+| Subdomains `sp=` | the policy for subdomains without their own record; `reject` is safe when no subdomain sends mail |
+| Apply to `pct=` | the share of failing mail the policy applies to; below 100 only while ramping up |
+| Reports to `rua=` | aggregate report addresses (comma-separated); defaults to `postmaster@<domain>` |
+| Failure reports `ruf=` | per-message forensic reports; optional, few receivers send them |
+| DKIM / SPF alignment | relaxed (default) or strict |
+
+The record is built as you change the fields; *edit the record by hand instead*
+switches to a free text box. When the domain already publishes a DMARC record
+(a `p=none` row, or two records), the form starts from what is published and
+the repair **replaces** it: the old `_dmarc` lines are removed from the zone
+(`dumpzone` + `removezonerecord`) before the new one is added, so the zone
+never ends up with two records.
+
+Each section, and each check in the row's details, has a **Good practice**
+panel: the rules that matter when deciding (one SPF record, under 10 lookups,
+`~all` then `-all`; 2048-bit DKIM keys and yearly rotation; DMARC from `p=none`
+with reports to `quarantine` and `reject`, `sp=` for unused subdomains,
+external report authorization). The card header has a short *About SPF, DKIM
+and DMARC* panel with the order to fix them in.
 
 *Apply selected* runs the chosen changes one after another and shows each
 installer's transcript — the command and cPanel's own reply — then re-checks the

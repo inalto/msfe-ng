@@ -1054,6 +1054,55 @@
     font-size: 0.8rem;
     margin: 0.3rem 0 0.2rem;
   }
+  details.acct-guide {
+    font-size: 0.78rem;
+    color: var(--muted);
+    margin-top: 0.4rem;
+  }
+  details.acct-guide > summary {
+    cursor: pointer;
+    color: var(--accent);
+    font-weight: 600;
+  }
+  details.acct-guide ul {
+    margin: 0.3rem 0 0.2rem 1.1rem;
+    list-style: disc;
+  }
+  details.acct-guide li,
+  details.acct-guide p {
+    margin: 0.2rem 0;
+    line-height: 1.4;
+  }
+  .acct-form {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 0.45rem 0.8rem;
+    align-items: start;
+    margin: 0.4rem 0;
+  }
+  .acct-form .acct-frow {
+    display: contents;
+  }
+  .acct-form .acct-frow > label {
+    padding-top: 0.35rem;
+    font-size: 0.78rem;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .acct-form select,
+  .acct-form input[type="text"] {
+    max-width: 100%;
+  }
+  .acct-form .acct-hint {
+    font-size: 0.72rem;
+    color: var(--muted);
+    margin-top: 0.15rem;
+    line-height: 1.35;
+  }
+  .acct-form > label,
+  .acct-form > textarea {
+    grid-column: 1 / -1;
+  }
   details.maint > summary {
     cursor: pointer;
     font-weight: 650;

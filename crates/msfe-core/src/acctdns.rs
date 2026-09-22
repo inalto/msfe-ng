@@ -1371,12 +1371,73 @@ pub fn dmarc_check(client: &Client, domain: &str, zone: &Zone) -> Check {
         }
     };
     c.current = lookup.records.clone();
-    if matches!(c.state, State::Missing) {
-        c.suggested = Some(suggest_dmarc(domain));
-        c.suggested_value = Some(suggest_dmarc_value(domain));
+    let own = !lookup.inherited;
+    let value = match (&c.state, c.level, own) {
+        (State::Missing, _, _) => Some(suggest_dmarc_value(domain)),
+        // p=none: the same record, enforcing
+        (State::Ok, Level::Warn, true) => lookup.records.first().map(|r| upgrade_dmarc_policy(r)),
+        // two records / no policy: one clean record replaces them
+        (State::Error, _, true) => Some(suggest_dmarc_value(domain)),
+        _ => None,
+    };
+    if let Some(v) = value {
+        c.suggested = Some(txt_line(&format!("_dmarc.{domain}"), &v));
+        c.suggested_value = Some(v);
+        c.fixable = zone.name.is_some();
+        c.fix_note = fix_note(zone, false);
+    } else {
+        c.fixable = false;
+        c.fix_note = None;
     }
-    set_fixability(&mut c, zone, false);
     c
+}
+
+/// The same DMARC record with `p=none` turned into `p=quarantine`, tags
+/// otherwise untouched (the first step of enforcement).
+pub fn upgrade_dmarc_policy(record: &str) -> String {
+    record
+        .split(';')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(|t| {
+            if t.to_ascii_lowercase().trim_start().starts_with("p=") {
+                "p=quarantine".to_string()
+            } else {
+                t.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// The line numbers of the TXT records at `name` in a `dumpzone` reply,
+/// highest first — the order in which they can be removed without shifting
+/// the others.
+pub fn dmarc_zone_lines(dump: &Json, name: &str) -> Vec<u32> {
+    let want = name.trim_end_matches('.').to_ascii_lowercase();
+    let mut lines: Vec<u32> = dump
+        .get("data")
+        .and_then(|d| d.get("zone"))
+        .and_then(Json::as_array)
+        .and_then(|z| z.first())
+        .and_then(|z| z.get("record"))
+        .and_then(Json::as_array)
+        .map(|recs| {
+            recs.iter()
+                .filter(|r| r.str_field("type").eq_ignore_ascii_case("TXT"))
+                .filter(|r| {
+                    r.str_field("name")
+                        .trim_end_matches('.')
+                        .eq_ignore_ascii_case(&want)
+                })
+                .filter_map(|r| r.get("Line").and_then(Json::as_i64))
+                .filter_map(|l| u32::try_from(l).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    lines.sort_unstable_by(|a, b| b.cmp(a));
+    lines.dedup();
+    lines
 }
 
 /// The row's colour: the worst of its three cells.
@@ -1753,6 +1814,41 @@ pub fn fix(cp: &Cp, domain: &str, what: What, record: Option<&str>) -> Result<Fi
                     vec![txt_line(&format!("_dmarc.{d}"), &value)],
                 ));
             };
+            // A record of the domain's own already published: a second one would
+            // make receivers ignore both, so the old lines go first.
+            let has_own = pre.as_ref().is_some_and(|r| {
+                !r.dmarc.current.is_empty() && r.dmarc.state != State::NotApplicable
+            });
+            if has_own {
+                actions.push(format!("whmapi1 dumpzone domain={zone}"));
+                let dump = whmapi1(
+                    cp,
+                    "acctdns_dumpzone",
+                    "dumpzone",
+                    &[format!("domain={zone}")],
+                    FIX_TIMEOUT,
+                )
+                .and_then(|v| meta_ok(&v).map(|_| v))
+                .map_err(|e| {
+                    let mut a = actions.clone();
+                    a.push(format!("failed: {e}"));
+                    FixError::with(e, a)
+                })?;
+                let lines = dmarc_zone_lines(&dump, &format!("_dmarc.{d}"));
+                actions.push(format!(
+                    "{} _dmarc.{d} record(s) in the zone to replace",
+                    lines.len()
+                ));
+                for line in lines {
+                    installer(
+                        cp,
+                        "acctdns_fix_dmarc_remove",
+                        "removezonerecord",
+                        &[format!("zone={zone}"), format!("line={line}")],
+                        &mut actions,
+                    )?;
+                }
+            }
             installer(
                 cp,
                 "acctdns_fix_dmarc",
@@ -2324,6 +2420,14 @@ mod tests {
         );
         assert_eq!(monitor.summary, "p=none");
         assert_eq!(monitor.notes, vec!["monitor-only policy"]);
+        assert!(
+            monitor.fixable,
+            "a monitor-only policy can be tightened here"
+        );
+        assert_eq!(
+            monitor.suggested_value.as_deref(),
+            Some("v=DMARC1; p=quarantine")
+        );
 
         let sub = dmarc_check(&c, "shop.example.com", &here);
         assert_eq!(sub.state, State::NotApplicable);
@@ -3111,6 +3215,40 @@ mod tests {
         assert_eq!(rep.actions[2], "whmapi1 enable_dkim domain=example.com");
         assert_eq!(rep.row.as_ref().unwrap().dkim.state, State::Mismatch);
 
+        // DMARC already published (p=none): the old lines are removed first,
+        // highest line first, then the new record added
+        let dmarc_srv = dns_server(&[(
+            "_dmarc.example.org",
+            "v=DMARC1; p=none; rua=mailto:postmaster@example.org",
+        )]);
+        std::env::set_var("MSFE_NG_RESOLVER", dmarc_srv.addr.to_string());
+        write(
+            &root,
+            "/_cmd/acctdns_dumpzone.txt",
+            r#"{"data":{"zone":[{"record":[{"Line":3,"type":"TXT","name":"example.org.","txtdata":"v=spf1 -all"},{"Line":12,"type":"TXT","name":"_dmarc.example.org.","txtdata":"v=DMARC1; p=none"},{"Line":20,"type":"A","name":"_dmarc.example.org."},{"Line":31,"type":"TXT","name":"_DMARC.example.org.","txtdata":"v=DMARC1; p=none"}]}]},"metadata":{"result":1,"reason":"OK"}}"#,
+        );
+        write(&root, "/_cmd/acctdns_fix_dmarc_remove.txt", OK_REPLY);
+        let rep = fix(&cp, "example.org", What::Dmarc, None).unwrap();
+        assert_eq!(rep.actions[0], "whmapi1 dumpzone domain=example.org");
+        assert_eq!(
+            rep.actions[1],
+            "2 _dmarc.example.org record(s) in the zone to replace"
+        );
+        assert_eq!(
+            rep.actions[2],
+            "whmapi1 removezonerecord zone=example.org line=31"
+        );
+        assert_eq!(
+            rep.actions[4],
+            "whmapi1 removezonerecord zone=example.org line=12"
+        );
+        assert!(
+            rep.actions[6].starts_with("whmapi1 addzonerecord domain=example.org name=_dmarc.example.org. type=TXT ttl=14400 txtdata='v=DMARC1; p=quarantine; rua=mailto:postmaster@example.org'"),
+            "{}",
+            rep.actions[6]
+        );
+        std::env::set_var("MSFE_NG_RESOLVER", srv.addr.to_string());
+
         // DMARC into a local zone, with the admin's own record
         let rep = fix(
             &cp,
@@ -3142,6 +3280,25 @@ mod tests {
 
         std::env::remove_var("MSFE_NG_RESOLVER");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dmarc_helpers() {
+        assert_eq!(
+            upgrade_dmarc_policy("v=DMARC1; P=none; rua=mailto:a@example.com;"),
+            "v=DMARC1; p=quarantine; rua=mailto:a@example.com"
+        );
+        assert_eq!(
+            upgrade_dmarc_policy("v=DMARC1;p=none"),
+            "v=DMARC1; p=quarantine"
+        );
+        let dump = Json::parse(
+            r#"{"data":{"zone":[{"record":[{"Line":5,"type":"TXT","name":"_dmarc.example.com."},{"Line":9,"type":"TXT","name":"_dmarc.example.com."},{"Line":9,"type":"TXT","name":"_dmarc.example.com."},{"Line":7,"type":"TXT","name":"_dmarc.shop.example.com."},{"Line":8,"type":"CNAME","name":"_dmarc.example.com."}]}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(dmarc_zone_lines(&dump, "_dmarc.example.com"), vec![9, 5]);
+        assert!(dmarc_zone_lines(&dump, "_dmarc.example.net").is_empty());
+        assert!(dmarc_zone_lines(&Json::Null, "_dmarc.example.com").is_empty());
     }
 
     // ---- the registry ---------------------------------------------------------
