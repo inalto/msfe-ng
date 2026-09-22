@@ -121,10 +121,14 @@ fn scan_post(req: &Request, cfg: &Config) -> Response {
             return unsupported(&cp, 501);
         }
         return match acctdns::check_one(&cp, &Client::system(), &domain) {
-            Some(row) => Response::json(
-                200,
-                &Json::Object(vec![("row".into(), row.to_json())]).to_string(),
-            ),
+            Some(row) => {
+                // the re-checked row replaces the stored one, so a reload agrees
+                acctdns::update_row(&row);
+                Response::json(
+                    200,
+                    &Json::Object(vec![("row".into(), row.to_json())]).to_string(),
+                )
+            }
             None => err(404, "not hosted here"),
         };
     }

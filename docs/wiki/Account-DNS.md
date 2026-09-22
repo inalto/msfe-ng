@@ -94,7 +94,15 @@ and DMARC* panel with the order to fix them in.
 
 *Apply selected* runs the chosen changes one after another and shows each
 installer's transcript — the command and cPanel's own reply — then re-checks the
-domain and replaces the row.
+domain and replaces the row, in the table and in the saved scan (a reload
+shows the same). The resolver this host uses still remembers the old answer,
+so the re-check does two more things: when the resolver is the private one on
+this host, its cache for the domain is flushed first; and if cPanel's validator
+still reports the old state, the domain's authoritative name server is asked
+directly. A record found there turns the cell green as **applied —
+propagating**, with the note that resolvers show it within the record's TTL; a
+later scan confirms it. When the zone is only a copy here (name servers
+elsewhere), the authoritative answer does not change and the row says so.
 
 ## DNS hosted elsewhere
 

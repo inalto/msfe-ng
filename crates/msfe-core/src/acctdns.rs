@@ -1864,23 +1864,137 @@ pub fn fix(cp: &Cp, domain: &str, what: What, record: Option<&str>) -> Result<Fi
             )?;
         }
     }
-    let row = check_one(cp, &client, &d);
-    let still_broken = row.as_ref().is_some_and(|r| {
-        let c = match what {
-            What::Spf => &r.spf,
-            What::Dkim => &r.dkim,
-            What::Dmarc => &r.dmarc,
+    // The resolver this host (and cPanel's validator) asks still holds the old
+    // answer: drop it when the resolver is the local unbound, then re-check.
+    if cp.live() {
+        if let Some(note) = flush_resolver(&d) {
+            actions.push(note);
+        }
+    }
+    let client = Client::system();
+    let mut row = check_one(cp, &client, &d);
+    if let Some(r) = row.as_mut() {
+        let (check, name) = match what {
+            What::Spf => (&mut r.spf, d.clone()),
+            What::Dkim => (&mut r.dkim, format!("default._domainkey.{d}")),
+            What::Dmarc => (&mut r.dmarc, format!("_dmarc.{d}")),
         };
-        !matches!(c.state, State::Ok | State::NotApplicable)
-    });
-    if still_broken {
-        actions.push(
-            "installed — resolvers keep the old answer until the record's TTL expires; \
-             rescan later"
-                .into(),
-        );
+        if !matches!(check.state, State::Ok | State::NotApplicable) {
+            // What the resolver says is stale; what the authoritative server
+            // says is the truth of the repair.
+            match authoritative_txt(&client, &r.zone, &name) {
+                Some((server, records)) if records.iter().any(|t| accepts(what, check, t)) => {
+                    actions.push(format!(
+                        "{server} (authoritative) already answers with the new record — resolvers show it within its TTL ({TTL} s)"
+                    ));
+                    check.current = records;
+                    check.state = State::Ok;
+                    check.level = Level::Ok;
+                    check.summary = "applied — propagating".into();
+                    check.detail = format!(
+                        "The new record is published at the authoritative server {server}. Resolvers, and cPanel's validator, still show the old answer until its TTL expires (up to {TTL} s); a later scan confirms it."
+                    );
+                    check.fixable = false;
+                    check.fix_note = None;
+                    check.suggested = None;
+                    check.suggested_value = None;
+                    check.notes.clear();
+                    r.level = row_level(&r.spf, &r.dkim, &r.dmarc);
+                }
+                Some((server, _)) => actions.push(format!(
+                    "{server} (authoritative) does not answer with the new record yet — the zone may replicate from elsewhere; rescan later"
+                )),
+                None => actions.push(
+                    "installed — resolvers keep the old answer until the record's TTL expires; rescan later".into(),
+                ),
+            }
+        }
+        update_row(r);
     }
     Ok(FixReport { actions, row })
+}
+
+/// Drop what the local resolver cached under `domain`, when the resolver is
+/// unbound on this host with its control channel enabled. Best effort: the
+/// note says what happened; nothing depends on it.
+fn flush_resolver(domain: &str) -> Option<String> {
+    let resolv = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
+    let local = crate::resolver::nameservers_of(&resolv)
+        .iter()
+        .any(|ns| ns == "127.0.0.1" || ns == "::1");
+    if !local {
+        return None;
+    }
+    let mut c = Command::new("unbound-control");
+    c.args(["flush_zone", domain]);
+    match run_with_timeout(&mut c, Duration::from_secs(10)) {
+        Ok(out) if out.ok => Some(format!("local resolver: cache for {domain} flushed")),
+        Ok(out) => Some(format!(
+            "local resolver: cache not flushed ({})",
+            out.stderr
+                .trim()
+                .lines()
+                .next()
+                .unwrap_or("unbound-control failed")
+        )),
+        Err(_) => None,
+    }
+}
+
+/// The TXT records at `name` as one of the zone's authoritative servers
+/// answers them (RD=0), with that server's name. `None` when no server could
+/// be reached.
+fn authoritative_txt(client: &Client, zone: &Zone, name: &str) -> Option<(String, Vec<String>)> {
+    for ns in &zone.nameservers {
+        let Ok((v4, v6)) = client.addrs(ns) else {
+            continue;
+        };
+        let ips: Vec<IpAddr> = v4
+            .iter()
+            .map(|a| IpAddr::V4(*a))
+            .chain(v6.iter().map(|a| IpAddr::V6(*a)))
+            .collect();
+        for ip in ips {
+            let server = std::net::SocketAddr::new(ip, 53);
+            if let Ok(resp) = client.query_authoritative(server, name, crate::dns::RType::Txt) {
+                let records: Vec<String> = resp
+                    .of(crate::dns::RType::Txt)
+                    .iter()
+                    .filter_map(|rr| match &rr.data {
+                        crate::dns::RData::Txt(parts) => Some(parts.concat()),
+                        _ => None,
+                    })
+                    .collect();
+                return Some((ns.clone(), records));
+            }
+        }
+    }
+    None
+}
+
+/// Does an authoritative TXT record show the repair took: for SPF and DMARC
+/// the record kind is present (cPanel installs exactly what was asked), for
+/// DKIM the public key this server holds.
+fn accepts(what: What, check: &Check, txt: &str) -> bool {
+    let t = txt.trim().to_ascii_lowercase();
+    match what {
+        What::Spf => t.starts_with("v=spf1"),
+        What::Dmarc => t.starts_with("v=dmarc1"),
+        What::Dkim => {
+            let wanted = check
+                .suggested_value
+                .as_deref()
+                .or(check.expected.as_deref())
+                .and_then(|v| v.split(';').map(str::trim).find(|p| p.starts_with("p=")))
+                .map(|p| p.trim_start_matches("p=").replace(' ', ""));
+            match wanted {
+                Some(key) if !key.is_empty() => {
+                    t.replace(' ', "").contains(&key.to_ascii_lowercase())
+                }
+                _ => t.starts_with("v=dkim1"),
+            }
+        }
+    }
 }
 
 // ---- the scan registry --------------------------------------------------------
@@ -1977,6 +2091,39 @@ pub fn unsupported_scan(cp: &Cp) -> Scan {
 /// finished full scan from disk.
 pub fn last() -> Option<Scan> {
     snapshot().or_else(load)
+}
+
+/// Put a freshly checked row into the last scan (memory and disk), so a
+/// repair or a re-check survives a page reload. A scan still running is left
+/// alone — it rewrites the row itself.
+pub fn update_row(row: &Row) {
+    let updated = with_scan(|slot| match slot {
+        Some(live) if !live.scan.done => None,
+        Some(live) => {
+            replace_row(&mut live.scan, row);
+            Some(live.scan.clone())
+        }
+        None => None,
+    });
+    let scan = updated.or_else(|| {
+        let mut s = load()?;
+        replace_row(&mut s, row);
+        Some(s)
+    });
+    if let Some(s) = scan {
+        persist(&s);
+    }
+}
+
+fn replace_row(scan: &mut Scan, row: &Row) {
+    match scan
+        .rows
+        .iter_mut()
+        .find(|r| r.domain.domain == row.domain.domain)
+    {
+        Some(r) => *r = row.clone(),
+        None => scan.rows.push(row.clone()),
+    }
 }
 
 /// Start a scan in the background, one chunk of domains at a time so the table
@@ -3280,6 +3427,76 @@ mod tests {
 
         std::env::remove_var("MSFE_NG_RESOLVER");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_repair_is_accepted_when_the_authoritative_answer_carries_it() {
+        let mut c = Check::default();
+        assert!(accepts(What::Spf, &c, "v=spf1 +mx ip4:192.0.2.10 ~all"));
+        assert!(!accepts(What::Spf, &c, "google-site-verification=abc"));
+        assert!(accepts(What::Dmarc, &c, "V=DMARC1; p=quarantine"));
+        assert!(!accepts(What::Dmarc, &c, "v=spf1 -all"));
+        // DKIM: the key this server holds, not just any DKIM record
+        c.suggested_value = Some("v=DKIM1; k=rsa; p=MIIBIjANBgkqAAAA".into());
+        assert!(accepts(
+            What::Dkim,
+            &c,
+            "v=DKIM1; k=rsa; p=MIIBIjANBgkq AAAA"
+        ));
+        assert!(!accepts(What::Dkim, &c, "v=DKIM1; k=rsa; p=OTHERKEY"));
+        c.suggested_value = None;
+        assert!(accepts(What::Dkim, &c, "v=DKIM1; p=anything"));
+    }
+
+    #[test]
+    fn update_row_rewrites_the_stored_scan() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tmpdir("update-row");
+        let store = dir.join("acctdns.json");
+        std::env::set_var("MSFE_NG_ACCTDNS_FILE", &store);
+        reset();
+        let mut row = Row {
+            domain: Domain {
+                domain: "example.com".into(),
+                user: "alice".into(),
+                kind: Kind::Main,
+                mail: DomainKind::Local,
+            },
+            zone: Zone::default(),
+            spf: Check::unknown("x"),
+            dkim: Check::unknown("x"),
+            dmarc: Check::unknown("x"),
+            level: Level::Unknown,
+            checked_at: 1,
+        };
+        let scan = Scan {
+            id: "s1".into(),
+            started: 1,
+            finished: Some(2),
+            done: true,
+            total: 1,
+            rows: vec![row.clone()],
+            errors: Vec::new(),
+            panel: "cPanel / WHM".into(),
+            supported: true,
+        };
+        persist(&scan);
+        // nothing in memory: the file is updated in place
+        row.spf.state = State::Ok;
+        row.spf.summary = "applied — propagating".into();
+        row.checked_at = 5;
+        update_row(&row);
+        let back = load().unwrap();
+        assert_eq!(back.rows.len(), 1);
+        assert_eq!(back.rows[0].spf.summary, "applied — propagating");
+        assert_eq!(back.rows[0].checked_at, 5);
+        // a row the scan did not have is appended
+        let mut other = row.clone();
+        other.domain.domain = "example.org".into();
+        update_row(&other);
+        assert_eq!(load().unwrap().rows.len(), 2);
+        std::env::remove_var("MSFE_NG_ACCTDNS_FILE");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
