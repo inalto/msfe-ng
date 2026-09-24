@@ -468,6 +468,11 @@
     grid-template-columns: 18rem minmax(0, 1fr);
     gap: 1rem;
     align-items: start;
+    /* the space below is the grid's, whichever column is taller */
+    margin-bottom: 1rem;
+  }
+  .cfg2 > .card {
+    margin-bottom: 0;
   }
   .tree {
     background-color: var(--surface);
