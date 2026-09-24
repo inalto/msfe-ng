@@ -40,11 +40,21 @@ pub fn summary(cfg: &Config, days: u32) -> io::Result<Json> {
     ]))
 }
 
-/// Daily volume for a stacked/line chart over the last `days` days.
+/// Daily volume for the dashboard's stacked chart over the last `days` days.
+///
+/// `clean`, `spam`, `highspam` and `infected` are exclusive (an infected
+/// message counts only as infected), so they stack up to `total`;
+/// `quarantined` overlaps them. `virus` is kept for older callers.
 pub fn series(cfg: &Config, days: u32) -> io::Result<Json> {
+    let inf = "(virusinfected=1 OR nameinfected=1 OR otherinfected=1)";
     let sql = format!(
         "SELECT DATE(msg_ts), COUNT(*), \
-                COALESCE(SUM(isspam=1),0), COALESCE(SUM(virusinfected=1),0) \
+                COALESCE(SUM(isspam=1),0), COALESCE(SUM(virusinfected=1),0), \
+                COALESCE(SUM(isspam=0 AND ishighspam=0 AND NOT {inf}),0), \
+                COALESCE(SUM(isspam=1 AND ishighspam=0 AND NOT {inf}),0), \
+                COALESCE(SUM(ishighspam=1 AND NOT {inf}),0), \
+                COALESCE(SUM({inf}),0), \
+                COALESCE(SUM(quarantined=1),0) \
          FROM maillog WHERE msg_ts >= (NOW() - INTERVAL {days} DAY) \
          GROUP BY DATE(msg_ts) ORDER BY DATE(msg_ts)"
     );
@@ -52,23 +62,20 @@ pub fn series(cfg: &Config, days: u32) -> io::Result<Json> {
     let points = rows
         .iter()
         .map(|r| {
+            let f = |i: usize| r.get(i).map(String::as_str).unwrap_or("0");
             Json::Object(vec![
                 (
                     "date".into(),
                     Json::str(r.first().cloned().unwrap_or_default()),
                 ),
-                (
-                    "total".into(),
-                    count(r.get(1).map(String::as_str).unwrap_or("0")),
-                ),
-                (
-                    "spam".into(),
-                    count(r.get(2).map(String::as_str).unwrap_or("0")),
-                ),
-                (
-                    "virus".into(),
-                    count(r.get(3).map(String::as_str).unwrap_or("0")),
-                ),
+                ("total".into(), count(f(1))),
+                ("spam".into(), count(f(2))),
+                ("virus".into(), count(f(3))),
+                ("clean".into(), count(f(4))),
+                ("lowspam".into(), count(f(5))),
+                ("highspam".into(), count(f(6))),
+                ("infected".into(), count(f(7))),
+                ("quarantined".into(), count(f(8))),
             ])
         })
         .collect();
@@ -199,10 +206,16 @@ pub fn messages(cfg: &Config, f: &MessageFilter) -> io::Result<Json> {
             "subject" => "subject",
             "id" => "message_id",
             "ip" => "clientip",
+            // exact sender domain (the dashboard's top-sender links)
+            "from_domain" => "from_domain",
             _ => "from_address",
         };
-        let like = sql_quote(&format!("%{}%", f.text));
-        wheres.push(format!("{col} LIKE {like}"));
+        if col == "from_domain" {
+            wheres.push(format!("from_domain = {}", sql_quote(&f.text)));
+        } else {
+            let like = sql_quote(&format!("%{}%", f.text));
+            wheres.push(format!("{col} LIKE {like}"));
+        }
     }
     if f.days > 0 {
         let days = f.days.clamp(1, 3650);

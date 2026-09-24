@@ -351,6 +351,7 @@
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
     gap: 0.75rem;
+    margin-bottom: 1rem;
   }
   .tile {
     @apply bg-surface;
@@ -1192,6 +1193,56 @@
   }
   .bars .grid {
     stroke: var(--grid);
+  }
+  .bars .pie-total {
+    fill: var(--ink);
+  }
+  /* dashboard: clickable days / sender rows, legends, the day's donut */
+  .pick {
+    cursor: pointer;
+  }
+  svg .pick:hover rect:not([fill="transparent"]),
+  svg .pick:focus-visible rect:not([fill="transparent"]) {
+    opacity: 0.8;
+  }
+  svg .pick:focus {
+    outline: none;
+  }
+  div.pick {
+    border-radius: 6px;
+  }
+  div.pick:hover .hlabel,
+  div.pick:focus-visible .hlabel {
+    color: var(--accent);
+    text-decoration: underline;
+  }
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem 0.9rem;
+    font-size: 0.78rem;
+    color: var(--ink2);
+    margin-top: 0.4rem;
+  }
+  .legend.col {
+    flex-direction: column;
+  }
+  .lgd {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+  }
+  .lgd .dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+  }
+  .pie {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 1.5rem;
+    flex-wrap: wrap;
   }
   .empty {
     color: var(--muted);

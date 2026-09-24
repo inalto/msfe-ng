@@ -500,6 +500,10 @@ async function showIp(raw){
 let policy=null; // {settings:{}, whitelist:[], blacklist:[]}
 let PREFS={refresh_secs:0,rows_per_page:50,view_new_window:false}; // /api/config prefs
 let days=7;
+let dashDay=null; // day opened as a pie in the Daily volume card (kept across auto-refresh)
+// Series of the dashboard charts: the exclusive categories stack up to the total.
+const DASH_SERIES=[['clean','Clean','var(--good)'],['lowspam','Spam','var(--warning)'],
+  ['highspam','High spam','var(--serious)'],['infected','Infected','var(--critical)']];
 
 const tabs={dash:renderDash,settings:renderSettings,lists:renderLists,messages:renderMessages,rules:renderRules,service:renderService,logs:renderLogs,queues:renderQueues,delivery:renderDelivery,quarantine:renderQuarantine,config:renderConfig};
 let dashTimer=null; // dashboard auto-refresh; cleared on every tab switch
@@ -570,14 +574,106 @@ async function renderDash(){
   rowc.append(volCard,topCard);
 
   const ser=await api('/api/stats/series?days='+days);
-  if(ser&&ser.available&&ser.points&&ser.points.length)
-    volCard.append(barChart(ser.points.map(p=>({label:p.date.slice(5),value:p.total})),'var(--accent)'));
-  else volCard.append(el('div',{class:'empty'},'No volume data.'));
+  if(ser&&ser.available&&ser.points&&ser.points.length){
+    const pts=ser.points;
+    const body=el('div');volCard.append(body);
+    const show=()=>{
+      body.innerHTML='';
+      const p=pts.find(x=>x.date===dashDay);
+      volCard.querySelector('h2').textContent=p?'Daily volume · '+p.date:'Daily volume';
+      if(!p){dashDay=null;body.append(stackChart(pts,d=>{dashDay=d.date;show();}));return;}
+      body.append(dayPie(p,()=>{dashDay=null;show();}));
+    };
+    show();
+  } else volCard.append(el('div',{class:'empty'},'No volume data.'));
 
   const top=await api('/api/stats/top?field=from_domain&days='+days+'&limit=8');
   if(top&&top.available&&top.items&&top.items.length)
-    topCard.append(hbars(top.items.map(i=>({label:i.key,value:i.count}))));
+    topCard.append(hbars(top.items.map(i=>({label:i.key,value:i.count})),{
+      color:heatColor,
+      title:d=>'Show messages from '+d.label,
+      onpick:d=>{
+        Object.assign(msgF,{status:'all',field:'from_domain',text:d.label,days:days,offset:0});
+        document.querySelector('#tabs button[data-tab="messages"]').click();
+      }}));
   else topCard.append(el('div',{class:'empty'},'No sender data.'));
+}
+
+// cold for small senders, through green and yellow, to red for the largest
+function heatColor(t){return `hsl(${Math.round(210*(1-Math.max(0,Math.min(1,t))))} 70% 45%)`;}
+
+// legend row: dot, label, count (and share of the total when given)
+function legendItem(color,label,value,total){
+  return el('span',{class:'lgd'},el('span',{class:'dot',style:'background:'+color}),label+' ',
+    el('b',{},String(value)),total?el('span',{class:'muted'},` (${(100*value/total).toFixed(1)}%)`):'');
+}
+
+// Daily volume: stacked bars (clean/spam/high spam/infected) with a thin
+// quarantined bar beside each day; a click on a day calls onpick(point).
+function stackChart(pts,onpick){
+  const W=Math.max(320,pts.length*34),H=190,pad=24,slot=(W-2*pad)/pts.length;
+  const bw=Math.min(26,slot-6)*0.78,qw=Math.max(2,Math.min(26,slot-6)*0.22);
+  const max=Math.max(1,...pts.map(p=>p.total));
+  const svg=svgEl('svg',{viewBox:`0 0 ${W} ${H}`,class:'bars',width:'100%',height:H});
+  svg.append(svgEl('line',{class:'axis',x1:pad,y1:H-pad,x2:W-4,y2:H-pad}));
+  const sc=v=>(H-2*pad)*v/max;
+  pts.forEach((p,i)=>{
+    const x=pad+i*slot+3;
+    const g=svgEl('g',{class:'pick',tabindex:0,role:'button'});
+    let y=H-pad;
+    DASH_SERIES.forEach(([k,,c])=>{
+      const h=sc(p[k]||0);if(h<=0)return;
+      y-=h;g.append(svgEl('rect',{x,y,width:bw,height:h,fill:c}));
+    });
+    if(!p.total)g.append(svgEl('rect',{x,y:H-pad-1,width:bw,height:1,fill:'var(--line)'}));
+    const qh=sc(p.quarantined||0);
+    if(qh>0)g.append(svgEl('rect',{x:x+bw+1,y:H-pad-qh,width:qw,height:qh,fill:'var(--muted)'}));
+    // full-height hit area so short days are easy to click
+    g.append(svgEl('rect',{x,y:pad,width:bw+qw+1,height:H-2*pad,fill:'transparent'}));
+    g.append(svgEl('title',{},`${p.date}: ${p.total} total\n`+
+      DASH_SERIES.map(([k,l])=>`${l}: ${p[k]||0}`).join('\n')+`\nQuarantined: ${p.quarantined||0}\n(click for the day's breakdown)`));
+    g.onclick=()=>onpick(p);
+    g.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();onpick(p);}};
+    svg.append(g);
+    if(i%Math.ceil(pts.length/8)===0)svg.append(svgEl('text',{x:x+bw/2,y:H-pad+12,'text-anchor':'middle','font-size':9},p.date.slice(5)));
+  });
+  const tot=k=>pts.reduce((a,p)=>a+(p[k]||0),0);
+  const lg=el('div',{class:'legend'},
+    ...DASH_SERIES.map(([k,l,c])=>legendItem(c,l,tot(k))),
+    legendItem('var(--muted)','Quarantined',tot('quarantined')),
+    el('span',{class:'muted'},'· click a day for its breakdown'));
+  return el('div',{},svg,lg);
+}
+
+// One day as a donut of the exclusive categories, with a way back.
+function dayPie(p,onback){
+  const R=78,r=48,C=90;
+  const svg=svgEl('svg',{viewBox:`0 0 ${2*C} ${2*C}`,width:2*C,height:2*C,class:'bars'});
+  const parts=DASH_SERIES.map(([k,l,c])=>({k,l,c,v:p[k]||0})).filter(x=>x.v>0);
+  const sum=parts.reduce((a,x)=>a+x.v,0);
+  const pt=(a,rad)=>[C+rad*Math.sin(a),C-rad*Math.cos(a)];
+  let a0=0;
+  parts.forEach(x=>{
+    const a1=a0+2*Math.PI*x.v/sum;
+    let shape;
+    if(parts.length===1){ // a full ring: two arcs can't describe 360°
+      shape=svgEl('path',{d:`M${C} ${C-R}A${R} ${R} 0 1 1 ${C-0.01} ${C-R}Z M${C} ${C-r}A${r} ${r} 0 1 0 ${C+0.01} ${C-r}Z`,'fill-rule':'evenodd',fill:x.c});
+    } else {
+      const big=a1-a0>Math.PI?1:0;
+      const [x0,y0]=pt(a0,R),[x1,y1]=pt(a1,R),[x2,y2]=pt(a1,r),[x3,y3]=pt(a0,r);
+      shape=svgEl('path',{d:`M${x0} ${y0}A${R} ${R} 0 ${big} 1 ${x1} ${y1}L${x2} ${y2}A${r} ${r} 0 ${big} 0 ${x3} ${y3}Z`,fill:x.c});
+    }
+    shape.append(svgEl('title',{},`${x.l}: ${x.v} (${(100*x.v/sum).toFixed(1)}%)`));
+    svg.append(shape);a0=a1;
+  });
+  svg.append(svgEl('text',{x:C,y:C-2,'text-anchor':'middle','font-size':20,'font-weight':650,class:'pie-total'},String(p.total)));
+  svg.append(svgEl('text',{x:C,y:C+15,'text-anchor':'middle','font-size':10},'messages'));
+  const lg=el('div',{class:'legend col'},
+    ...DASH_SERIES.map(([k,l,c])=>legendItem(c,l,p[k]||0,p.total)),
+    legendItem('var(--muted)','Quarantined',p.quarantined||0,p.total));
+  const back=Object.assign(el('button',{class:'act plain'},'← All days'),{onclick:onback});
+  return el('div',{},el('div',{class:'ctl'},back),
+    el('div',{class:'pie'},p.total?svg:el('div',{class:'empty'},'No messages this day.'),lg));
 }
 
 // First-run setup card: shown on the dashboard until stats flow.
@@ -613,29 +709,22 @@ async function renderSetupCard(v){
   v.append(card);
 }
 
-// vertical bar chart (single series) as inline SVG
-function barChart(data,color){
-  const W=Math.max(320,data.length*34),H=180,pad=24,bw=Math.min(26,(W-2*pad)/data.length-6);
-  const max=Math.max(1,...data.map(d=>d.value));
-  const svg=svgEl('svg',{viewBox:`0 0 ${W} ${H}`,class:'bars',width:'100%',height:H});
-  svg.append(svgEl('line',{class:'axis',x1:pad,y1:H-pad,x2:W-4,y2:H-pad}));
-  data.forEach((d,i)=>{
-    const x=pad+i*((W-2*pad)/data.length)+3, h=(H-2*pad)*d.value/max, y=H-pad-h;
-    const r=svgEl('rect',{x,y,width:bw,height:Math.max(1,h),rx:3,fill:color});
-    r.append(svgEl('title',{},`${d.label}: ${d.value}`));svg.append(r);
-    if(i%Math.ceil(data.length/8)===0) svg.append(svgEl('text',{x:x+bw/2,y:H-pad+12,'text-anchor':'middle','font-size':9},d.label));
-  });
-  return svg;
-}
 // horizontal bars (labeled categories)
-function hbars(data){
+// opts.color(share of max) → bar color; opts.onpick(d) makes each row a link
+function hbars(data,opts={}){
   const max=Math.max(1,...data.map(d=>d.value));
   const wrap=el('div',{});
   data.forEach(d=>{
     const row=el('div',{style:'display:flex;align-items:center;gap:.5rem;margin:.25rem 0'});
-    row.append(el('div',{style:'width:11rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap',class:'muted',title:d.label},d.label));
+    if(opts.onpick){
+      row.classList.add('pick');row.tabIndex=0;row.setAttribute('role','link');
+      row.onclick=()=>opts.onpick(d);
+      row.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();opts.onpick(d);}};
+    }
+    row.append(el('div',{style:'width:11rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap',class:'muted hlabel',title:opts.title?opts.title(d):d.label},d.label));
     const track=el('div',{style:'flex:1;background:var(--line);border-radius:4px;height:14px'});
-    track.append(el('div',{style:`width:${100*d.value/max}%;background:var(--accent);height:100%;border-radius:4px`}));
+    const fill=opts.color?opts.color(d.value/max):'var(--accent)';
+    track.append(el('div',{style:`width:${100*d.value/max}%;background:${fill};height:100%;border-radius:4px`}));
     row.append(track,el('div',{class:'num',style:'width:3rem;text-align:right;font-variant-numeric:tabular-nums'},String(d.value)));
     wrap.append(row);
   });
@@ -798,7 +887,7 @@ async function renderMessages(){
 
   // search + refresh controls
   const sbar=el('div',{class:'ctl'});
-  const fsel=el('select');[['from','From'],['to','To'],['subject','Subject'],['id','Message ID'],['ip','Client IP']].forEach(([val,lbl])=>fsel.append(el('option',{value:val,...(val===msgF.field?{selected:'selected'}:{})},lbl)));
+  const fsel=el('select');[['from','From'],['from_domain','Sender domain'],['to','To'],['subject','Subject'],['id','Message ID'],['ip','Client IP']].forEach(([val,lbl])=>fsel.append(el('option',{value:val,...(val===msgF.field?{selected:'selected'}:{})},lbl)));
   const stxt=el('input',{placeholder:'search…',value:msgF.text,style:'width:16rem'});
   stxt.onkeydown=e=>{if(e.key==='Enter')doSearch();};
   function doSearch(){msgF.field=fsel.value;msgF.text=stxt.value.trim();msgF.offset=0;renderMessages();}
