@@ -944,9 +944,18 @@ async function renderMessages(){
   const detail=el('div',{class:'card',style:'display:none'});
   card.append(info,t);v.append(detail);
 
+  let loadSeq=0; // a slower, older response never overwrites a newer one
   async function loadList(){
+    const seq=++loadSeq;
     const q=`status=${msgF.status}&field=${msgF.field}&text=${encodeURIComponent(msgF.text)}&days=${msgF.days}&offset=${msgF.offset}&limit=${msgLimit()}`;
+    // throbber: in place of the table on the first load, beside the page
+    // info (with the current rows dimmed) on a reload
+    const busy=el('span',{class:'throbber',role:'status','aria-label':'Loading messages'});
+    if(!t.rows.length)t.append(el('tr',{},el('td',{class:'empty'},busy,' Loading messages…')));
+    else{info.querySelector('.throbber')?.remove();info.prepend(busy);t.classList.add('loading');}
     const data=await api('/api/messages?'+q);
+    if(seq!==loadSeq)return;
+    t.classList.remove('loading');
     t.innerHTML='';info.innerHTML='';
     if(!data||!data.available){t.append(el('tr',{},el('td',{class:'empty'},'No data yet — check the setup card on the Dashboard.')));return;}
     const L=msgLimit();const total=data.total||0,page=Math.floor(msgF.offset/L)+1,pages=Math.max(1,Math.ceil(total/L));

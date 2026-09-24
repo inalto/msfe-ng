@@ -1244,6 +1244,32 @@
     gap: 1.5rem;
     flex-wrap: wrap;
   }
+  /* loading indicator (Messages list) */
+  .throbber {
+    display: inline-block;
+    width: 0.9rem;
+    height: 0.9rem;
+    margin-right: 0.4rem;
+    vertical-align: -0.15rem;
+    border: 2px solid var(--line);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: throb 0.7s linear infinite;
+  }
+  @keyframes throb {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .throbber {
+      animation-duration: 2s;
+    }
+  }
+  table.loading {
+    opacity: 0.55;
+    transition: opacity 0.15s;
+  }
   .empty {
     color: var(--muted);
     padding: 1.5rem 0;
