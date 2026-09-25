@@ -380,7 +380,9 @@ async function showSender(addr){
     Object.assign(el('button',{class:'act'},d.addr_blacklisted?'Remove address from blacklist':'Blacklist this address'),
       {onclick:()=>apply(addr,'black',!!d.addr_blacklisted)}),
     Object.assign(el('button',{class:'act plain'},d.addr_whitelisted?'Remove address from whitelist':'Whitelist this address'),
-      {onclick:()=>apply(addr,'white',!!d.addr_whitelisted)}));
+      {onclick:()=>apply(addr,'white',!!d.addr_whitelisted)}),
+    Object.assign(el('button',{class:'act danger',title:'An auto-ban match rule: block every message from this address and ban the IP that sends it (csf)'},'Ban rule…'),
+      {onclick:()=>{m.close();banRuleEditor({id:0,enabled:true,field:'from',matcher:'contains',pattern:addr,block:true,ban_secs:86400,comment:'from the sender view'});}}));
   m.body.append(row);
   if(dom){
     const drow=el('div',{class:'ctl',style:'flex-wrap:wrap'});
@@ -394,6 +396,33 @@ async function showSender(addr){
         'Lists are global and take effect immediately (rules are regenerated and MailScanner reloaded). Manage them all in the Lists tab.'));
   }
   m.body.append(out);
+}
+
+// Raw headers with every IP address and email address clickable: an IP opens
+// the client-IP modal (history, location, csf ban), an address the sender
+// modal (history, black/white list, ban rule). Message-ID / References /
+// In-Reply-To values look like addresses but are not, so they stay plain.
+const HDR_TOKEN=/(?<![\d.])(\[?(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\]?)(?![\d.])|(\[IPv6:[0-9a-f:.]+\]|\[[0-9a-f]{0,4}(?::[0-9a-f]{0,4}){2,7}\])|([A-Za-z0-9._%+=-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)/gi;
+const HDR_NOT_ADDR=/^(message-id|references|in-reply-to|dkim-signature|arc-|x-ms-exchange|resent-message-id|content-id|x-google-)/i;
+function headersView(text,style){
+  const pre=el('pre',{class:'log hdrlinks',style:style||'max-height:20rem'});
+  let field='';
+  String(text||'').split('\n').forEach((line,i,all)=>{
+    const m=line.match(/^([A-Za-z0-9-]+):/);if(m)field=m[1];
+    const plain=HDR_NOT_ADDR.test(field);
+    let last=0;
+    line.replace(HDR_TOKEN,(tok,v4,v6,mail,off)=>{
+      if(plain&&mail)return tok;
+      if(v4&&/^(0\.|127\.|255\.)/.test(v4.replace('[','')))return tok;
+      pre.append(line.slice(last,off));
+      const ip=(v4||v6||'').replace(/^\[(IPv6:)?/i,'').replace(/\]$/,'');
+      const a=el('a',{class:'iplink',title:mail?'Sender history, lists, ban rule':'IP details, location, history, firewall ban'},tok);
+      a.onclick=e=>{e.stopPropagation();mail?showSender(mail):showIp(ip);};
+      pre.append(a);last=off+tok.length;return tok;
+    });
+    pre.append(line.slice(last)+(i<all.length-1?'\n':''));
+  });
+  return pre;
 }
 
 // ---- client IP: activity, reverse DNS, csf status and blocking ---------------
@@ -1049,7 +1078,9 @@ async function renderMessageView(id){
     hc.append(ht);
   }
 
-  if(d.headers){const hc=el('div',{class:'card'},el('h2',{},'Headers'),el('pre',{class:'log',style:'max-height:20rem'},d.headers));v.append(hc);}
+  if(d.headers){const hc=el('div',{class:'card'},el('h2',{},'Headers'),
+    el('div',{class:'muted',style:'font-size:.78rem;margin-bottom:.3rem'},'IP and email addresses are links: history, location, lists, firewall ban and ban rules.'),
+    headersView(d.headers));v.append(hc);}
 
   // Source + rendered views (quarantined only — the body isn't stored otherwise)
   const vc=el('div',{class:'card'},el('h2',{},'Message content'));v.append(vc);
@@ -1919,7 +1950,8 @@ async function renderQuarantine(){
     const m=modal(`${e.id} — ${fmtD(e.date)}`);
     m.body.append(el('div',{class:'muted',style:'font-size:.8rem;margin-bottom:.5rem'},'Message headers as stored in the quarantine.'));
     const pre=el('pre',{class:'log'},'Loading…');m.body.append(pre);
-    pre.textContent=await api('/api/quarantine/message?date='+e.date+'&id='+encodeURIComponent(e.id),{raw:true})||'(no output)';
+    const txt=await api('/api/quarantine/message?date='+e.date+'&id='+encodeURIComponent(e.id),{raw:true})||'(no output)';
+    pre.replaceWith(headersView(txt,'max-height:60vh'));
   }
   async function load(){
     table.innerHTML='';table.append(el('tr',{},el('td',{class:'empty'},'Loading…')));

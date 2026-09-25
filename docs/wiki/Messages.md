@@ -40,7 +40,13 @@ filename/content rule that matched — as logged from the current plugin
 onwards), spam report and RBL report, the SpamAssassin **component scores**
 (rule, score, description), the **header
 IPs** from the `Received:` chain (only the last one outside your network can
-be trusted) and the full **headers**.
+be trusted) and the full **headers**. In the headers every IP address and
+email address is a link: an IP opens the client-IP view (history, reverse DNS,
+location, **csf ban** of the address or its /24 or /16), an address opens the
+sender view (history, black/white list for the address or its domain, and
+**Ban rule…** — an auto-ban match rule that blocks mail from it and bans the
+IP that sends it). Message-ID, References and similar headers stay plain; the
+Quarantine tab's header viewer links the same way.
 
 **Message content** (needs a stored copy — quarantine or archive):
 - **View source** — the raw message, escaped, in a new tab.
