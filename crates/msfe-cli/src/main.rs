@@ -42,6 +42,8 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
         ("db", _) => Some(NONE),
         ("autoban", Some("run")) => Some(DRY),
         ("autoban", _) => Some(NONE),
+        ("report", Some("list")) => Some(&["--ip", "--limit", "--json"]),
+        ("report", _) => Some(&["--category", "--comment", "--dry-run", "--json"]),
         ("legacy", _) => Some(NONE),
         ("engine", _) => Some(NONE),
         ("service", Some("spool-repair")) => Some(DRY),
@@ -120,6 +122,7 @@ fn usage_of(cmd: &str) -> &'static str {
         "mailscanner" => "msfe-ng mailscanner <status|enable-logging|disable-logging>",
         "legacy" => "msfe-ng legacy decommission [--run]",
         "autoban" => "msfe-ng autoban <status|run [--dry-run]|rules>",
+        "report" => "msfe-ng report <ip> [--category <id|name>]... [--comment <text>] [--dry-run] [--json] | report list [--ip <ip>] [--limit n] [--json]",
         "upgrade" => "msfe-ng upgrade [--check]",
         "doctor" => "msfe-ng doctor [--fix | --apply <check name> | --all | ack <check name> [--days <n> | --forever] [--note <text>] | unack <check name> | acks]",
         "resolver" => "msfe-ng resolver <status|install>",
@@ -185,6 +188,7 @@ fn main() -> ExitCode {
         "engine" => cmd_engine(args.get(1).map(String::as_str)),
         "legacy" => cmd_legacy(args.get(1).map(String::as_str)),
         "autoban" => cmd_autoban(args.get(1).map(String::as_str)),
+        "report" => cmd_report(sub, rest),
         "doctor" => {
             if matches!(sub, Some("ack" | "unack" | "acks")) {
                 return cmd_doctor_ack(sub.unwrap_or_default(), rest);
@@ -879,6 +883,199 @@ fn cmd_housekeeping() -> ExitCode {
 /// per the queue_clean_* rules, relocate misfiled spool files, and send
 /// Telegram alerts for queue growth, stuck scanning and per-account sending
 /// bursts. `--dry-run` previews everything.
+/// `msfe-ng report <ip> …` / `msfe-ng report list …`: a manual AbuseIPDB
+/// report of one address, and the history of those sent. Exit 0 sent (or
+/// already reported, or a valid dry run), 1 refused or failed, 2 usage.
+fn cmd_report(sub: Option<&str>, rest: &[String]) -> ExitCode {
+    use msfe_core::json::Json;
+    use msfe_core::report::{self, Outcome};
+    let usage = || {
+        eprintln!("usage: {}", usage_of("report"));
+        ExitCode::from(2)
+    };
+    let cfg = Config::load(&config_path());
+    if sub == Some("list") {
+        let (mut ip, mut limit, mut json) = (None, 50usize, false);
+        let mut it = rest.iter();
+        while let Some(a) = it.next() {
+            match a.as_str() {
+                "--ip" => match it.next() {
+                    Some(v) => ip = Some(msfe_core::csf::normalize_ip(v)),
+                    None => return usage(),
+                },
+                "--limit" => match it.next().and_then(|v| v.parse().ok()) {
+                    Some(n) => limit = n,
+                    None => return usage(),
+                },
+                "--json" => json = true,
+                _ => return usage(),
+            }
+        }
+        let rows = report::history(&cfg, ip.as_deref(), limit);
+        if json {
+            println!(
+                "{}",
+                Json::Array(rows.iter().map(report::LogEntry::to_json).collect())
+            );
+            return ExitCode::SUCCESS;
+        }
+        if rows.is_empty() {
+            println!("no reports sent yet ({})", report::log_file(&cfg).display());
+        }
+        for e in &rows {
+            let cats: Vec<String> = e.categories.iter().map(u8::to_string).collect();
+            println!(
+                "{}  {}  [{}]  {}{}",
+                {
+                    let d = msfe_core::civil::Date::from_unix(e.at);
+                    format!(
+                        "{:04}-{:02}-{:02} {:02}:{:02} UTC",
+                        d.y,
+                        d.m,
+                        d.d,
+                        e.at % 86_400 / 3_600,
+                        e.at % 3_600 / 60
+                    )
+                },
+                e.ip,
+                cats.join(","),
+                e.outcome,
+                if e.detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", e.detail)
+                }
+            );
+        }
+        return ExitCode::SUCCESS;
+    }
+    let Some(ip) = sub else {
+        return usage();
+    };
+    let (mut cats, mut comment, mut dry, mut json) = (Vec::new(), None, false, false);
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--category" => {
+                let Some(v) = it.next() else {
+                    return usage();
+                };
+                for part in v.split(',').filter(|p| !p.trim().is_empty()) {
+                    match report::parse_category(part) {
+                        Some(id) if !cats.contains(&id) => cats.push(id),
+                        Some(_) => {}
+                        None => {
+                            eprintln!(
+                                "msfe-ng report: unknown category '{part}' (one of: {})",
+                                report::CATEGORIES
+                                    .iter()
+                                    .map(|c| format!("{} {}", c.id, c.name))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            );
+                            return ExitCode::from(2);
+                        }
+                    }
+                }
+            }
+            "--comment" => match it.next() {
+                Some(v) => comment = Some(v.trim().to_string()),
+                None => return usage(),
+            },
+            "--dry-run" => dry = true,
+            "--json" => json = true,
+            _ => return usage(),
+        }
+    }
+    if cats.is_empty() {
+        cats = report::DEFAULT_CATEGORIES.to_vec();
+    }
+    let r = report::Report {
+        ip: msfe_core::csf::normalize_ip(ip),
+        comment: comment.unwrap_or_else(|| report::default_comment(&cats, None)),
+        categories: cats,
+    };
+    let names: Vec<String> = r
+        .categories
+        .iter()
+        .filter_map(|id| report::category(*id))
+        .map(|c| format!("{} {}", c.id, c.name))
+        .collect();
+    if dry {
+        if let Err(e) = report::validate_request(&r) {
+            eprintln!("msfe-ng report: {e}");
+            return ExitCode::from(1);
+        }
+        let configured = !cfg.abuseipdb_key.trim().is_empty();
+        if json {
+            println!(
+                "{}",
+                Json::Object(vec![
+                    ("dry_run".into(), Json::Bool(true)),
+                    ("ip".into(), Json::str(&r.ip)),
+                    (
+                        "categories".into(),
+                        Json::Array(r.categories.iter().map(|c| Json::Int(*c as i64)).collect()),
+                    ),
+                    ("comment".into(), Json::str(&r.comment)),
+                    ("configured".into(), Json::Bool(configured)),
+                ])
+            );
+        } else {
+            println!("dry run — nothing sent");
+            println!("ip:         {}", r.ip);
+            println!("categories: {}", names.join(", "));
+            println!("comment:    {}", r.comment);
+            if !configured {
+                println!("note: abuseipdb_key is not set — a real report would be refused");
+            }
+        }
+        return ExitCode::SUCCESS;
+    }
+    let outcome = report::send(&cfg, &r);
+    if !matches!(outcome, Outcome::Refused(_)) {
+        if let Err(e) = report::log_append(&cfg, &report::LogEntry::new(&r, &outcome)) {
+            eprintln!(
+                "msfe-ng report: cannot write {}: {e}",
+                report::log_file(&cfg).display()
+            );
+        }
+    }
+    let ok = matches!(outcome, Outcome::Reported { .. } | Outcome::AlreadyReported);
+    if json {
+        println!(
+            "{}",
+            Json::Object(vec![
+                ("ok".into(), Json::Bool(ok)),
+                ("ip".into(), Json::str(&r.ip)),
+                ("outcome".into(), Json::str(outcome.as_str())),
+                ("detail".into(), Json::str(outcome.detail())),
+            ])
+        );
+    } else {
+        match &outcome {
+            Outcome::Reported { score } => println!(
+                "{} reported to AbuseIPDB ({}){}",
+                r.ip,
+                names.join(", "),
+                score
+                    .map(|s| format!(" — confidence score now {s}"))
+                    .unwrap_or_default()
+            ),
+            Outcome::AlreadyReported => println!(
+                "{} was already reported within the last 15 minutes — nothing sent again",
+                r.ip
+            ),
+            Outcome::Refused(e) | Outcome::Failed(e) => eprintln!("msfe-ng report: {e}"),
+        }
+    }
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
 /// `msfe-ng autoban <status|run [--dry-run]|rules>`: the minute cron's
 /// command, its state, and the match rules.
 fn cmd_autoban(sub: Option<&str>) -> ExitCode {
@@ -3097,6 +3294,10 @@ COMMANDS:
     housekeeping        Prune old mail-log rows (cleanmysql retention)
     monitor [--dry-run] Auto-clean the delivery queue, fix misfiled spool files, send Telegram alerts (cron)
     autoban <status|run [--dry-run]|rules>   Temporary csf bans for spam sources and match rules (cron: every minute)
+    report <ip> [--category <id|name>]... [--comment <text>] [--dry-run] [--json]
+                        Report one address to AbuseIPDB (manual; categories 10,19 by default; the comment is
+                        public; needs abuseipdb_key; --dry-run validates and prints without sending)
+    report list [--ip <ip>] [--limit n] [--json]   Reports sent so far, newest first (backup_dir/reports.jsonl)
     engine migrate-legacy [--run]     ConfigServer MailScanner → the MailScanner RPM (preflight without --run)
     legacy decommission [--run]       Remove ConfigServer's MSFE front-end only, backed up first (preflight without --run)
     exim <status|enable-scanning|disable-scanning>   Toggle MailScanner scanning

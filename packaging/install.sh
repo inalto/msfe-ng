@@ -146,6 +146,10 @@ alert_queue_size = 0
 alert_scan_stuck_mins = 0
 alert_burst_per_hour = 0
 alert_cooldown_mins = 60
+
+# AbuseIPDB API key (Config → Telegram alerts card): manual reports from the
+# client-IP view and msfe-ng report. Secret; empty = reporting off.
+abuseipdb_key = ""
 EOF
     chmod 0640 "$CONFDIR/config.toml"
 fi

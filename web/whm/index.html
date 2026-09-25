@@ -484,6 +484,77 @@ async function showIp(raw){
   m.body.append(el('h2',{style:'font-size:.9rem;margin:.9rem 0 .3rem'},'Firewall (ConfigServer csf)'));
   const out=el('pre',{class:'log',style:'max-height:12rem'},d.csf||'');
   m.body.append(out);
+
+  // Report to AbuseIPDB — manual only: what AbuseIPDB knows, the categories,
+  // the public comment, this address's history. Loaded after the rest (the
+  // check is a third-party request).
+  const repBox=el('div',{},el('div',{class:'muted'},'Loading…'));
+  m.body.append(el('h2',{style:'font-size:.9rem;margin:.9rem 0 .3rem'},'Report to AbuseIPDB'),repBox);
+  const REP={ready:false,cats:[],ta:null,names:{},hist:null};
+  const alsoChk=el('input',{type:'checkbox',id:'abuserep'});
+  const alsoWrap=el('span',{style:'display:none'},alsoChk,el('label',{for:'abuserep',class:'muted'},' also report to AbuseIPDB'));
+  const repDate=s=>new Date(s*1000).toISOString().slice(0,16).replace('T',' ');
+  const repLine=r=>r&&r.ok
+    ?(r.outcome==='already_reported'?'AbuseIPDB: already reported within the last 15 minutes — not sent again'
+      :'AbuseIPDB: reported'+(r.score!=null?` (confidence score now ${r.score} %)`:''))
+    :'AbuseIPDB: '+((r&&r.error)||'no response');
+  function repHistRow(h){
+    return el('tr',{},el('td',{class:'mono'},repDate(h.at)),
+      el('td',{},(h.categories||[]).map(c=>REP.names[c]||c).join(', ')),
+      el('td',{},h.outcome.replace('_',' ')+(h.detail?' — '+h.detail:'')));
+  }
+  function repAddHistory(r){
+    if(!REP.hist||!r||!r.outcome)return; // refusals (400) never reached AbuseIPDB and are not logged
+    const h={at:Math.floor(Date.now()/1000),categories:REP.cats.filter(c=>c.checked).map(c=>+c.value),
+      outcome:r.ok?r.outcome:'failed',detail:r.ok?(r.score!=null?'confidence score '+r.score:''):(r.error||'')};
+    REP.hist.style.display='';REP.hist.querySelector('tbody').prepend(repHistRow(h));
+  }
+  async function sendReport(){
+    const categories=REP.cats.filter(c=>c.checked).map(c=>+c.value);
+    if(!categories.length)return {error:'choose at least one category'};
+    return api('/api/ip/report',{method:'POST',body:{ip,categories,comment:REP.ta.value.trim()}});
+  }
+  api('/api/ip/report?ip='+encodeURIComponent(ip)).then(rp=>{
+    repBox.innerHTML='';
+    if(!rp||rp.error){repBox.append(el('div',{class:'muted'},(rp&&rp.error)||'no response'));return;}
+    (rp.categories||[]).forEach(c=>REP.names[c.id]=c.name);
+    if(!rp.configured){repBox.append(el('div',{class:'muted'},'Set the AbuseIPDB API key in Settings to report addresses'));return;}
+    if(!rp.reportable){repBox.append(el('div',{class:'muted'},rp.reason||'This address cannot be reported.'));return;}
+    const c=rp.check;
+    let known;
+    if(c){
+      known=c.total_reports>0
+        ?`AbuseIPDB: confidence ${c.score} %, ${c.total_reports} report(s)`+(c.last_reported?', last '+c.last_reported.slice(0,10):'')
+        :'Not known to AbuseIPDB (no reports in 90 days)';
+      [c.usage_type,c.isp,c.domain,c.whitelisted?'whitelisted by AbuseIPDB':''].filter(Boolean).forEach(x=>known+=' · '+x);
+    }else known='AbuseIPDB lookup failed: '+(rp.check_error||'no answer');
+    const cbox=el('div',{class:'ctl',style:'flex-wrap:wrap;gap:.2rem .9rem'});
+    (rp.categories||[]).forEach(cat=>{
+      const cb=el('input',{type:'checkbox',id:'abcat'+cat.id,value:String(cat.id),...(cat.default?{checked:'checked'}:{})});
+      REP.cats.push(cb);
+      cbox.append(el('span',{title:cat.hint},cb,el('label',{for:'abcat'+cat.id},' '+cat.name)));
+    });
+    const ta=el('textarea',{class:'mono',rows:'2',spellcheck:'false',maxlength:'1024',style:'width:100%'});
+    ta.value=rp.default_comment||'';REP.ta=ta;
+    const cnt=el('span',{class:'muted',style:'font-size:.78rem'});
+    const upd=()=>{cnt.textContent=`${ta.value.length} / 1024`;};ta.oninput=upd;upd();
+    const go=el('button',{class:'act'},'Report now');
+    go.onclick=async()=>{
+      go.disabled=true;
+      const r=await sendReport();
+      go.disabled=false;
+      out.textContent+=(out.textContent?'\n':'')+repLine(r);
+      repAddHistory(r);
+      toast(r&&r.ok?(r.outcome==='already_reported'?'Already reported in the last 15 minutes':'Reported to AbuseIPDB'):'Report failed — see output');
+    };
+    const hist=el('table',{style:(rp.history||[]).length?'margin-top:.4rem':'display:none;margin-top:.4rem'},el('tbody'));
+    (rp.history||[]).forEach(h=>hist.querySelector('tbody').append(repHistRow(h)));
+    REP.hist=hist;REP.ready=true;alsoWrap.style.display='';
+    repBox.append(el('div',{class:'muted',style:'margin-bottom:.3rem'},known),cbox,ta,
+      el('div',{class:'muted',style:'font-size:.78rem;margin:.2rem 0 .4rem'},cnt,
+        ' — the comment is public on AbuseIPDB: never put addresses, names or domains of your users in it. The same address can be reported once every 15 minutes.'),
+      el('div',{class:'ctl'},go),hist);
+  });
   if(!d.csf_available)return;
 
   const msel=el('select');
@@ -513,6 +584,11 @@ async function showIp(raw){
       if(confirm('This network is wider than /24. Block it anyway?'))return doBan(true);
     }
     toast(r&&r.ok?'Blocked '+tgt:'Block failed — see output');
+    if(r&&r.ok&&REP.ready&&alsoChk.checked){
+      const rr=await sendReport();
+      out.textContent+='\n'+repLine(rr);
+      repAddHistory(rr);
+    }
   }
   const ban=Object.assign(el('button',{class:'act danger'},'Block in firewall'),{onclick:()=>doBan(false)});
   const unban=Object.assign(el('button',{class:'act plain'},'Unblock'),{onclick:async()=>{
@@ -523,7 +599,7 @@ async function showIp(raw){
     toast(r&&r.ok?'Unblocked':'Nothing removed');
   }});
   m.body.append(el('div',{class:'ctl',style:'flex-wrap:wrap;margin-top:.5rem'},msel,hsel,cin),
-    el('div',{class:'ctl'},ban,unban,rchk,el('label',{for:'csfrestart',class:'muted'},'restart csf after the change')));
+    el('div',{class:'ctl',style:'flex-wrap:wrap'},ban,unban,rchk,el('label',{for:'csfrestart',class:'muted'},'restart csf after the change'),alsoWrap));
 }
 
 let policy=null; // {settings:{}, whitelist:[], blacklist:[]}
@@ -3830,18 +3906,22 @@ async function renderConfig(){
     ['alert_cooldown_mins','Repeat the same alert at most every (minutes)','number'],
   ];
   tgrid.append(el('label',{class:'field'},'Bot token'+(cconf.telegram_configured?' (set)':''),tok));
+  const abk=el('input',{type:'password',placeholder:cconf.abuseipdb_configured?'(configured — leave empty to keep)':'AbuseIPDB API key','autocomplete':'off'});
+  abk.dataset.tkey='abuseipdb_key';
   TG_FIELDS.forEach(([k,lbl,type])=>{
     const inp=el('input',{type,value:String(cconf[k]??'')});
     if(type==='number'){inp.setAttribute('min','0');}
     inp.dataset.tkey=k;
     tgrid.append(el('label',{class:'field'},lbl,inp));
   });
+  tgrid.append(el('label',{class:'field',title:'Used only when you report an address by hand from the client-IP view (Messages). Create a key in your AbuseIPDB account (API tab).'},
+    'AbuseIPDB API key'+(cconf.abuseipdb_configured?' (configured)':''),abk));
   const tgOut=el('pre',{class:'log',style:'display:none'},'');
   const tSave=el('button',{class:'act'},'Save alert settings');
   tSave.onclick=async()=>{
     const changes={};
     tgrid.querySelectorAll('[data-tkey]').forEach(i=>{
-      if(i.dataset.tkey==='telegram_bot_token'&&!i.value.trim())return; // empty = keep existing
+      if((i.dataset.tkey==='telegram_bot_token'||i.dataset.tkey==='abuseipdb_key')&&!i.value.trim())return; // empty = keep existing
       changes[i.dataset.tkey]=i.value.trim();
     });
     const r=await api('/api/service/conf/apply',{method:'POST',body:{which:'msfe',changes}});

@@ -106,6 +106,9 @@ pub struct Config {
     pub telegram_bot_token: String,
     /// Telegram chat id the alerts are sent to.
     pub telegram_chat_id: String,
+    /// AbuseIPDB API key, for manual reports from the client-IP view.
+    /// Secret: never exposed via the API (only `abuseipdb_configured`).
+    pub abuseipdb_key: String,
     /// Alert when the delivery queue holds at least this many messages (0 = off).
     pub alert_queue_size: u32,
     /// Alert when the oldest scanning-queue message is at least N minutes old (0 = off).
@@ -176,6 +179,7 @@ impl Default for Config {
             autoban_telegram: true,
             telegram_bot_token: String::new(),
             telegram_chat_id: String::new(),
+            abuseipdb_key: String::new(),
             alert_queue_size: 0,
             alert_scan_stuck_mins: 0,
             alert_burst_per_hour: 0,
@@ -283,6 +287,7 @@ impl Config {
                 "autoban_telegram" => c.autoban_telegram = truthy(&v),
                 "telegram_bot_token" => c.telegram_bot_token = v,
                 "telegram_chat_id" => c.telegram_chat_id = v,
+                "abuseipdb_key" => c.abuseipdb_key = v,
                 "alert_queue_size" => c.alert_queue_size = v.parse().unwrap_or(0),
                 "alert_scan_stuck_mins" => c.alert_scan_stuck_mins = v.parse().unwrap_or(0),
                 "alert_burst_per_hour" => c.alert_burst_per_hour = v.parse().unwrap_or(0),
@@ -400,6 +405,11 @@ impl Config {
                 ),
             ),
             ("telegram_chat_id".into(), Json::str(&self.telegram_chat_id)),
+            // the AbuseIPDB key is a secret too
+            (
+                "abuseipdb_configured".into(),
+                Json::Bool(!self.abuseipdb_key.trim().is_empty()),
+            ),
             (
                 "alert_queue_size".into(),
                 Json::Int(self.alert_queue_size as i64),

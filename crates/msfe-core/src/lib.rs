@@ -68,6 +68,7 @@ pub mod psl;
 pub mod quarantine;
 pub mod queueview;
 pub mod repchecks;
+pub mod report;
 pub mod resolver;
 pub mod rulefile;
 pub mod rules;

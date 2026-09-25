@@ -301,6 +301,8 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                 .to_string(),
             )
         }
+        ("GET", "/api/ip/report") => ip_report_info(req, cfg),
+        ("POST", "/api/ip/report") => ip_report_send(req, cfg),
         ("GET", "/api/messages/raw") => {
             let id = req.query_param("id").unwrap_or_default();
             if !service::valid_exim_id(&id) {
@@ -2200,6 +2202,162 @@ fn conf_apply(req: &Request, cfg: &Config, config_file: &Path) -> Response {
     }
 }
 
+/// `GET /api/ip/report?ip=`: what the "Report to AbuseIPDB" block needs —
+/// whether a key is set, the categories, the prefilled public comment, this
+/// address's report history and (with a key) what AbuseIPDB already knows.
+fn ip_report_info(req: &Request, cfg: &Config) -> Response {
+    use msfe_core::report;
+    let ip = msfe_core::csf::normalize_ip(&req.query_param("ip").unwrap_or_default());
+    let configured = !cfg.abuseipdb_key.trim().is_empty();
+    let probe = report::Report {
+        ip: ip.clone(),
+        categories: report::DEFAULT_CATEGORIES.to_vec(),
+        comment: String::new(),
+    };
+    let refusal = report::validate_request(&probe).err();
+    let messages_30d = if refusal.is_none() {
+        stats::ip_activity(cfg, &ip, 30)
+            .ok()
+            .and_then(|a| a.get("total").and_then(Json::as_i64))
+            .map(|n| n.max(0) as u64)
+    } else {
+        None
+    };
+    let categories: Vec<Json> = report::CATEGORIES
+        .iter()
+        .map(|c| {
+            Json::Object(vec![
+                ("id".into(), Json::Int(c.id as i64)),
+                ("name".into(), Json::str(c.name)),
+                ("hint".into(), Json::str(c.hint)),
+                (
+                    "default".into(),
+                    Json::Bool(report::DEFAULT_CATEGORIES.contains(&c.id)),
+                ),
+            ])
+        })
+        .collect();
+    let history: Vec<Json> = report::history(cfg, Some(&ip), 20)
+        .iter()
+        .map(|e| {
+            Json::Object(vec![
+                ("at".into(), Json::Int(e.at as i64)),
+                (
+                    "categories".into(),
+                    Json::Array(e.categories.iter().map(|c| Json::Int(*c as i64)).collect()),
+                ),
+                ("outcome".into(), Json::str(&e.outcome)),
+                ("detail".into(), Json::str(&e.detail)),
+            ])
+        })
+        .collect();
+    let mut obj = vec![
+        ("ip".into(), Json::str(&ip)),
+        ("configured".into(), Json::Bool(configured)),
+        ("reportable".into(), Json::Bool(refusal.is_none())),
+        (
+            "reason".into(),
+            Json::str(refusal.clone().unwrap_or_default()),
+        ),
+        ("categories".into(), Json::Array(categories)),
+        (
+            "default_comment".into(),
+            Json::str(report::default_comment(
+                report::DEFAULT_CATEGORIES,
+                messages_30d,
+            )),
+        ),
+        ("history".into(), Json::Array(history)),
+    ];
+    match (configured && refusal.is_none()).then(|| report::check(cfg, &ip)) {
+        Some(Ok(c)) => obj.push(("check".into(), c.to_json())),
+        Some(Err(e)) => {
+            obj.push(("check".into(), Json::Null));
+            obj.push(("check_error".into(), Json::str(e)));
+        }
+        None => obj.push(("check".into(), Json::Null)),
+    }
+    Response::json(200, &Json::Object(obj).to_string())
+}
+
+/// `POST /api/ip/report {ip, categories:[ids], comment}`: send the report.
+/// 200 reported / already reported, 400 refused here, 502 AbuseIPDB failed.
+/// Every answer that reached the API is logged.
+fn ip_report_send(req: &Request, cfg: &Config) -> Response {
+    use msfe_core::report::{self, Outcome};
+    let err = |status: u16, e: &str| {
+        Response::json(
+            status,
+            &Json::Object(vec![("error".into(), Json::str(e))]).to_string(),
+        )
+    };
+    let v = match Json::parse(&req.body) {
+        Ok(v) => v,
+        Err(e) => return err(400, &format!("bad json: {e}")),
+    };
+    let ip = msfe_core::csf::normalize_ip(&v.str_field("ip"));
+    if ip.is_empty() {
+        return err(400, "no address given (ip)");
+    }
+    let mut categories = Vec::new();
+    for c in v.get("categories").and_then(Json::as_array).unwrap_or(&[]) {
+        let id = match c {
+            Json::Str(s) => report::parse_category(s),
+            other => other
+                .as_i64()
+                .and_then(|n| u8::try_from(n).ok())
+                .and_then(|n| report::category(n).map(|c| c.id)),
+        };
+        match id {
+            Some(id) if !categories.contains(&id) => categories.push(id),
+            Some(_) => {}
+            None => return err(400, &format!("unknown category {c}")),
+        }
+    }
+    let r = report::Report {
+        ip,
+        categories,
+        comment: v.str_field("comment").trim().to_string(),
+    };
+    let outcome = report::send(cfg, &r);
+    if let Outcome::Refused(e) = &outcome {
+        return err(400, e);
+    }
+    let _ = report::log_append(cfg, &report::LogEntry::new(&r, &outcome));
+    match outcome {
+        Outcome::Reported { score } => Response::json(
+            200,
+            &Json::Object(vec![
+                ("ok".into(), Json::Bool(true)),
+                ("outcome".into(), Json::str("reported")),
+                (
+                    "score".into(),
+                    score.map(|s| Json::Int(s as i64)).unwrap_or(Json::Null),
+                ),
+            ])
+            .to_string(),
+        ),
+        Outcome::AlreadyReported => Response::json(
+            200,
+            &Json::Object(vec![
+                ("ok".into(), Json::Bool(true)),
+                ("outcome".into(), Json::str("already_reported")),
+                ("score".into(), Json::Null),
+            ])
+            .to_string(),
+        ),
+        // logged, unlike a refusal: the UI adds it to the history
+        Outcome::Failed(e) | Outcome::Refused(e) => Response::json(
+            502,
+            &Json::Object(vec![
+                ("error".into(), Json::str(e)),
+                ("outcome".into(), Json::str("failed")),
+            ])
+            .to_string(),
+        ),
+    }
+}
+
 pub(crate) fn strs(v: &[String]) -> Json {
     Json::Array(v.iter().map(Json::str).collect())
 }
@@ -3140,6 +3298,76 @@ mod tests {
             ..Default::default()
         };
         (d, cfg)
+    }
+
+    fn post(path: &str, body: &str) -> Request {
+        Request {
+            method: "POST".into(),
+            path: path.into(),
+            query: String::new(),
+            body: body.into(),
+            user: String::new(),
+        }
+    }
+
+    #[test]
+    fn ip_report_is_validated_before_any_request() {
+        let d = std::env::temp_dir().join(format!("msfe-api-report-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let mut cfg = Config {
+            backup_dir: d.display().to_string(),
+            ..Default::default()
+        };
+        // no address
+        let (st, body) = send(handle(
+            &post("/api/ip/report", r#"{"categories":[10]}"#),
+            &cfg,
+            &d,
+        ));
+        assert_eq!(st, 400, "{body}");
+        // no key: refused before curl
+        let (st, body) = send(handle(
+            &post(
+                "/api/ip/report",
+                r#"{"ip":"203.0.113.9","categories":[10,19],"comment":"bot"}"#,
+            ),
+            &cfg,
+            &d,
+        ));
+        assert_eq!(st, 400, "{body}");
+        assert!(body.contains("abuseipdb_key"), "{body}");
+        // a private address, key set: still refused before curl
+        cfg.abuseipdb_key = "test-key".into();
+        let (st, body) = send(handle(
+            &post(
+                "/api/ip/report",
+                r#"{"ip":"10.0.0.1","categories":[10],"comment":""}"#,
+            ),
+            &cfg,
+            &d,
+        ));
+        assert_eq!(st, 400, "{body}");
+        assert!(body.contains("private"), "{body}");
+        // an unknown category
+        let (st, body) = send(handle(
+            &post("/api/ip/report", r#"{"ip":"10.0.0.1","categories":[99]}"#),
+            &cfg,
+            &d,
+        ));
+        assert_eq!(st, 400, "{body}");
+        assert!(body.contains("unknown category"), "{body}");
+        // refusals are not logged
+        assert!(msfe_core::report::history(&cfg, None, 10).is_empty());
+        // the info route without a key: no check, the categories, no history
+        cfg.abuseipdb_key.clear();
+        let (st, body) = send(handle(&get("/api/ip/report", "ip=10.0.0.1"), &cfg, &d));
+        assert_eq!(st, 200, "{body}");
+        assert!(body.contains(r#""configured":false"#), "{body}");
+        assert!(body.contains(r#""reportable":false"#), "{body}");
+        assert!(body.contains(r#""id":19,"name":"Bad Web Bot""#), "{body}");
+        assert!(body.contains(r#""history":[]"#), "{body}");
+        assert!(body.contains(r#""check":null"#), "{body}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

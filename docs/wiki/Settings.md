@@ -45,3 +45,8 @@ Stored in `/etc/msfe-ng/config.toml`.
 | Release from address | envelope sender for released mail; blank = `postmaster@<host>` |
 | SpamCop reporting address | enables the **Report to SpamCop** button in the message view |
 | Default reason when blocking an IP | pre-fills the csf comment in the IP modal |
+
+The **AbuseIPDB API key**, for reporting an address from the
+[client-IP view](Messages#report-to-abuseipdb), sits with the Telegram
+settings in the [Config](Config#telegram-alerts) tab (`abuseipdb_key`; a
+secret — the API only says whether it is set).

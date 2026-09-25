@@ -224,3 +224,9 @@ id or a group). Then set thresholds (`0` = off):
 
 **Send test message** confirms the bot and chat id work. The doctor warns if
 Telegram is only half configured.
+
+The same card holds the **AbuseIPDB API key** (`abuseipdb_key`, from the API
+tab of your AbuseIPDB account), used only when you report an address by hand
+from the [client-IP view](Messages#report-to-abuseipdb). Like the bot token it
+is never shown again once saved: the label says *configured*; leave the field
+empty to keep it.

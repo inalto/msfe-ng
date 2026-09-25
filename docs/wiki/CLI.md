@@ -32,6 +32,8 @@ msfe-ng mailscanner <status|enable-logging|disable-logging>
 
 msfe-ng monitor [--dry-run]         auto-clean rules, spool repair, Telegram alerts (cron: every 5 min)
 msfe-ng autoban <status|run [--dry-run]|rules>   temporary csf bans for spam sources and match rules (cron: every minute)
+msfe-ng report <ip> [--category <id|name>]... [--comment <text>] [--dry-run] [--json]   report one address to AbuseIPDB by hand (categories 10 Web Spam + 19 Bad Web Bot by default; the comment is public; --dry-run validates and prints without sending; exit 1 when refused or failed)
+msfe-ng report list [--ip <ip>] [--limit n] [--json]   the reports sent so far, newest first (backup_dir/reports.jsonl)
 msfe-ng digest [--dry-run]          quarantine digests to digest-enabled domains (cron: daily)
 msfe-ng housekeeping                prune old log rows and bodies per retention (cron: nightly)
 msfe-ng selftest                    send GTUBE / EICAR / clean test mail through the MTA
@@ -72,6 +74,7 @@ Seeded by the installer with comments; editable from the [Config](Config) tab.
 | Doctor | `accept_exiscan` (keep cPanel's ClamAV pass in Exim on purpose; the double-scan notice becomes OK) |
 | Auto-ban | `autoban_high_enabled`, `autoban_high_count`, `autoban_high_window_secs`, `autoban_high_ban_secs`, the same `autoban_spam_*`, `autoban_telegram` |
 | Telegram | `telegram_bot_token`, `telegram_chat_id`, `alert_queue_size`, `alert_scan_stuck_mins`, `alert_burst_per_hour`, `alert_cooldown_mins` |
+| AbuseIPDB | `abuseipdb_key` (manual reports from the client-IP view and `msfe-ng report`; secret) |
 | Delivery test | `delivery_runs_per_min`, `delivery_cache_secs`, `delivery_log_days`, `delivery_max_monitors`, `delivery_helo` |
 
 `mailscanner_conf` is seeded with the engine's conf found at install time

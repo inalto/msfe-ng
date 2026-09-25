@@ -103,3 +103,33 @@ key to disable) and the **ConfigServer csf** section: current deny status,
 then **Block in firewall** for the address, its /24 or /16 (wider than /24
 asks twice), permanent or for 1 h / 24 h / 7 days, with a reason that goes into
 `csf.deny`, optionally restarting csf. **Unblock** removes the entry.
+
+### Report to AbuseIPDB
+
+Between the csf status and the block controls, **Report to AbuseIPDB** sends
+the address to [AbuseIPDB](https://www.abuseipdb.com/) — typically a bot that
+posts unsolicited web forms. It is **manual only**: nothing is ever reported
+automatically (auto-ban does not report). The block shows what AbuseIPDB
+already knows (confidence score, number of reports, last report, usage type,
+ISP), the categories (*Web Spam* and *Bad Web Bot* ticked; *Email Spam*,
+*Brute-Force*, *Web App Attack*, *Port Scan* on offer — hover for what each
+means) and a comment prefilled with the category names and, when known, how
+many messages this server saw from the address in the last 30 days.
+
+- What is sent: the single address (never the /24 or /16 you may have
+  blocked), the categories and the comment. **The comment is public** on
+  AbuseIPDB: never put addresses, names or domains of your users in it.
+- **Report now** sends it at once; **also report to AbuseIPDB** next to
+  *Block in firewall* sends it right after a successful block, with the
+  categories and comment of the block above. The outcome is appended to the
+  csf transcript.
+- AbuseIPDB accepts the same address once every **15 minutes**; a second
+  report within that window shows as *already reported*, not as an error.
+- Refused before anything is sent: private, loopback, reserved and this
+  server's own addresses, addresses in `csf.allow` / `csf.ignore`, no
+  category, a comment over 1024 characters.
+- The key is set in the Config tab, *Telegram alerts* card (**AbuseIPDB API
+  key**, `abuseipdb_key`); without it the block only says so.
+- Every report that reached AbuseIPDB is kept in `<backup_dir>/reports.jsonl`
+  (readable by root only) and listed under the block for that address;
+  `msfe-ng report list` shows them all (see [CLI](CLI)).

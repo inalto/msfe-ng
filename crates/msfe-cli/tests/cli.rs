@@ -520,3 +520,87 @@ fn acctdns_checks_its_flags_and_scans_a_fixture_tree() {
     );
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// `report`: flags checked, private addresses refused before anything is
+/// sent, a dry run prints what would go out, the history starts empty. No
+/// test ever reaches AbuseIPDB (no key; dry runs never send).
+#[test]
+fn report_validates_and_dry_runs_without_sending() {
+    let d = tmp("report");
+    std::fs::write(
+        d.join("config.toml"),
+        format!("backup_dir = \"{}\"\n", d.join("backups").display()),
+    )
+    .unwrap();
+    std::fs::create_dir_all(d.join("csf")).unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_msfe-ng"))
+            .args(args)
+            .env("MSFE_NG_CONFIG", d.join("config.toml"))
+            .env("MSFE_NG_CSF_ROOT", d.join("csf"))
+            .env("MSFE_NG_REPORT_DOC_NETS", "1")
+            .env("MSFE_NG_OWN_IPS", "192.0.2.1")
+            .output()
+            .unwrap()
+    };
+    let out = run(&["report", "--bogus"]);
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--bogus") && err.contains("usage:"), "{err}");
+
+    let out = run(&["report", "10.0.0.1", "--dry-run"]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("private"), "{err}");
+
+    let out = run(&["report", "192.0.2.1", "--dry-run"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("own addresses"));
+
+    let out = run(&["report", "203.0.113.9", "--dry-run"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("10 Web Spam, 19 Bad Web Bot"), "{text}");
+    assert!(
+        text.contains("comment:    automated abuse from this address (Web Spam, Bad Web Bot)"),
+        "{text}"
+    );
+    assert!(text.contains("abuseipdb_key is not set"), "{text}");
+
+    let out = run(&[
+        "report",
+        "203.0.113.9",
+        "--category",
+        "brute-force",
+        "--comment",
+        "SMTP AUTH guessing",
+        "--dry-run",
+        "--json",
+    ]);
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains(r#""categories":[18],"comment":"SMTP AUTH guessing""#),
+        "{text}"
+    );
+
+    let out = run(&["report", "203.0.113.9", "--category", "nope", "--dry-run"]);
+    assert_eq!(out.status.code(), Some(2));
+
+    // without a key a real report is refused (exit 1) and nothing is logged
+    let out = run(&["report", "203.0.113.9"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("abuseipdb_key"));
+
+    let out = run(&["report", "list"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("no reports sent yet"));
+    let out = run(&["report", "list", "--json"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "[]");
+    let _ = std::fs::remove_dir_all(&d);
+}
