@@ -31,8 +31,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const REPORT_URL: &str = "https://api.abuseipdb.com/api/v2/report";
-const CHECK_URL: &str = "https://api.abuseipdb.com/api/v2/check";
+const API_BASE: &str = "https://api.abuseipdb.com/api/v2";
+
+/// The API base: `MSFE_NG_ABUSEIPDB_URL` overrides it (a local stand-in for
+/// tests and rehearsals); never anything but AbuseIPDB in production.
+fn api_base() -> String {
+    std::env::var("MSFE_NG_ABUSEIPDB_URL")
+        .ok()
+        .filter(|u| !u.trim().is_empty())
+        .map(|u| u.trim_end_matches('/').to_string())
+        .unwrap_or_else(|| API_BASE.to_string())
+}
 /// AbuseIPDB's limit on the comment of a report.
 pub const MAX_COMMENT: usize = 1024;
 
@@ -382,7 +391,7 @@ pub fn send(cfg: &Config, r: &Report) -> Outcome {
     }
     let cats: Vec<String> = r.categories.iter().map(u8::to_string).collect();
     let lines = vec![
-        format!("url = \"{REPORT_URL}\""),
+        format!("url = \"{}/report\"", api_base()),
         format!("data-urlencode = \"ip={}\"", esc(r.ip.trim())),
         format!("data-urlencode = \"categories={}\"", cats.join(",")),
         format!("data-urlencode = \"comment={}\"", esc(&r.comment)),
@@ -462,7 +471,7 @@ pub fn check(cfg: &Config, ip: &str) -> Result<CheckInfo, String> {
         return Err(format!("{addr} is a private, loopback or reserved address"));
     }
     let lines = vec![
-        format!("url = \"{CHECK_URL}\""),
+        format!("url = \"{}/check\"", api_base()),
         "get".to_string(),
         format!("data-urlencode = \"ipAddress={addr}\""),
         "data-urlencode = \"maxAgeInDays=90\"".to_string(),
