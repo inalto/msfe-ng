@@ -1163,7 +1163,8 @@ async function renderMessageView(id){
   if(d.has_body){
     vc.append(el('div',{class:'ctl'},
       Object.assign(el('button',{class:'act plain'},'View source'),{onclick:()=>openRaw(d.id,'source')}),
-      Object.assign(el('button',{class:'act plain'},'View rendered'),{onclick:()=>openRaw(d.id,'rendered')})));
+      Object.assign(el('button',{class:'act plain'},'View rendered'),{onclick:()=>openRaw(d.id,'rendered')}),
+      Object.assign(el('button',{class:'act plain',title:'Save the stored copy as <id>.eml — opens in any mail client, and the Delivery test can analyse it'},'Download .eml'),{onclick:()=>downloadEml(d.id)})));
     if(d.content)vc.append(el('div',{class:'muted',style:'font-size:.8rem;margin:.4rem 0'},'Preview (first 10KB):'),el('pre',{class:'log',style:'max-height:18rem'},d.content));
   } else {
     vc.append(el('div',{class:'muted'},
@@ -2281,6 +2282,13 @@ const DLV_SCOPES=[['sending','Sending — mail from this address','What receiver
 const DLV_VERDICT_LABEL={fail:'fail',warn:'warning',unknown:'unknown',pass:'pass',na:'n/a'};
 const DLV_ORDER={fail:0,warn:1,unknown:2,pass:3,na:4};
 function textBlob(text,type){return new Blob([text],{type});}
+function b64ToBlobBytes(b64,type){const bin=atob(b64);const u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return new Blob([u],{type});}
+// The stored message as a file the mail client opens (byte for byte, via base64).
+async function downloadEml(id){
+  const r=await api('/api/messages/eml?id='+encodeURIComponent(id));
+  if(!r||r.error||!r.b64){toast((r&&r.error)||'the message body is no longer available');return;}
+  downloadBlob(id+'.eml',b64ToBlobBytes(r.b64,'message/rfc822'));
+}
 function downloadBlob(name,blob){const url=URL.createObjectURL(blob);const a=el('a',{href:url,download:name});document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),10000);}
 function copyBtn(text){const b=el('button',{class:'copybtn',title:'Copy'},'copy');b.onclick=async e=>{e.stopPropagation();try{await navigator.clipboard.writeText(text);b.textContent='copied';setTimeout(()=>b.textContent='copy',1200);}catch(err){toast('Copy failed — select the text instead');}};return b;}
 
@@ -3417,7 +3425,7 @@ async function renderConfig(){
   testBtn.onclick=()=>runTest([]);
 
   // ---- snapshots ------------------------------------------------------------
-  const b64ToBlob=(b64,type)=>{const bin=atob(b64);const u=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);return new Blob([u],{type});};
+  const b64ToBlob=b64ToBlobBytes;
   const expBtn=el('button',{class:'act plain',title:'Download MailScanner\'s etc tree and /etc/msfe-ng as one tar.gz (kept on the server too)'},'Export snapshot');
   const impBtn=el('button',{class:'act plain',title:'Compare a snapshot with this server and import chosen files'},'Import snapshot');
   bar.append(el('span',{style:'flex:1'}),expBtn,impBtn);

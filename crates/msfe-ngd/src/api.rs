@@ -314,6 +314,29 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                 None => Response::text(404, "the message body is no longer available"),
             }
         }
+        // The stored copy, byte for byte, as base64: the panel relays text only,
+        // and the raw route's UTF-8 conversion would alter non-UTF-8 bytes.
+        ("GET", "/api/messages/eml") => {
+            let id = req.query_param("id").unwrap_or_default();
+            if !service::valid_exim_id(&id) {
+                return Response::json(400, r#"{"error":"bad message id"}"#);
+            }
+            match read_full_message(cfg, &id) {
+                Some(bytes) => Response::json(
+                    200,
+                    &Json::Object(vec![
+                        ("id".into(), Json::str(&id)),
+                        ("size".into(), Json::Int(bytes.len() as i64)),
+                        ("b64".into(), Json::str(msfe_core::b64::encode(&bytes))),
+                    ])
+                    .to_string(),
+                ),
+                None => Response::json(
+                    404,
+                    r#"{"error":"the message body is no longer available"}"#,
+                ),
+            }
+        }
         // MIME-decoded HTML fragment for the "rendered" preview: the browser
         // wraps it in a no-network CSP document, so inline images come as data:
         // URIs and the plain-text fallback is pre-escaped.

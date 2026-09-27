@@ -50,6 +50,9 @@ Quarantine tab's header viewer links the same way.
 
 **Message content** (needs a stored copy — quarantine or archive):
 - **View source** — the raw message, escaped, in a new tab.
+- **Download .eml** — the stored copy, byte for byte, as `<message id>.eml`:
+  open it in a mail client, hand it to whoever needs the original, or upload
+  it to the [Delivery test](Delivery-test) (*Analyse a saved message*).
 - **View rendered** — the decoded message in a sandboxed tab, transfer
   encodings and charsets decoded, inline `cid:` images embedded; scripts and
   any network access are blocked by a Content-Security-Policy. Alternative
