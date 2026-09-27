@@ -41,9 +41,13 @@ installing MailScanner along with it and for the first-time setup commands.
 |---|---|
 | ![Service](docs/img/service.png) | ![Queues](docs/img/queues.png) |
 
-| Delivery test | Config |
+| Delivery test | Account DNS |
 |---|---|
-| ![Delivery test](docs/img/delivery-test.png) | ![Config](docs/img/config-files.png) |
+| ![Delivery test](docs/img/delivery-test.png) | ![Account DNS](docs/img/account-dns.png) |
+
+| Config | Quarantine |
+|---|---|
+| ![Config](docs/img/config-files.png) | ![Quarantine](docs/img/quarantine.png) |
 
 More in the **[usage wiki](https://github.com/inalto/msfe-ng/wiki)** — one page
 per tab of the admin UI, plus the end-user panel, CLI and troubleshooting.
