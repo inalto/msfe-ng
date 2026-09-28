@@ -126,7 +126,7 @@ fn holds_message(p: &Path) -> bool {
 /// `-D` data file, a file named `message`, an `.eml`, or the first file that
 /// starts like RFC822 mail. `None` when the directory only holds removed
 /// attachments.
-fn message_file_in(dir: &Path) -> Option<PathBuf> {
+pub fn message_file_in(dir: &Path) -> Option<PathBuf> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
         .flatten()
@@ -146,6 +146,26 @@ fn message_file_in(dir: &Path) -> Option<PathBuf> {
         .or_else(|| files.iter().find(|p| name(p).ends_with(".eml")))
         .or_else(|| files.iter().find(|p| looks_like_message(p)))
         .cloned()
+}
+
+/// The files a quarantine directory holds, `(name, bytes)`, sorted — what is
+/// left of a name-blocked message when only the removed attachment is kept.
+pub fn dir_files(dir: &Path) -> Vec<(String, u64)> {
+    let mut v: Vec<(String, u64)> = std::fs::read_dir(dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_file())
+        .map(|e| {
+            (
+                e.file_name().to_string_lossy().into_owned(),
+                e.metadata().map(|m| m.len()).unwrap_or(0),
+            )
+        })
+        .collect();
+    v.sort();
+    v
 }
 
 /// Do the first bytes read like a mail message (a header line, an mbox

@@ -5,7 +5,10 @@
 What is **actually on disk** in the quarantine directory — including files no
 database row knows about — one line per stored copy with date, message id,
 type (*spam* or held), size, and, when the log has it, sender, recipient,
-subject and score. Click a row to see the stored headers.
+subject and score. Click a row to see the stored headers. A held entry that
+holds only a removed attachment (MailScanner's *Quarantine Whole Message = no*
+keeps just the blocked file) says so, lists the file(s), and shows the headers
+of the archive copy of the message when the archive has one.
 
 **Search** covers the whole quarantine, not only the rows on screen: type a
 sender, recipient, subject fragment or message id (the id is matched on disk,

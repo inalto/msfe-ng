@@ -1656,19 +1656,41 @@ fn quarantine_preview(cfg: &Config, date: &str, id: &str) -> String {
     let Some(path) = quarantine::item_path(Path::new(&cfg.quarantine_dir), date, id) else {
         return "not found".into();
     };
-    // a held message is a directory: prefer its `message` file
+    // a held message is a directory: the message inside it — or, when
+    // MailScanner kept only the removed attachment (`Quarantine Whole
+    // Message = no`), the archive copy, with a note on what is held here
+    let mut note = String::new();
     let file = if path.is_dir() {
-        let named = path.join("message");
-        if named.exists() {
-            named
-        } else {
-            match std::fs::read_dir(&path)
-                .ok()
-                .and_then(|mut rd| rd.next())
-                .and_then(|e| e.ok())
-            {
-                Some(e) => e.path(),
-                None => return "(empty)".into(),
+        match quarantine::message_file_in(&path) {
+            Some(f) => f,
+            None => {
+                let held = quarantine::dir_files(&path);
+                if held.is_empty() {
+                    return "(empty)".into();
+                }
+                let list: Vec<String> = held
+                    .iter()
+                    .map(|(n, b)| format!("{n} ({} KB)", b.div_ceil(1024)))
+                    .collect();
+                note = format!(
+                    "This quarantine entry holds only the removed attachment(s): {} — \
+                     MailScanner keeps the whole message elsewhere (Quarantine Whole \
+                     Message = no).",
+                    list.join(", ")
+                );
+                match quarantine::resolve_body(cfg, id, "") {
+                    Some(m) => {
+                        note.push_str(&format!(
+                            " The message itself is in the {}:\n\n",
+                            quarantine::body_kind(cfg, &m)
+                        ));
+                        m
+                    }
+                    None => {
+                        note.push_str(" No copy of the message itself is on disk.");
+                        return note;
+                    }
+                }
             }
         }
     } else {
@@ -1683,12 +1705,12 @@ fn quarantine_preview(cfg: &Config, date: &str, id: &str) -> String {
                 .collect::<Vec<_>>()
                 .join("\n");
             if headers.is_empty() {
-                "(no headers)".into()
+                format!("{note}(no headers)")
             } else {
-                headers
+                format!("{note}{headers}")
             }
         }
-        Err(e) => format!("cannot read message: {e}"),
+        Err(e) => format!("{note}cannot read message: {e}"),
     }
 }
 
@@ -3290,6 +3312,56 @@ fn apply_override(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A name-blocked message with `Quarantine Whole Message = no`: the
+    /// quarantine directory holds only the removed attachment (binary), the
+    /// archive holds the message. The preview must show the message's headers
+    /// with a note, never the attachment's bytes.
+    #[test]
+    fn quarantine_preview_falls_back_to_the_archive_for_an_attachment_only_entry() {
+        let root = std::env::temp_dir().join(format!("msfe-qprev-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let id = "1wabcd-000000000001-abcd";
+        let held = root.join("quarantine/20260928").join(id);
+        std::fs::create_dir_all(&held).unwrap();
+        std::fs::write(
+            held.join("icon.ico"),
+            [0u8, 0, 1, 0, 8, 0, 16, 16, 0, 0, 255, 254],
+        )
+        .unwrap();
+        let archive = root.join("archive/20260928");
+        std::fs::create_dir_all(&archive).unwrap();
+        std::fs::write(
+            archive.join(format!("{id}-D")),
+            format!("{id}-D\nFrom: a@example.com\nSubject: icon\n\nbody\n"),
+        )
+        .unwrap();
+        let cfg = Config {
+            quarantine_dir: root.join("quarantine").to_string_lossy().into_owned(),
+            archive_dir: root.join("archive").to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let out = quarantine_preview(&cfg, "20260928", id);
+        assert!(
+            out.starts_with(
+                "This quarantine entry holds only the removed attachment(s): icon.ico (1 KB)"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains("in the archive:\n\nFrom: a@example.com\nSubject: icon"),
+            "{out}"
+        );
+        assert!(!out.contains('\u{FFFD}'), "no binary garbage: {out}");
+        // no archive copy: the note alone
+        std::fs::remove_dir_all(root.join("archive")).unwrap();
+        let out = quarantine_preview(&cfg, "20260928", id);
+        assert!(
+            out.ends_with("No copy of the message itself is on disk."),
+            "{out}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn get(path: &str, query: &str) -> Request {
         Request {
