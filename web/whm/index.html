@@ -1114,7 +1114,7 @@ async function renderMessageView(id){
   if(d.virus||d.nameinfected||d.otherinfected)lbl='Infected';
   else if(d.ishighspam)lbl='High Scoring Spam';else if(d.isspam)lbl='Low Scoring Spam';
   else if(d.wl)lbl='Whitelisted';else if(d.bl)lbl='Blacklisted';
-  card.append(el('h2',{},'Message '+d.id,' ',badgeFor(d)));
+  card.append(el('h2',{},'Message ',idCopy(d.id),' ',badgeFor(d)));
 
   const dt=el('table');
   const row=(k,val)=>{if(val!=null&&String(val).trim()!=='')dt.append(el('tr',{},el('th',{style:'width:12rem'},k),el('td',{style:'word-break:break-word'},String(val))));};
@@ -2011,7 +2011,7 @@ async function renderQuarantine(){
       cb.onchange=()=>{cb.checked?SEL.add(key(e)):SEL.delete(key(e));purgeSel.textContent=SEL.size?`Purge selected (${SEL.size})`:'Purge selected';};
       const row=el('tr',{},el('td',{},cb),
         el('td',{},fmtD(e.date)),
-        el('td',{style:'font-family:var(--font-mono,monospace);font-size:.85em'},e.id),
+        el('td',{style:'font-size:.85em'},idCopy(e.id)),
         el('td',{},el('span',{class:'badge',style:'background:'+(e.kind==='spam'?'var(--warning)':'var(--ink2)')},e.kind)),
         el('td',{class:'num'},fmtB(e.size)),
         el('td',{},e.from||el('span',{class:'muted'},'—')),
@@ -2226,7 +2226,7 @@ function queueCard(v,which,title){
       qtable.append(el('tr',{},
         el('td',{},cb),
         el('td',{},fmtAge(m.age_secs)),el('td',{class:'num'},fmtSz(m.size)),
-        el('td',{style:'font-family:var(--font-mono),ui-monospace,monospace;font-size:.72rem'},m.id,
+        el('td',{style:'font-size:.72rem'},idCopy(m.id),
           m.frozen?el('span',{class:'badge',style:'background:var(--serious);margin-left:.4rem'},'frozen'):'',
           m.parsed?'':el('span',{class:'badge',style:'background:var(--muted);margin-left:.4rem',title:'spool header could not be parsed — only age and size are known'},'?')),
         scoreCell(m),
@@ -2290,7 +2290,19 @@ async function downloadEml(id){
   downloadBlob(id+'.eml',b64ToBlobBytes(r.b64,'message/rfc822'));
 }
 function downloadBlob(name,blob){const url=URL.createObjectURL(blob);const a=el('a',{href:url,download:name});document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),10000);}
-function copyBtn(text){const b=el('button',{class:'copybtn',title:'Copy'},'copy');b.onclick=async e=>{e.stopPropagation();try{await navigator.clipboard.writeText(text);b.textContent='copied';setTimeout(()=>b.textContent='copy',1200);}catch(err){toast('Copy failed — select the text instead');}};return b;}
+// A message id you can click to copy (rows keep their own click: the copy stops the event).
+// Clipboard with a fallback for pages the browser does not trust with navigator.clipboard (plain http).
+async function copyText(text){
+  try{if(navigator.clipboard&&window.isSecureContext){await navigator.clipboard.writeText(text);return true;}}catch(e){}
+  try{const ta=el('textarea',{style:'position:fixed;left:-9999px;top:0',readonly:'readonly'});ta.value=text;document.body.append(ta);ta.select();const ok=document.execCommand('copy');ta.remove();return ok;}catch(e){return false;}
+}
+function idCopy(id,extraClass){
+  const s=el('span',{class:'idcopy mono'+(extraClass?' '+extraClass:''),title:'Click to copy the message id',role:'button',tabindex:'0'},id);
+  const go=async e=>{e.stopPropagation();e.preventDefault();if(await copyText(id))toast('Copied '+id);else toast('Copy failed — select the text instead');};
+  s.onclick=go;s.onkeydown=e=>{if(e.key==='Enter'||e.key===' ')go(e);};
+  return s;
+}
+function copyBtn(text){const b=el('button',{class:'copybtn',title:'Copy'},'copy');b.onclick=async e=>{e.stopPropagation();if(await copyText(text)){b.textContent='copied';setTimeout(()=>b.textContent='copy',1200);}else toast('Copy failed — select the text instead');};return b;}
 
 // Renders (and re-renders incrementally) a report into `into`.
 function deliveryRenderer(into){
@@ -2584,7 +2596,7 @@ async function renderDeliveryTest(v){
     const r=await api('/api/delivery/testmail/last');
     if(!r||r.error)return;
     tmRenderer.reset();tmRenderer.add(r.checks||[]);
-    tmStatus.textContent=`${r.from} → ${r.to} · tag ${r.tag}${r.id?' · Exim id '+r.id:''} · ${fmtTime(r.finished)}`;
+    tmStatus.innerHTML='';tmStatus.append(`${r.from} → ${r.to} · tag ${r.tag}`);if(r.id)tmStatus.append(' · Exim id ',idCopy(r.id));tmStatus.append(` · ${fmtTime(r.finished)}`);
   }
   function tmFollow(){
     clearInterval(dlvMailTimer);

@@ -924,6 +924,16 @@
     margin: 0;
     max-height: 10rem;
   }
+  .idcopy {
+    cursor: copy;
+    border-bottom: 1px dotted var(--muted);
+  }
+  .idcopy:hover,
+  .idcopy:focus-visible {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+    outline: none;
+  }
   .copybtn {
     border: 1px solid var(--line);
     background: var(--surface);

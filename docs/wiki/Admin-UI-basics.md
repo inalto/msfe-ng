@@ -12,6 +12,9 @@ every tab is described on its own wiki page.
   the pills at the top: *Address test* (the
   [delivery test](Delivery-test) for one address) and *Account DNS*
   ([SPF, DKIM and DMARC for every hosted domain](Account-DNS)).
+- **Message ids** (the Exim id shown in a message's title, the Quarantine and
+  Queues lists, the test-message line) are click-to-copy: one click puts the
+  id on the clipboard, for a log search or a support ticket.
 - **Health dot** (bottom) — mirrors `msfe-ng doctor`, refreshed every minute:
   green *all systems ok*, amber *N notices*, red *N problems*, plus
   *· N acknowledged* when notices are silenced. **Click it** for the notices
