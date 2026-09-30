@@ -1676,7 +1676,9 @@ async function renderService(){
     suHead.append(
       el('span',{class:'statline'},el('span',{class:'dot',style:'background:'+(bad.length?'var(--warning)':'var(--good)')}),
         el('b',{},bad.length?` ${bad.length} service(s) need attention`:' Everything is running and starts at boot')),
-      el('span',{class:'chip '+(sys==='running'?'ok':sys==='degraded'?'warn':'na'),title:'systemctl is-system-running'},'systemd: '+sys),
+      // "degraded" only means some unit failed — often one stopped on purpose
+      // (cphulkd, say): those are listed below as down, not flagged
+      ['running','degraded'].includes(sys)?'':el('span',{class:'chip na',title:'systemctl is-system-running'},'systemd: '+sys),
       Object.assign(el('button',{class:'act plain',style:'margin-left:auto'},'Check again'),{onclick:loadUnits}));
     const t=el('table',{class:'dm-table'});
     t.append(el('tr',{},...['Service','Unit','State','Since','',''].map(h=>el('th',{},h))));
@@ -1701,9 +1703,9 @@ async function renderService(){
     });
     suBody.append(el('div',{class:'dm-scroll'},t));
     if((r.failed||[]).length){
-      suBody.append(el('div',{class:'note warn',style:'margin-top:.5rem;font-size:.8rem'},
-        'Failed units on this server (systemd is “degraded” because of them; not necessarily mail-related): ',
-        ...r.failed.map((f,i)=>el('span',{},i?', ':'',el('code',{class:'mono'},f.unit),f.description?' ('+f.description+')':''))));
+      suBody.append(el('div',{class:'muted',style:'margin-top:.5rem;font-size:.8rem'},
+        'Down on this server (not needed by mail; may be stopped on purpose): ',
+        ...r.failed.map((f,i)=>el('span',{},i?', ':'',el('code',{class:'mono'},f.unit.replace(/\.service$/,'')),f.description?' ('+f.description+')':''))));
     }
   }
   loadUnits();

@@ -86,9 +86,11 @@ Running services also have **Restart**, except msfe-ng itself: restarting it
 from the page would cut the page off. Use `systemctl restart msfe-ng`. Every
 action asks first and shows the `systemctl` output.
 
-The header shows systemd's overall state (`systemctl is-system-running`). A
-*degraded* state lists the failed units on the server, which are often not
-mail-related (for example cPanel's greylisting daemon).
+Other services that are stopped or failed on the server are listed under the
+table as **down**, without a warning. They are not needed by mail and are often
+stopped on purpose (cPHulk, for example). systemd calls this state *degraded*;
+the page does not raise it. The header shows systemd's state only when it is
+something else, such as *starting* or *maintenance*.
 
 A MailScanner set up by hand is often left **not enabled at boot**. It runs
 until the next reboot, and then mail waits unscanned in the queue. The

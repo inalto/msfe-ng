@@ -1954,14 +1954,18 @@ fn cmd_service_units(sub: Option<&str>, rest: &[String]) -> ExitCode {
         println!("{}", units::report_json(&r));
         return ExitCode::SUCCESS;
     }
-    println!(
-        "systemd: {}",
-        if r.system.is_empty() {
-            "unknown"
-        } else {
-            &r.system
-        }
-    );
+    // "degraded" only means some unit failed, often one stopped on purpose
+    // (cphulkd, say); those are listed as down below, not flagged
+    if !matches!(r.system.as_str(), "running" | "degraded") {
+        println!(
+            "systemd: {}",
+            if r.system.is_empty() {
+                "unknown"
+            } else {
+                &r.system
+            }
+        );
+    }
     let mut bad = false;
     for u in &r.units {
         let mark = match u.verdict {
@@ -1999,7 +2003,7 @@ fn cmd_service_units(sub: Option<&str>, rest: &[String]) -> ExitCode {
         );
     }
     for (unit, desc) in &r.failed {
-        println!("  failed on this host: {unit} — {desc}");
+        println!("  down on this host: {unit} — {desc}");
     }
     if bad {
         println!("fix: msfe-ng service unit <name> enable-now   (or the Service tab)");
