@@ -234,6 +234,34 @@ pub fn attachments(raw: &[u8]) -> Vec<(String, Vec<u8>)> {
     out
 }
 
+/// Every non-multipart part of a raw message, named or not, as
+/// `(media type, decoded file name or "", transfer-decoded bytes)`.
+pub fn leaf_parts(raw: &[u8]) -> Vec<(String, String, Vec<u8>)> {
+    fn walk(e: &Entity, out: &mut Vec<(String, String, Vec<u8>)>) {
+        if !e.children.is_empty() {
+            for c in &e.children {
+                walk(c, out);
+            }
+            return;
+        }
+        let name = e
+            .params
+            .get("name")
+            .cloned()
+            .or_else(|| {
+                header(&e.headers, "content-disposition")
+                    .map(|d| parse_content_type(&d).1)
+                    .and_then(|p| p.get("filename").cloned())
+            })
+            .map(|n| crate::queueview::decode_rfc2047(&n))
+            .unwrap_or_default();
+        out.push((e.ctype.clone(), name, e.body.clone()));
+    }
+    let mut out = Vec::new();
+    walk(&parse_entity(raw, 0), &mut out);
+    out
+}
+
 /// True when an alternative branch (e.g. `multipart/related`) holds HTML.
 fn contains_html(e: &Entity) -> bool {
     e.ctype == "text/html" || e.children.iter().any(contains_html)

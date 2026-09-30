@@ -634,7 +634,8 @@ let dlvTimer=null; // Delivery-test run poller; cleared on every tab switch
 let dlvInboxTimer=null; // diagnostic inbox poller
 let dlvMailTimer=null; // outbound test-message job poller
 let dlvAcctTimer=null; // Account DNS scan poller; cleared on every tab switch
-let DLV_VIEW='test'; // which view of the Delivery tab: 'test' | 'accounts'
+let dlvDmarcTimer=null; // DMARC report fetch poller; cleared on every tab switch
+let DLV_VIEW='test'; // which view of the Delivery tab: 'test' | 'accounts' | 'dmarc'
 let DLV_PREFILL=null; // {address, run} set by other tabs before opening the Delivery test tab
 // Open the Delivery test tab for an address and start the run at once.
 function deliveryTestFor(address){
@@ -646,7 +647,7 @@ function deliveryTestFor(address){
 $('#tabs').addEventListener('click',e=>{
   const b=e.target.closest('button');if(!b)return;
   clearInterval(logTimer);logTimer=null;
-  clearInterval(cfgJobTimer);clearInterval(dlvTimer);dlvTimer=null;clearInterval(dlvInboxTimer);dlvInboxTimer=null;clearInterval(dlvMailTimer);dlvMailTimer=null;clearInterval(dlvAcctTimer);dlvAcctTimer=null;clearInterval(jrnTimer);jrnTimer=null;
+  clearInterval(cfgJobTimer);clearInterval(dlvTimer);dlvTimer=null;clearInterval(dlvInboxTimer);dlvInboxTimer=null;clearInterval(dlvMailTimer);dlvMailTimer=null;clearInterval(dlvAcctTimer);dlvAcctTimer=null;clearInterval(dlvDmarcTimer);dlvDmarcTimer=null;clearInterval(jrnTimer);jrnTimer=null;
   clearInterval(msgTimer);msgTimer=null;
   clearInterval(dashTimer);dashTimer=null;
   document.querySelectorAll('#tabs button').forEach(x=>x.setAttribute('aria-selected',x===b));
@@ -730,9 +731,12 @@ function legendItem(color,label,value,total){
 
 // Daily volume: stacked bars (clean/spam/high spam/infected) with a thin
 // quarantined bar beside each day; a click on a day calls onpick(point).
-function stackChart(pts,onpick){
+// opts.series ([key,label,color]…) stacks other categories, without the
+// quarantined bar; opts.hint replaces the legend's closing hint.
+function stackChart(pts,onpick,opts={}){
+  const SERIES=opts.series||DASH_SERIES,quar=!opts.series;
   const W=Math.max(320,pts.length*34),H=190,pad=24,slot=(W-2*pad)/pts.length;
-  const bw=Math.min(26,slot-6)*0.78,qw=Math.max(2,Math.min(26,slot-6)*0.22);
+  const bw=Math.min(26,slot-6)*(quar?0.78:1),qw=quar?Math.max(2,Math.min(26,slot-6)*0.22):0;
   const max=Math.max(1,...pts.map(p=>p.total));
   const svg=svgEl('svg',{viewBox:`0 0 ${W} ${H}`,class:'bars',width:'100%',height:H});
   svg.append(svgEl('line',{class:'axis',x1:pad,y1:H-pad,x2:W-4,y2:H-pad}));
@@ -741,17 +745,17 @@ function stackChart(pts,onpick){
     const x=pad+i*slot+3;
     const g=svgEl('g',{class:'pick',tabindex:0,role:'button'});
     let y=H-pad;
-    DASH_SERIES.forEach(([k,,c])=>{
+    SERIES.forEach(([k,,c])=>{
       const h=sc(p[k]||0);if(h<=0)return;
       y-=h;g.append(svgEl('rect',{x,y,width:bw,height:h,fill:c}));
     });
     if(!p.total)g.append(svgEl('rect',{x,y:H-pad-1,width:bw,height:1,fill:'var(--line)'}));
-    const qh=sc(p.quarantined||0);
+    const qh=quar?sc(p.quarantined||0):0;
     if(qh>0)g.append(svgEl('rect',{x:x+bw+1,y:H-pad-qh,width:qw,height:qh,fill:'var(--muted)'}));
     // full-height hit area so short days are easy to click
     g.append(svgEl('rect',{x,y:pad,width:bw+qw+1,height:H-2*pad,fill:'transparent'}));
     g.append(svgEl('title',{},`${p.date}: ${p.total} total\n`+
-      DASH_SERIES.map(([k,l])=>`${l}: ${p[k]||0}`).join('\n')+`\nQuarantined: ${p.quarantined||0}\n(click for the day's breakdown)`));
+      SERIES.map(([k,l])=>`${l}: ${p[k]||0}`).join('\n')+(quar?`\nQuarantined: ${p.quarantined||0}`:'')+`\n(${opts.hint||"click for the day's breakdown"})`));
     g.onclick=()=>onpick(p);
     g.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();onpick(p);}};
     svg.append(g);
@@ -759,9 +763,9 @@ function stackChart(pts,onpick){
   });
   const tot=k=>pts.reduce((a,p)=>a+(p[k]||0),0);
   const lg=el('div',{class:'legend'},
-    ...DASH_SERIES.map(([k,l,c])=>legendItem(c,l,tot(k))),
-    legendItem('var(--muted)','Quarantined',tot('quarantined')),
-    el('span',{class:'muted'},'· click a day for its breakdown'));
+    ...SERIES.map(([k,l,c])=>legendItem(c,l,tot(k))),
+    quar?legendItem('var(--muted)','Quarantined',tot('quarantined')):'',
+    el('span',{class:'muted'},'· '+(opts.hint||'click a day for its breakdown')));
   return el('div',{},svg,lg);
 }
 
@@ -946,6 +950,77 @@ async function renderSettings(){
     else toast(r.error||'Save failed');
   };
   pc.append(psave);v.append(pc);
+  renderFootersCard(v);
+}
+
+// Message footers: what MailScanner writes into delivered mail (clean-mail
+// footer, unscanned note, removed-attachment warning) — off with a backup of
+// the settings and footer texts, or a backup put back.
+async function renderFootersCard(v){
+  const fc=el('div',{class:'card',id:'footers-card'},el('h2',{},'Message footers'),
+    el('div',{class:'muted',style:'margin-bottom:.6rem;font-size:.8rem'},
+      'MailScanner can write into the body of the mail it delivers: a “scanned by MailScanner, believed to be clean” footer, a note on mail it did not scan, a warning where it removed an attachment. Switch them off and recipients get the message as it was sent. Subject tags ({Spam?}) and X-MailScanner headers are not affected; mail already delivered keeps its footer.'));
+  v.append(fc);
+  const body=el('div',{},el('div',{class:'muted'},'Loading…'));fc.append(body);
+  const out=el('pre',{class:'log',style:'display:none;max-height:14rem'});
+  async function draw(){
+    const st=await api('/api/footers');
+    body.innerHTML='';
+    if(!st||st.error){body.append(el('div',{class:'note warn'},(st&&st.error)||'cannot read the MailScanner configuration'));return;}
+    body.append(el('div',{class:'statline',style:'margin-bottom:.5rem'},
+      el('span',{class:'dot',style:'background:'+(st.on?'var(--warning)':'var(--good)')}),
+      el('b',{},st.on?' MailScanner writes into delivered mail':' Delivered mail is left as sent')));
+    const t=el('table');
+    t.append(el('tr',{},...['Directive','Now','Adds'].map(h=>el('th',{},h))));
+    (st.directives||[]).forEach(d=>t.append(el('tr',{},
+      el('td',{class:'mono',style:'white-space:nowrap'},d.key),
+      el('td',{},!d.known?el('span',{class:'chip na'},'not in this version'):el('span',{class:'chip '+(d.on?'warn':'ok')},d.on?'on':'off'),
+        el('div',{class:'muted mono',style:'font-size:.72rem'},d.value+(d.file?' · '+d.file.replace(/^ms:/,''):' · engine default'))),
+      el('td',{class:'muted',style:'font-size:.8rem'},d.what))));
+    body.append(t);
+    const sig=(st.templates||[]).find(x=>/inline\.sig\.txt$/.test(x.path)&&x.text);
+    if(sig)body.append(el('details',{style:'margin:.5rem 0'},el('summary',{class:'muted',style:'font-size:.8rem'},'The footer text now in use ('+sig.path+')'),el('pre',{class:'log',style:'max-height:10rem'},sig.text)));
+    const ctl=el('div',{class:'ctl',style:'flex-wrap:wrap;margin-top:.4rem'});
+    if(st.on){
+      const off=el('button',{class:'act'},'Remove footers');
+      off.onclick=async()=>{
+        const list=(st.directives||[]).filter(d=>d.on).map(d=>'• '+d.key+' = no').join('\n');
+        if(!confirm('Stop MailScanner writing into delivered mail?\n\n'+list+'\n\nA backup of these settings and of the footer texts is kept first, so they can be put back. MailScanner restarts.'))return;
+        off.disabled=true;out.style.display='';out.textContent='▶ backing up and switching off…';
+        const r=await api('/api/footers/off',{method:'POST'});
+        off.disabled=false;
+        out.textContent=((r&&r.transcript)||[(r&&r.error)||'no response']).join('\n');
+        toast(r&&r.ok?'Footers removed — new mail is delivered as sent':'Not changed — see the output');
+        draw();
+      };
+      ctl.append(off);
+    }
+    body.append(ctl);
+    const bk=st.backups||[];
+    if(bk.length){
+      const bt=el('table',{style:'margin-top:.6rem'});
+      bt.append(el('tr',{},...['Backup','Was on',''].map(h=>el('th',{},h))));
+      bk.forEach(b=>{
+        const go=el('button',{class:'act plain'},'Put back');
+        go.disabled=!b.applied;
+        go.title=b.applied?'Restore these settings and footer texts':'This backup was never applied (the switch-off failed)';
+        go.onclick=async()=>{
+          if(!confirm('Put the footers back as they were on '+fmtTime(b.at)+'?\n\n'+(b.was_on||[]).join(', ')+'\n\nThe settings and any footer text changed since are restored; MailScanner restarts.'))return;
+          go.disabled=true;out.style.display='';out.textContent='▶ restoring…';
+          const r=await api('/api/footers/restore',{method:'POST',body:{stamp:b.stamp}});
+          go.disabled=false;
+          out.textContent=((r&&r.transcript)||[(r&&r.error)||'no response']).join('\n');
+          toast(r&&r.ok?'Footers put back':'Not restored — see the output');
+          draw();
+        };
+        bt.append(el('tr',{},el('td',{},fmtTime(b.at),b.applied?'':el('span',{class:'muted'},' (unused)')),
+          el('td',{class:'muted',style:'font-size:.8rem'},(b.was_on||[]).join(', ')||'—'),el('td',{},go)));
+      });
+      body.append(el('div',{class:'muted',style:'font-size:.8rem;margin-top:.8rem'},'Backups (kept in /etc/msfe-ng/footers, also in msfe-ng backups):'),bt);
+    }
+  }
+  fc.append(out);
+  draw();
 }
 
 // ---- Lists ------------------------------------------------------------------
@@ -2407,7 +2482,309 @@ function dlvChips(summary){
 
 // The tab holds two views: the address test (everything below) and Account
 // DNS. The pills switch between them; DLV_VIEW survives a tab switch.
-const DLV_VIEWS=[['test','Address test'],['accounts','Account DNS']];
+// ---- Delivery → DMARC reports -------------------------------------------------
+// The receivers' aggregate reports (rua=) read from the DMARC report mailbox:
+// who sends mail as each domain, and whether it passes. Classes come from the
+// daemon (dmarcq): pass; forwarded (lists, forwarders); this server failing;
+// a source marked legitimate failing; suspect — an unknown source failing,
+// i.e. spoofing. Triage moves a source between the last three.
+const DM_SERIES=[['pass','Pass','var(--good)'],['forwarded','Forwarded / lists','var(--muted)'],
+  ['legit_fail','Legitimate, failing','var(--warning)'],['own_fail','This server, failing','var(--serious)'],
+  ['suspect','Suspect (spoofing)','var(--critical)']];
+const DM_CLASS={pass:['ok','pass'],forwarded:['na','forwarded'],legit_fail:['warn','legitimate · failing'],own_fail:['fail','this server · failing'],suspect:['fail','suspect']};
+const DM_STATUS={unknown:'not triaged',legit:'marked legitimate',forwarder:'marked forwarder',abuse:'marked abuse'};
+const DM={days:30,domain:'',day:null,hideFwd:false};
+const dmChip=c=>{const [k,l]=DM_CLASS[c]||['na',c];return el('span',{class:'chip '+k},l);};
+const dmPct=v=>v==null?'—':v+' %';
+// "pass 12 · fail 3" from {pass:12,fail:3}
+const dmMix=m=>Object.entries(m||{}).sort((a,b)=>b[1]-a[1]).map(([k,v])=>k+' '+v).join(' · ');
+// A DMARC record with p= (and pct=) set, the other tags kept in place.
+function dmWithPolicy(rec,p,pct){
+  const parts=String(rec||'v=DMARC1; p=none').split(';').map(x=>x.trim()).filter(Boolean).filter(x=>!/^pct=/i.test(x));
+  const i=parts.findIndex(x=>/^p=/i.test(x));
+  if(i>=0)parts[i]='p='+p;else parts.splice(1,0,'p='+p);
+  if(pct&&pct<100)parts.splice(parts.findIndex(x=>/^p=/i.test(x))+1,0,'pct='+pct);
+  return parts.join('; ');
+}
+// Tighten (or change) a domain's policy with the Account DNS form and cPanel's installer.
+async function dmTighten(domain,p,pct){
+  const m=modal('DMARC policy — '+domain);
+  m.body.append(el('div',{class:'muted'},'Reading the published record…'));
+  const r=await api('/api/acctdns/scan',{method:'POST',body:{domain}});
+  m.body.innerHTML='';
+  const cur=((r&&r.row&&r.row.dmarc)||{}).current||[];
+  const rec=dmWithPolicy(cur[0],p,pct);
+  if(!r||!r.row){
+    m.body.append(el('div',{class:'muted',style:'font-size:.82rem;margin-bottom:.4rem'},
+      (r&&r.error?r.error+' — ':'')+'the DNS of '+domain+' is not managed on this server. Publish this TXT record at _dmarc.'+domain+' where its zone is hosted:'),
+      el('pre',{class:'log'},rec),el('div',{class:'ctl'},copyBtn(rec)));
+    return;
+  }
+  m.body.append(el('div',{class:'muted',style:'font-size:.8rem;margin-bottom:.4rem'},
+    'Proposed from the reports: p='+p+(pct&&pct<100?', pct='+pct:'')+'. Now published: '+(cur[0]||'no record')+'. The change runs cPanel’s own installer.'));
+  const form=acdDmarcForm(domain,rec);
+  const out=el('pre',{class:'log',style:'display:none'});
+  const go=el('button',{class:'act'},'Publish this record');
+  go.onclick=async()=>{
+    if(!confirm('Replace the DMARC record of '+domain+' with:\n\n'+form.value()))return;
+    go.disabled=true;out.style.display='';out.textContent='Publishing…';
+    const res=await api('/api/acctdns/fix',{method:'POST',body:{domain,what:'dmarc',record:form.value()}});
+    go.disabled=false;
+    out.textContent=(((res&&res.actions)||[]).join('\n'))||(res&&res.error)||'no output';
+    toast(res&&res.ok?'DMARC record published':'Publishing failed — see the transcript');
+  };
+  m.body.append(form.wrap,el('div',{class:'ctl',style:'margin-top:.5rem'},go),out);
+}
+// "dom:sel:result;…" → one "dom (sel) result" per line
+const dmAuth=v=>v?String(v).split(';').map(x=>{const [d,s,r]=x.split(':');return d+(s?' ('+s+')':'')+' '+(r||'');}).join('\n'):'—';
+// One source's individual records, in a table.
+function dmRecordsTable(rows,withDay){
+  const t=el('table',{class:'dm-rec'});
+  t.append(el('tr',{},...[withDay?'Day':null,withDay?'Reporter':null,'Source','Msgs','Result','DKIM (selector)','SPF (scope)','From / envelope','Note'].filter(Boolean).map(h=>el('th',{},h))));
+  rows.forEach(x=>{
+    const res=x.dkim==='pass'||x.spf==='pass'?'pass':'fail';
+    t.append(el('tr',{},
+      withDay?el('td',{class:'mono'},x.day):'',withDay?el('td',{},x.org):'',
+      el('td',{class:'mono',style:'white-space:nowrap'},ipLink(x.ip),copyIcon(x.ip,'IP')),
+      el('td',{class:'num'},String(x.count)),
+      el('td',{},el('span',{class:'chip '+(res==='pass'?'ok':'fail')},'dkim '+(x.dkim||'—')+' · spf '+(x.spf||'—')),x.disposition&&x.disposition!=='none'?el('div',{class:'muted',style:'font-size:.74rem'},x.disposition):''),
+      el('td',{class:'mono dm-auth'},dmAuth(x.dkim_auth)),
+      el('td',{class:'mono dm-auth'},dmAuth(x.spf_auth)),
+      el('td',{class:'mono dm-auth'},[x.header_from,x.envelope_from&&x.envelope_from!==x.header_from?'env '+x.envelope_from:'',x.envelope_to?'to '+x.envelope_to:''].filter(Boolean).join('\n')),
+      el('td',{class:'muted',style:'font-size:.76rem'},x.reasons||'')));
+  });
+  if(!rows.length)t.append(el('tr',{},el('td',{colspan:'9',class:'muted'},'No records.')));
+  return el('div',{class:'dm-scroll'},t);
+}
+async function dmShowReport(r){
+  const m=modal(`${r.org} — ${r.domain} — ${r.day}`);
+  m.body.append(el('div',{class:'muted',style:'font-size:.8rem;margin-bottom:.4rem'},
+    `Report ${r.report_id} from ${r.email||r.org} · ${fmtTime(r.begin)} → ${fmtTime(r.end)} · published policy p=${r.p||'?'}${r.pct!=null&&r.pct!==100?' pct='+r.pct:''} · ${r.messages} message(s) in ${r.records} record(s) · stored ${r.imported_at} UTC (${r.origin})`));
+  const rows=await api('/api/dmarc/report?id='+r.id);
+  m.body.append(Array.isArray(rows)?dmRecordsTable(rows,false):el('div',{class:'muted'},(rows&&rows.error)||'cannot load'));
+}
+
+async function renderDmarcReports(v){
+  const card=el('div',{class:'card'},el('h2',{},'DMARC reports — who sends mail as your domains'));
+  card.append(el('div',{class:'muted',style:'font-size:.8rem;margin-bottom:.6rem'},
+    'Every day Google, Microsoft, Yahoo and other receivers report each IP that sent mail with your domain in the From address, and whether it passed SPF and DKIM for that domain. ',
+    el('b',{},'Pass'),' is mail DMARC accepts; ',el('b',{},'this server, failing'),' means something here needs fixing (usually the DKIM key); ',
+    el('b',{},'suspect'),' is an unknown source failing — someone spoofing the domain, or a service of yours that is not authorised yet. Mark each suspect source legitimate, forwarder or abuse.'));
+  v.append(card);
+  const fetchBtn=el('button',{class:'act'},'Fetch now');
+  const stamp=el('span',{class:'muted',style:'font-size:.8rem'},'loading…');
+  const domSel=el('select',{},el('option',{value:''},'all domains'));
+  const daySel=el('select',{},...[[7,'7 days'],[30,'30 days'],[90,'90 days'],[180,'180 days'],[365,'1 year']].map(([n,l])=>el('option',{value:String(n)},l)));
+  daySel.value=String(DM.days);
+  const hideFwd=el('input',{type:'checkbox',...(DM.hideFwd?{checked:'checked'}:{})});
+  const dayChip=el('span',{});
+  card.append(el('div',{class:'ctl'},fetchBtn,stamp,el('span',{style:'margin-left:auto'}),domSel,daySel,
+    el('label',{class:'muted',style:'font-size:.8rem;display:flex;gap:.3rem;align-items:center',title:'Hide sources whose failures are all forwarded mail or mailing lists'},hideFwd,' hide forwarded'),dayChip));
+  const body=el('div',{});v.append(body);
+
+  const st=await api('/api/dmarc/status');
+  function paintStatus(s){
+    stamp.innerHTML='';
+    if(!s||s.error){stamp.textContent=(s&&s.error)||'no response';return;}
+    const l=s.last_run;
+    if(s.running)stamp.append('fetching…');
+    else if(l){
+      const bad=(l.errors||[]).length&&!l.ok;
+      stamp.append(el('span',{class:bad?'chip fail':'',title:(l.errors||[]).join('\n')},
+        `last fetch ${acdAge(Date.now()/1000-l.at)}: ${l.stored} stored`+(l.duplicates?`, ${l.duplicates} known`:'')+(l.skipped?`, ${l.skipped} kept`:'')+(l.failed?`, ${l.failed} failed`:'')+(bad?' — '+l.errors[0]:'')));
+    }else stamp.append('never fetched');
+    if(s.mailbox)stamp.append(el('span',{},' · '+s.mailbox));
+  }
+  paintStatus(st);
+  if(!st||!st.configured){
+    fetchBtn.disabled=true;
+    const go=el('button',{class:'act'},'Set up the mailbox');
+    go.onclick=()=>{document.querySelector('#tabs button[data-tab="config"]').click();setTimeout(()=>{const c=document.getElementById('dmarc-mailbox-card');if(c)c.scrollIntoView({behavior:'smooth'});},400);};
+    body.append(el('div',{class:'card'},el('div',{class:'empty'},'No DMARC report mailbox is configured yet.'),
+      el('div',{class:'muted',style:'font-size:.82rem;margin:.4rem 0'},'Create a mailbox (for example dmarc@ one of your domains), set it as rua=mailto:… in every domain’s DMARC record (Account DNS can do it), and enter its IMAP login in Config → DMARC report mailbox. The first reports arrive within a day.'),
+      el('div',{class:'ctl'},go)));
+    if(!st||!st.db)return;
+  }
+  if(st&&st.db===false){body.append(el('div',{class:'note warn'},'The database is not reachable — reports cannot be stored or shown.'));return;}
+
+  fetchBtn.onclick=async()=>{
+    fetchBtn.disabled=true;
+    const r=await api('/api/dmarc/fetch',{method:'POST'});
+    if(!r||r.error){fetchBtn.disabled=false;toast((r&&r.error)||'cannot start');return;}
+    stamp.textContent='fetching…';
+    clearInterval(dlvDmarcTimer);
+    dlvDmarcTimer=setInterval(async()=>{
+      const s=await api('/api/dmarc/status');
+      if(s&&!s.running){
+        clearInterval(dlvDmarcTimer);dlvDmarcTimer=null;fetchBtn.disabled=false;paintStatus(s);
+        const l=s.last_run||{};
+        toast(l.ok?`${l.stored||0} new report(s) stored`:'Fetch failed: '+((l.errors||[])[0]||'see the status line'));
+        load();
+      }
+    },2000);
+  };
+  if(st&&st.running)fetchBtn.onclick();
+
+  domSel.onchange=()=>{DM.domain=domSel.value;DM.day=null;load();};
+  daySel.onchange=()=>{DM.days=+daySel.value;DM.day=null;load();};
+  hideFwd.onchange=()=>{DM.hideFwd=hideFwd.checked;load();};
+
+  async function load(){
+    const q=`days=${DM.days}`+(DM.domain?'&domain='+encodeURIComponent(DM.domain):'')+(DM.day?'&day='+DM.day:'');
+    body.style.opacity='.6';
+    const d=await api('/api/dmarc/overview?'+q);
+    body.style.opacity='';body.innerHTML='';
+    if(!d||d.error){body.append(el('div',{class:'note warn'},(d&&d.error)||'cannot load the reports'));return;}
+    // the domain list, keeping the current choice
+    domSel.innerHTML='';domSel.append(el('option',{value:''},'all domains'));
+    (d.domain_list||[]).forEach(x=>domSel.append(el('option',{value:x},x)));
+    domSel.value=DM.domain;
+    dayChip.innerHTML='';
+    if(DM.day){const x=el('button',{class:'chip',title:'Show the whole period'},DM.day+' ✕');x.onclick=()=>{DM.day=null;load();};dayChip.append(x);}
+    const s=d.summary||{},c=s.classes||{};
+    if(!s.messages&&!DM.day){
+      body.append(el('div',{class:'card'},el('div',{class:'empty'},'No reports in this period yet.'),
+        el('div',{class:'muted',style:'font-size:.82rem'},'Receivers send one report per domain per day, usually the day after. Check that each domain’s DMARC record has rua=mailto: this mailbox.')));
+      return;
+    }
+    // tiles
+    const tiles=el('div',{class:'tiles'});
+    [[s.messages,'Messages reported','var(--accent)'],[dmPct(s.pass_pct),'DMARC pass','var(--good)'],
+     [c.suspect||0,'Suspect messages','var(--critical)'],[s.suspect_sources||0,'Suspect sources'+(s.new_suspects_7d?` (${s.new_suspects_7d} new this week)`:''),'var(--critical)'],
+     [c.own_fail||0,'This server, failing','var(--serious)'],[s.sources||0,'Sources','var(--muted)'],[s.reporters||0,'Reporters','var(--muted)'],[d.reports||0,'Reports','var(--muted)']]
+      .forEach(([val,lbl,col])=>tiles.append(el('div',{class:'tile'},el('div',{class:'lbl'},el('span',{class:'dot',style:'background:'+col}),lbl),el('div',{class:'val'},String(val)))));
+    body.append(tiles);
+    // daily chart
+    const pts=(d.series||[]).map(x=>Object.assign({date:x.day,total:DM_SERIES.reduce((a,[k])=>a+(x[k]||0),0)},x));
+    const cc=el('div',{class:'card'},el('h2',{},'Messages per day, by result'));
+    cc.append(pts.length?stackChart(pts,p=>{DM.day=p.date;load();},{series:DM_SERIES,hint:'click a day to list only its sources'}):el('div',{class:'empty'},'No data.'));
+    body.append(cc);
+    // reporters + top suspects
+    const row=el('div',{class:'dm-two'});
+    const rc=el('div',{class:'card'},el('h2',{},'Messages by reporter'));
+    rc.append(hbars((d.reporters||[]).slice(0,10).map(r=>({label:r.org,value:r.messages,pass:r.pass_pct})),{title:x=>`${x.label}: ${x.value} message(s), ${dmPct(x.pass)} pass`}));
+    const sus=(d.sources||[]).filter(x=>x.class==='suspect');
+    const sc=el('div',{class:'card'},el('h2',{},'Top suspect sources'));
+    sc.append(sus.length?hbars(sus.slice(0,10).map(x=>({label:x.ip+(x.rdns?' ('+x.rdns+')':''),value:x.failed,src:x})),{color:()=>'var(--critical)',title:x=>x.label+' — '+x.src.domain,onpick:x=>openSource(x.src)}):el('div',{class:'muted'},'No unknown source is failing DMARC. 🎉'));
+    row.append(rc,sc);body.append(row);
+    body.append(domainsCard(d.domains||[]),sourcesCard(d.sources||[]),reportsCard());
+  }
+
+  function domainsCard(list){
+    const card=el('div',{class:'card'},el('h2',{},'Domains — pass rate and policy readiness'));
+    card.append(el('div',{class:'muted',style:'font-size:.8rem;margin-bottom:.4rem'},
+      `A domain is ready for a stricter policy when at least 14 days of reports show its own and its legitimate senders passing 98 % or more, and this server does not fail. Suspect sources are what p=quarantine and p=reject stop.`));
+    const t=el('table',{class:'dm-table'});
+    t.append(el('tr',{},...['Domain','Messages','Pass','Suspect','Published policy','Next step',''].map(h=>el('th',{},h))));
+    list.sort((a,b)=>b.messages-a.messages).forEach(x=>{
+      const rd=x.readiness||{};
+      const act=el('button',{class:'act plain',title:rd.ready?'Open the policy form with the next step filled in':'Open the policy form'},rd.ready?'Tighten policy…':'Change policy…');
+      act.onclick=()=>dmTighten(x.domain,rd.next_p||'none',rd.next_pct||100);
+      t.append(el('tr',{},
+        el('td',{},el('b',{},x.domain)),
+        el('td',{class:'num'},String(x.messages)),
+        el('td',{class:'num'},dmPct(x.pass_pct)),
+        el('td',{class:'num'},x.classes&&x.classes.suspect?el('span',{class:'chip fail'},x.classes.suspect+' from '+x.suspect_sources):'—'),
+        el('td',{class:'mono'},x.p?'p='+x.p+(x.pct!=null&&x.pct!==100?' pct='+x.pct:''):'—'),
+        el('td',{style:'font-size:.8rem'},el('span',{class:'chip '+(rd.ready?'ok':'warn')},rd.ready?'ready':'not yet'),' ',rd.text||''),
+        el('td',{},act)));
+    });
+    card.append(el('div',{class:'dm-scroll'},t));
+    return card;
+  }
+
+  let srcRows=new Map();
+  function openSource(x){const n=srcRows.get(x.ip+'|'+x.domain);if(!n)return;if(!n.open)n.tr.click();n.tr.scrollIntoView({behavior:'smooth',block:'center'});}
+  function sourcesCard(list){
+    const card=el('div',{class:'card'},el('h2',{},'Sources — every IP that sent as your domains'));
+    const filt=el('input',{placeholder:'filter IP, name or domain',style:'max-width:14rem',autocomplete:'off',spellcheck:'false'});
+    const only=el('select',{},el('option',{value:''},'all results'),el('option',{value:'failing'},'failing only'),el('option',{value:'suspect'},'suspect only'));
+    card.append(el('div',{class:'ctl'},filt,only,el('span',{class:'muted',style:'font-size:.78rem'},'click a row for its records and to triage it')));
+    const t=el('table',{class:'dm-table'});
+    t.append(el('tr',{},...['Source','Domain','Result','Messages','DKIM','SPF','Reporters','Last seen'].map(h=>el('th',{},h))));
+    srcRows=new Map();
+    const shown=list.filter(x=>!(DM.hideFwd&&x.class==='forwarded'));
+    shown.forEach(x=>{
+      const tr=el('tr',{class:'dlv-row',style:'cursor:pointer'},
+        el('td',{},el('div',{class:'mono'},ipLink(x.ip),copyIcon(x.ip,'IP'),x.own?el('span',{class:'kb',style:'margin-left:.3rem'},'this server'):''),
+          x.rdns?el('div',{class:'muted',style:'font-size:.74rem;word-break:break-all'},x.rdns):''),
+        el('td',{},x.domain),
+        el('td',{},dmChip(x.class),x.status!=='unknown'?el('div',{class:'muted',style:'font-size:.72rem'},DM_STATUS[x.status]+(x.note?': '+x.note:'')):''),
+        el('td',{class:'num'},x.failed?el('span',{},String(x.messages),el('span',{class:'muted'},' ('+x.failed+' failed)')):String(x.messages)),
+        el('td',{style:'font-size:.76rem'},dmMix(x.dkim)),
+        el('td',{style:'font-size:.76rem'},dmMix(x.spf)),
+        el('td',{style:'font-size:.76rem'},(x.reporters||[]).join(', ')),
+        el('td',{class:'mono',style:'font-size:.76rem'},x.last_seen));
+      const detail=el('tr',{class:'dlv-detail',style:'display:none'},el('td',{colspan:'8'}));
+      const n={tr,detail,x,open:false,text:(x.ip+' '+x.rdns+' '+x.domain).toLowerCase()};
+      srcRows.set(x.ip+'|'+x.domain,n);
+      tr.onclick=e=>{if(e.target.closest('a,button,input,select'))return;n.open=!n.open;detail.style.display=n.open?'':'none';if(n.open)drawSource(n);};
+      t.append(tr,detail);
+    });
+    const empty=el('tr',{style:'display:none'},el('td',{colspan:'8',class:'muted'},'No source matches.'));
+    t.append(empty);
+    const apply=()=>{const q=filt.value.trim().toLowerCase();let vis=0;
+      srcRows.forEach(n=>{const ok=(!q||n.text.includes(q))&&(!only.value||(only.value==='suspect'?n.x.class==='suspect':n.x.class!=='pass'));
+        n.tr.style.display=ok?'':'none';n.detail.style.display=ok&&n.open?'':'none';if(ok)vis++;});
+      empty.style.display=vis?'none':'';};
+    filt.oninput=apply;only.onchange=apply;
+    if(!shown.length)empty.style.display='';
+    card.append(el('div',{class:'dm-scroll'},t));
+    return card;
+  }
+  async function drawSource(n){
+    const x=n.x,td=n.detail.firstChild;td.innerHTML='';
+    const note=el('input',{placeholder:'note (e.g. newsletter platform)',value:x.note||'',style:'min-width:14rem;flex:1'});
+    const all=el('input',{type:'checkbox'});
+    const set=async(status,after)=>{
+      const r=await api('/api/dmarc/source',{method:'POST',body:{ip:x.ip,domain:x.domain,status,note:note.value.trim(),all_domains:all.checked}});
+      if(!r||!r.ok){toast((r&&r.error)||'not saved');return;}
+      toast(status==='unknown'?'Triage cleared':'Marked '+(DM_STATUS[status]||status).replace('marked ',''));
+      if(after)after();
+      load();
+    };
+    const b=(label,cls,title,fn)=>Object.assign(el('button',{class:'act '+cls,title},label),{onclick:fn});
+    const hint=el('div',{class:'muted',style:'font-size:.8rem;margin:.3rem 0'});
+    if(x.own)hint.append('This is this server. A DMARC failure here means the mail was not signed with the key published in DNS, or SPF does not list this IP — check ',el('b',{},x.domain),' in Account DNS.');
+    else if(x.class==='pass')hint.append('This source passes DMARC for '+x.domain+' — it is authorised by SPF or signs with DKIM for the domain.');
+    else hint.append('If this is a service you use (newsletter, invoicing, CRM, a web form), mark it legitimate and authorise it: add its SPF include (or ip'+(x.ip.includes(':')?'6':'4')+':'+x.ip+') to the SPF record of '+x.domain+', or have it sign with DKIM for '+x.domain+'. If you do not know it, it is spoofing your domain — mark it abuse; a stricter DMARC policy makes receivers refuse its mail.');
+    td.append(hint,el('div',{class:'ctl',style:'flex-wrap:wrap'},
+      b('Legitimate','plain','A service of yours: its failures are shown as “legitimate, failing” until it is authorised',()=>set('legit')),
+      b('Forwarder','plain','A mailing list or forwarding service: failures are expected',()=>set('forwarder')),
+      b('Abuse → report…','danger','Mark as abuse and open the IP view to report it to AbuseIPDB or block it',()=>set('abuse',()=>showIp(x.ip))),
+      x.status!=='unknown'?b('Clear','plain','Back to not triaged',()=>set('unknown')):'',
+      note,el('label',{class:'muted',style:'font-size:.78rem;display:flex;gap:.3rem;align-items:center'},all,' for every domain it sent as')));
+    const box=el('div',{class:'muted'},'Loading the records…');td.append(box);
+    const rows=await api(`/api/dmarc/source?ip=${encodeURIComponent(x.ip)}&domain=${encodeURIComponent(x.domain)}&days=${DM.days}`);
+    box.replaceWith(Array.isArray(rows)?dmRecordsTable(rows,true):el('div',{class:'muted'},(rows&&rows.error)||'cannot load'));
+  }
+
+  function reportsCard(){
+    const card=el('details',{class:'card'},el('summary',{},'Stored reports'));
+    const box=el('div',{},el('div',{class:'muted'},'Loading…'));card.append(box);
+    let loaded=false;
+    card.ontoggle=async()=>{
+      if(!card.open||loaded)return;loaded=true;
+      const q=`days=${DM.days}`+(DM.domain?'&domain='+encodeURIComponent(DM.domain):'')+(DM.day?'&day='+DM.day:'');
+      const list=await api('/api/dmarc/reports?'+q);box.innerHTML='';
+      if(!Array.isArray(list)){box.append(el('div',{class:'muted'},(list&&list.error)||'cannot load'));return;}
+      const t=el('table',{class:'dm-table'});
+      t.append(el('tr',{},...['Day','Reporter','Domain','Policy','Records','Messages','Stored'].map(h=>el('th',{},h))));
+      list.forEach(r=>{const tr=el('tr',{style:'cursor:pointer',title:'Open the report'},
+        el('td',{class:'mono'},r.day),el('td',{},r.org),el('td',{},r.domain),
+        el('td',{class:'mono'},r.p?'p='+r.p+(r.pct!=null&&r.pct!==100?' pct='+r.pct:''):'—'),
+        el('td',{class:'num'},String(r.records)),el('td',{class:'num'},String(r.messages)),
+        el('td',{class:'muted',style:'font-size:.76rem'},r.imported_at+(r.origin==='file'?' (file)':'')));
+        tr.onclick=()=>dmShowReport(r);t.append(tr);});
+      if(!list.length)t.append(el('tr',{},el('td',{colspan:'7',class:'muted'},'No reports in this period.')));
+      box.append(el('div',{class:'muted',style:'font-size:.78rem;margin:.3rem 0'},list.length+(list.length>=1000?'+':'')+' report(s)'),el('div',{class:'dm-scroll'},t));
+    };
+    return card;
+  }
+  load();
+}
+
+const DLV_VIEWS=[['test','Address test'],['accounts','Account DNS'],['dmarc','DMARC reports']];
 async function renderDelivery(){
   const v=$('#view');v.innerHTML='';
   const pills=el('div',{class:'dlv-views',role:'tablist','aria-label':'Delivery views'});
@@ -2416,12 +2793,13 @@ async function renderDelivery(){
     b.onclick=()=>{if(DLV_VIEW===id)return;DLV_VIEW=id;
       clearInterval(dlvTimer);dlvTimer=null;clearInterval(dlvInboxTimer);dlvInboxTimer=null;
       clearInterval(dlvMailTimer);dlvMailTimer=null;clearInterval(dlvAcctTimer);dlvAcctTimer=null;
+      clearInterval(dlvDmarcTimer);dlvDmarcTimer=null;
       renderDelivery();};
     pills.append(b);
   });
   const body=el('div',{});
   v.append(pills,body);
-  return DLV_VIEW==='accounts'?renderAcctDns(body):renderDeliveryTest(body);
+  return ({accounts:renderAcctDns,dmarc:renderDmarcReports}[DLV_VIEW]||renderDeliveryTest)(body);
 }
 
 async function renderDeliveryTest(v){
@@ -3981,6 +4359,57 @@ async function renderConfig(){
     toast(r&&r.ok?'Test message sent':'Test failed — see output');
   };
   tc.append(tgrid,el('div',{class:'ctl'},tSave,tTest),tgOut);
+
+  // DMARC report mailbox: where the domains' rua= reports arrive (IMAP);
+  // `msfe-ng dmarc fetch` reads it hourly and Delivery → DMARC reports shows them
+  const dmc=el('div',{class:'card',id:'dmarc-mailbox-card'},el('h2',{},'DMARC report mailbox'),
+    el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},
+      'The mailbox your domains name in their DMARC record (rua=mailto:…). Every hour its reports are read, stored, and the report mails deleted; mails that are not reports are left in place and marked read. Any IMAP server works — a mailbox hosted here (host: this server’s name, port 993) or elsewhere.'));
+  maint.append(dmc);
+  const dgrid=el('div',{class:'grid2'});
+  const dmPass=el('input',{type:'password',placeholder:cconf.dmarc_imap_pass_set?'(configured — leave empty to keep)':'mailbox password','autocomplete':'new-password'});
+  dmPass.dataset.dkey='dmarc_imap_pass';
+  const yesno=(k,val)=>{const s=el('select',{},el('option',{value:'true'},'yes'),el('option',{value:'false'},'no'));s.value=val?'true':'false';s.dataset.dkey=k;return s;};
+  const dIn=(k,type,extra)=>{const i=el('input',{type,value:String(cconf[k]??''),...(extra||{})});i.dataset.dkey=k;return i;};
+  const dHost=dIn('dmarc_imap_host','text',{placeholder:'mail.example.com',autocomplete:'off',spellcheck:'false'});
+  const dUser=dIn('dmarc_imap_user','text',{placeholder:'dmarc@example.com',autocomplete:'off',spellcheck:'false'});
+  const dTls=yesno('dmarc_imap_tls',cconf.dmarc_imap_tls!==false);
+  const dPort=dIn('dmarc_imap_port','number',{min:'1',max:'65535'});
+  dTls.onchange=()=>{if(dPort.value==='993'||dPort.value==='143')dPort.value=dTls.value==='true'?'993':'143';};
+  dgrid.append(
+    el('label',{class:'field'},'IMAP server',dHost),
+    el('label',{class:'field'},'Port',dPort),
+    el('label',{class:'field',title:'yes: implicit TLS (imaps, port 993). no: STARTTLS on port 143 — the login is never sent in clear.'},'TLS from the start (imaps)',dTls),
+    el('label',{class:'field',title:'Turn off only for a server whose certificate does not match the name used, e.g. localhost.'},'Verify the certificate',yesno('dmarc_imap_verify',cconf.dmarc_imap_verify!==false)),
+    el('label',{class:'field'},'User',dUser),
+    el('label',{class:'field'},'Password'+(cconf.dmarc_imap_pass_set?' (set)':''),dmPass),
+    el('label',{class:'field'},'Folder',dIn('dmarc_imap_folder','text',{placeholder:'INBOX',spellcheck:'false'})),
+    el('label',{class:'field',title:'Only mails whose reports were all stored are deleted. no: they stay, and are skipped on the next run because the reports are already stored.'},'Delete report mails once stored',yesno('dmarc_delete_imported',cconf.dmarc_delete_imported!==false)),
+    el('label',{class:'field'},'Keep report data for (days)',dIn('dmarc_retention_days','number',{min:'7',max:'3650'})),
+    el('label',{class:'field',title:'A Telegram message the first time an unknown source (not this server, not marked legitimate) fails DMARC on at least this many messages in one report.'},'Alert on a new spoofing source (Telegram)',yesno('dmarc_alerts',cconf.dmarc_alerts!==false)),
+    el('label',{class:'field'},'…from this many failing messages',dIn('dmarc_alert_min_messages','number',{min:'1'})));
+  const ruaHint=el('div',{class:'muted',style:'font-size:.78rem;margin:.3rem 0 .5rem'});
+  const paintRua=()=>{const u=dUser.value.trim();ruaHint.innerHTML='';if(u.includes('@'))ruaHint.append('Publish in each domain’s DMARC record: ',el('code',{class:'mono'},'rua=mailto:'+u),' ',copyIcon('rua=mailto:'+u,'the tag'),' — a mailbox at another domain also needs that domain’s authorisation record (Account DNS explains).');};
+  dUser.oninput=paintRua;paintRua();
+  const dOut=el('pre',{class:'log',style:'display:none'});
+  const dFields=()=>{const o={};dgrid.querySelectorAll('[data-dkey]').forEach(i=>o[i.dataset.dkey]=i.value.trim());return o;};
+  const dSave=el('button',{class:'act'},'Save mailbox settings');
+  dSave.onclick=async()=>{
+    const changes=dFields();
+    if(!changes.dmarc_imap_pass)delete changes.dmarc_imap_pass; // empty = keep existing
+    const r=await api('/api/service/conf/apply',{method:'POST',body:{which:'msfe',changes}});
+    toast(r&&r.ok?`${r.applied} setting(s) saved`:'Save failed'+(r&&r.error?': '+r.error:''));
+    if(r&&r.ok&&changes.dmarc_imap_pass){dmPass.value='';dmPass.placeholder='(configured — leave empty to keep)';}
+  };
+  const dTest=el('button',{class:'act plain'},'Test connection');
+  dTest.onclick=async()=>{
+    dTest.disabled=true;dOut.style.display='';dOut.textContent='Connecting…';
+    const r=await api('/api/dmarc/test',{method:'POST',body:dFields()});
+    dTest.disabled=false;
+    dOut.textContent=(r.transcript||[r.error||'no response']).join('\n');
+    toast(r&&r.ok?'Logged in':'Connection failed — see output');
+  };
+  dmc.append(dgrid,ruaHint,el('div',{class:'ctl'},dSave,dTest),dOut);
 
   const dbtns=el('div',{class:'ctl',style:'flex-wrap:wrap'});
   const bBackup=el('button',{class:'act'},'Backup now');

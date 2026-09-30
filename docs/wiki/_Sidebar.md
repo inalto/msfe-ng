@@ -16,6 +16,7 @@ Admin tabs
 - [Queues](Queues)
 - [Delivery test](Delivery-test)
   - [Account DNS](Account-DNS)
+  - [DMARC reports](DMARC-reports)
 - [Quarantine](Quarantine)
 - [Config](Config)
 

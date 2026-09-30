@@ -461,7 +461,7 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
                 } else {
                     "Mark Infected Messages = yes — when an attachment is removed, MailScanner inserts an inline warning into the HTML part right after <html>, before <head>; Outlook and Apple Mail render such messages as a wreck".into()
                 },
-                "set Mark Infected Messages = no in MailScanner.conf (Config tab) — the {Filename?} subject tag and the …-Attachment-Warning.txt attachment (Warning Is Attachment = yes) still tell the recipient what was removed and why",
+                "set Mark Infected Messages = no in MailScanner.conf (Config tab), or switch every body insertion off at once with Settings → Message footers (backup kept) — the {Filename?} subject tag and the …-Attachment-Warning.txt attachment (Warning Is Attachment = yes) still tell the recipient what was removed and why",
             )
             .propose(
                 "set Mark Infected Messages = no and restart MailScanner",
@@ -694,6 +694,11 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
     // as the .gz — gunzip fails, the lists stay at whatever the RPM shipped,
     // and only a cron mail full of gzip errors says so.
     out.push(phishing_lists_check(cfg));
+
+    // ---- DMARC aggregate reports (only once a report mailbox is set up) ----
+    if cfg.dmarc_configured() {
+        out.extend(dmarc_checks(cfg));
+    }
 
     // ---- rules dir + legacy front-end -----------------------------------
     let (rules_ok, detail) = rules_dir_verdict(&conf, &cfg.mailscanner_rules_dir);
@@ -1887,6 +1892,115 @@ pub fn razor_verdict(razor_admin: bool, home: bool, identity: bool) -> (bool, St
     (true, "shared home with a registered identity".into())
 }
 
+/// What the DMARC checks look at: the last fetch and the suspects of the week.
+#[derive(Debug, Clone, Default)]
+pub struct DmarcState {
+    /// the last fetch: when, whether the mailbox could be read, its first error
+    pub last: Option<(u64, bool, String)>,
+    pub now: u64,
+    /// (unknown sources failing on ≥ DMARC_SUSPECT_MIN messages, their messages)
+    pub suspects: Option<(u64, u64)>,
+}
+
+/// Cron fetches hourly: three missed runs is a problem.
+const DMARC_FETCH_MAX_AGE_SECS: u64 = 3 * 3600;
+/// Below this, a failing unknown source is noise (a stray forward).
+pub const DMARC_SUSPECT_MIN: u64 = 20;
+
+/// `(ok, detail, fix)` for the last DMARC report fetch.
+pub fn dmarc_fetch_verdict(s: &DmarcState) -> (bool, String, String) {
+    let fix = "check the login with Config → DMARC report mailbox → Test connection, then msfe-ng dmarc fetch".to_string();
+    match &s.last {
+        None => (
+            false,
+            "configured, but no fetch has run yet (cron runs it hourly)".into(),
+            "msfe-ng dmarc fetch".into(),
+        ),
+        Some((_, false, e)) => (
+            false,
+            format!("the last fetch could not read the mailbox: {e}"),
+            fix,
+        ),
+        Some((at, true, _)) if s.now.saturating_sub(*at) > DMARC_FETCH_MAX_AGE_SECS => (
+            false,
+            format!(
+                "the last fetch ran {} h ago — is the msfe-ng cron installed?",
+                s.now.saturating_sub(*at) / 3600
+            ),
+            "check /etc/cron.d/msfe-ng, then msfe-ng dmarc fetch".into(),
+        ),
+        Some((at, true, e)) => (
+            true,
+            format!(
+                "last fetch {} min ago{}",
+                s.now.saturating_sub(*at) / 60,
+                if e.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (with an error: {e})")
+                }
+            ),
+            String::new(),
+        ),
+    }
+}
+
+/// `(ok, detail, fix)` for the unknown sources failing DMARC this week.
+pub fn dmarc_suspect_verdict(s: &DmarcState) -> (bool, String, String) {
+    match s.suspects {
+        Some((0, _)) => (true, "no unknown source failed DMARC on your domains in the last 7 days".into(), String::new()),
+        Some((n, m)) => (
+            false,
+            format!("{n} unknown source(s) sent {m} message(s) as your domains in the last 7 days that failed SPF and DKIM"),
+            "Delivery → DMARC reports: mark each source legitimate (and authorise it in SPF/DKIM) or abuse; a stricter DMARC policy makes receivers refuse the rest".into(),
+        ),
+        None => (true, "no report data readable yet".into(), String::new()),
+    }
+}
+
+fn dmarc_checks(cfg: &Config) -> Vec<Check> {
+    let last = crate::dmarcjob::last_run(cfg).map(|j| {
+        let first_err = j
+            .get("errors")
+            .and_then(|e| e.as_array())
+            .and_then(|a| a.first())
+            .and_then(|e| e.as_str())
+            .unwrap_or("")
+            .to_string();
+        (
+            j.get("at").and_then(|v| v.as_i64()).unwrap_or(0) as u64,
+            matches!(j.get("ok"), Some(crate::json::Json::Bool(true))),
+            first_err,
+        )
+    });
+    let state = DmarcState {
+        last,
+        now: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        suspects: crate::dmarcq::suspect_count(cfg, 7, DMARC_SUSPECT_MIN),
+    };
+    let (ok, detail, fix) = dmarc_fetch_verdict(&state);
+    let (sok, sdetail, sfix) = dmarc_suspect_verdict(&state);
+    vec![
+        check(
+            "DMARC report mailbox fetching",
+            ok,
+            Level::Fail,
+            detail,
+            &fix,
+        ),
+        check(
+            "no unknown sources spoofing your domains",
+            sok,
+            Level::Warn,
+            sdetail,
+            &sfix,
+        ),
+    ]
+}
+
 /// `(ok, detail, fix)` for the phishing-list state.
 pub fn phishing_lists_verdict(s: &PhishingListState) -> (bool, String, String) {
     if !s.enabled {
@@ -2929,6 +3043,32 @@ mod tests {
             detail.contains("5.4.4") && detail.contains("4.100"),
             "{detail}"
         );
+    }
+
+    #[test]
+    fn dmarc_verdicts() {
+        let mut s = DmarcState {
+            now: 100_000,
+            ..Default::default()
+        };
+        assert!(!dmarc_fetch_verdict(&s).0);
+        s.last = Some((100_000 - 600, true, String::new()));
+        let (ok, d, _) = dmarc_fetch_verdict(&s);
+        assert!(ok && d.contains("10 min ago"), "{d}");
+        s.last = Some((100_000 - 5 * 3600, true, String::new()));
+        assert!(dmarc_fetch_verdict(&s).1.contains("5 h ago"));
+        s.last = Some((
+            100_000,
+            false,
+            "login refused: check the user and password".into(),
+        ));
+        let (ok, d, _) = dmarc_fetch_verdict(&s);
+        assert!(!ok && d.contains("login refused"));
+        s.suspects = Some((0, 0));
+        assert!(dmarc_suspect_verdict(&s).0);
+        s.suspects = Some((2, 57));
+        let (ok, d, f) = dmarc_suspect_verdict(&s);
+        assert!(!ok && d.contains("2 unknown source(s) sent 57") && f.contains("DMARC reports"));
     }
 
     #[test]

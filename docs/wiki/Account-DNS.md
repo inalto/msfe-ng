@@ -70,7 +70,7 @@ publishes it. The **DMARC section is a small form** rather than a text box:
 | Policy `p=` | `none` (monitor only — nothing blocked, reports flow), `quarantine` (failing mail goes to spam), `reject` (failing mail is refused). Each choice shows when it is the right one |
 | Subdomains `sp=` | the policy for subdomains without their own record; `reject` is safe when no subdomain sends mail |
 | Apply to `pct=` | the share of failing mail the policy applies to; below 100 only while ramping up |
-| Reports to `rua=` | aggregate report addresses (comma-separated); defaults to `postmaster@<domain>` |
+| Reports to `rua=` | aggregate report addresses (comma-separated); defaults to `postmaster@<domain>`. Point it at the [DMARC report mailbox](DMARC-reports) to see the reports in the *DMARC reports* view |
 | Failure reports `ruf=` | per-message forensic reports; optional, few receivers send them |
 | DKIM / SPF alignment | relaxed (default) or strict |
 

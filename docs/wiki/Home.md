@@ -27,6 +27,7 @@ the discontinued ConfigServer MSFE.
 - [Queues](Queues) — both Exim queues, bulk delete/deliver, spool repair
 - [Delivery test](Delivery-test) — deliverability diagnostic for an address: DNS, SPF/DKIM/DMARC, MX and TLS, MTA-STS/DANE, blocklists; cPanel audit, message/bounce analysis, diagnostic inbox, test message, monitors
 - [Account DNS](Account-DNS) — the second view of the same tab: SPF, DKIM and DMARC for every domain hosted here, in one scan, with repair through cPanel's own installers
+- [DMARC reports](DMARC-reports) — the third view: the receivers' daily DMARC reports read from a mailbox — who sends as your domains, spoofing sources, and when a domain is ready for a stricter policy
 - [Quarantine](Quarantine) — what is on disk, purge
 - [Config](Config) — every MailScanner configuration file with validation, history and a tester; snapshots; DB & Bayes maintenance, queue auto-clean, auto-ban of spam sources (csf) and match rules, Telegram alerts
 

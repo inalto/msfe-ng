@@ -24,3 +24,8 @@ PATH=/usr/bin:/bin:/opt/msfe-ng/bin
 # and the match rules (Config → Auto-ban). Off until enabled in the UI; a
 # no-op in milliseconds while nothing is enabled.
 * * * * * root /opt/msfe-ng/bin/msfe-ng autoban run >/dev/null 2>&1
+
+# DMARC aggregate reports: read the rua= mailbox (Config → DMARC report
+# mailbox), store the reports, delete the imported mails. Receivers send one
+# report per domain per day, so hourly is plenty; a no-op until configured.
+23 * * * * root /opt/msfe-ng/bin/msfe-ng dmarc fetch >/dev/null 2>&1

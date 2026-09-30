@@ -15,6 +15,7 @@ mod acctdns_api;
 mod api;
 mod conf_api;
 mod delivery_api;
+mod dmarc_api;
 mod http;
 mod views;
 

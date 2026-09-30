@@ -50,3 +50,59 @@ The **AbuseIPDB API key**, for reporting an address from the
 [client-IP view](Messages#report-to-abuseipdb), sits with the Telegram
 settings in the [Config](Config#telegram-alerts) tab (`abuseipdb_key`; a
 secret — the API only says whether it is set).
+
+## Message footers
+
+MailScanner can write into the **body** of the mail it delivers:
+
+| Directive | What it adds |
+|---|---|
+| `Sign Clean Messages` | the "This message has been scanned for viruses and dangerous content by MailScanner, and is believed to be clean" footer on clean mail |
+| `Mark Unscanned Messages` | a note on mail it did not scan |
+| `Mark Infected Messages` | an inline warning where it removed an attachment |
+
+The card shows, for each directive:
+- whether it is on;
+- its value;
+- the file it is set in. MailScanner reads `MailScanner.conf` and then
+  `conf.d/*.conf`, and the last one wins; *engine default* means it is not set
+  anywhere.
+
+It also shows the footer text now in use.
+
+**Remove footers** sets each active directive to `no` on the line where it
+takes effect. That can be a `conf.d` file, and a ruleset value such as
+`%rules-dir%/sign.rules` is replaced too. After that, new mail is delivered as
+it was sent. The change goes through the same checked save as the
+[Config](Config) tab: `MailScanner --lint`, a history copy of every file, and
+one restart. If the lint fails, nothing is written.
+
+What is **not** affected:
+- subject tags (`{Spam?}`, `{Filename?}`);
+- the `X-…-MailScanner` headers;
+- the warning *attachment* for a removed file;
+- mail already delivered, which keeps its footer.
+
+**The backup.** Before switching off, the exact lines that were there are
+saved, or the fact that there were none, together with a copy of every footer
+template (`Inline Text/HTML Signature`, `Inline Text/HTML Warning`, in every
+language directory). Backups live in `/etc/msfe-ng/footers/<date-time>/`, so
+`msfe-ng backup` and snapshots include them. The last 10 are kept.
+
+**Put back** restores one backup:
+- each line becomes what it was;
+- a directive that was not set is removed again, so the engine default
+  applies;
+- any footer text changed since is restored too.
+
+A line edited by hand in the meantime is left alone, and the output says so.
+The files come back byte for byte.
+
+From the command line:
+
+```
+msfe-ng footers status [--json]          what is on, where, and the templates
+msfe-ng footers off [--dry-run]          back up, then switch every body insertion off
+msfe-ng footers restore [<backup>]       put a backup back (default: the latest applied one)
+msfe-ng footers backups                  list the backups
+```

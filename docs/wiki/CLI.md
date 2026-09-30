@@ -56,10 +56,15 @@ msfe-ng delivery testmail --from <hosted address> --to <address> [--tag <t>] [--
 msfe-ng delivery monitor <list [--json] | add <address> [--interval-mins n] [--audit] [--ip ..] [--selector ..] | remove <id|address> | run [--dry-run] [--id n]>   scheduled re-tests (history in MySQL, regressions to Telegram)
 msfe-ng acctdns scan [--user <u>] [--domain <d>] [--all] [--json]   SPF, DKIM and DMARC for every domain hosted here (subdomains with --all; exit 1 on a failure, 3 on a non-cPanel host)
 msfe-ng acctdns fix <domain> <spf|dkim|dmarc> [--record <r>] [--json]   install the record through cPanel's own installer (exit 1 when it refused)
+msfe-ng footers <status [--json] | off [--dry-run] | restore [<backup>] [--dry-run] | backups>   the text MailScanner writes into delivered mail: off with a backup, or put back (see Settings → Message footers)
+msfe-ng dmarc fetch [--dry-run] [--keep] [--json]   read the DMARC report mailbox, store the reports, delete the imported mails (cron: hourly)
+msfe-ng dmarc import <file>... [--json]   store DMARC report files (.xml, .xml.gz, .zip) or saved report mails (.eml)
+msfe-ng dmarc <status [--json] | test | prune>   last fetch and stored totals | IMAP login check | drop rows past retention
 ```
 
 Environment: `MSFE_NG_SOCKET` (daemon socket), `MSFE_NG_CONFIG` (config file),
-`MSFE_NG_MIGRATIONS` (migrations dir).
+`MSFE_NG_MIGRATIONS` (migrations dir), `MSFE_NG_DMARC_LOCK` (the DMARC fetch
+lock file, default `/run/msfe-ng-dmarc.lock`).
 
 ## `/etc/msfe-ng/config.toml`
 
@@ -75,6 +80,7 @@ Seeded by the installer with comments; editable from the [Config](Config) tab.
 | Auto-ban | `autoban_high_enabled`, `autoban_high_count`, `autoban_high_window_secs`, `autoban_high_ban_secs`, the same `autoban_spam_*`, `autoban_telegram` |
 | Telegram | `telegram_bot_token`, `telegram_chat_id`, `alert_queue_size`, `alert_scan_stuck_mins`, `alert_burst_per_hour`, `alert_cooldown_mins` |
 | AbuseIPDB | `abuseipdb_key` (manual reports from the client-IP view and `msfe-ng report`; secret) |
+| DMARC reports | `dmarc_imap_host`, `dmarc_imap_port`, `dmarc_imap_tls`, `dmarc_imap_verify`, `dmarc_imap_user`, `dmarc_imap_pass` (secret), `dmarc_imap_folder`, `dmarc_delete_imported`, `dmarc_retention_days`, `dmarc_alerts`, `dmarc_alert_min_messages` — see [DMARC reports](DMARC-reports) |
 | Delivery test | `delivery_runs_per_min`, `delivery_cache_secs`, `delivery_log_days`, `delivery_max_monitors`, `delivery_helo` |
 
 `mailscanner_conf` is seeded with the engine's conf found at install time

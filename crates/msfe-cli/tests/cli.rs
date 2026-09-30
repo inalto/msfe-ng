@@ -604,3 +604,50 @@ fn report_validates_and_dry_runs_without_sending() {
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "[]");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// Cron runs `dmarc fetch` hourly on every host: without a report mailbox it
+/// must say so and succeed, touching nothing.
+#[test]
+fn dmarc_fetch_without_a_mailbox_is_a_quiet_no_op() {
+    let d = tmp("dmarc-none");
+    std::fs::write(d.join("config.toml"), "").unwrap();
+    let out = msfe_ng(&d, &["dmarc", "fetch"]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("no DMARC report mailbox configured"));
+    let out = msfe_ng(&d, &["dmarc", "fetch", "--json"]);
+    assert!(out.status.success() && out.stdout.is_empty(), "{out:?}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn dmarc_flags_and_usage() {
+    let d = tmp("dmarc-flags");
+    std::fs::write(d.join("config.toml"), "").unwrap();
+    let out = msfe_ng(&d, &["dmarc", "fetch", "--delete-everything"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unknown option"));
+    let out = msfe_ng(&d, &["dmarc", "import"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let out = msfe_ng(&d, &["dmarc"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("msfe-ng dmarc <fetch"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn footers_flags_and_usage() {
+    let d = tmp("footers");
+    std::fs::write(d.join("config.toml"), "").unwrap();
+    let out = msfe_ng(&d, &["footers", "off", "--force"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unknown option"));
+    let out = msfe_ng(&d, &["footers"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("msfe-ng footers <status"));
+    let out = msfe_ng(&d, &["footers", "backups"]);
+    assert!(
+        out.status.success() && String::from_utf8_lossy(&out.stdout).contains("no backups"),
+        "{out:?}"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}

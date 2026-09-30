@@ -98,6 +98,12 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
         ("acctdns", Some("scan")) => Some(&["--user", "--domain", "--all", "--json"]),
         ("acctdns", Some("fix")) => Some(&["--record", "--json"]),
         ("acctdns", _) => Some(NONE),
+        ("dmarc", Some("fetch")) => Some(&["--dry-run", "--keep", "--json"]),
+        ("dmarc", Some("import" | "status")) => Some(&["--json"]),
+        ("dmarc", _) => Some(NONE),
+        ("footers", Some("status")) => Some(&["--json"]),
+        ("footers", Some("off" | "restore")) => Some(DRY),
+        ("footers", _) => Some(NONE),
         _ => None,
     }
 }
@@ -132,6 +138,8 @@ fn usage_of(cmd: &str) -> &'static str {
         "conf" => "msfe-ng conf <test [--no-lint] [--json] [--with <id>=<file>]... | test-message <clean|gtube|eicar|file.eml> [--offline] [--json] | grep <text>>",
         "delivery" => "msfe-ng delivery <test <address> [--ip <sending ip>] [--selector <dkim selector>] [--audit] [--days <1-7>] [--json | --html] [--force] | eml <file.eml> [--bounce] [--address <a>] [--ip <ip>] [--selector <s>] [--audit] [--json | --html] | inbox <install [--dry-run] | uninstall [--dry-run] | status | new | poll <token> [--json] | remove <token> | sweep> | testmail --from <local address> --to <address> [--tag <t>] [--follow <secs>] [--json] | monitor <list [--json] | add <address> [--interval-mins n] [--audit] [--ip ..] [--selector ..] [--days n] | remove <id|address> | run [--dry-run] [--id n]>>",
         "acctdns" => "msfe-ng acctdns <scan [--user <account>] [--domain <domain>] [--all] [--json] | fix <domain> <spf|dkim|dmarc> [--record <record>] [--json]>",
+        "footers" => "msfe-ng footers <status [--json] | off [--dry-run] | restore [<backup>] [--dry-run] | backups>",
+        "dmarc" => "msfe-ng dmarc <fetch [--dry-run] [--keep] [--json] | import <file.xml|.gz|.zip|.eml>... [--json] | status [--json] | test | prune>",
         _ => "msfe-ng help",
     }
 }
@@ -222,6 +230,8 @@ fn main() -> ExitCode {
         "snapshot" => cmd_snapshot(sub, rest),
         "delivery" => cmd_delivery(sub, rest),
         "acctdns" => cmd_acctdns(sub, rest),
+        "dmarc" => cmd_dmarc(sub, rest),
+        "footers" => cmd_footers(sub, rest),
         "help" | "--help" | "-h" => {
             print_help();
             ExitCode::SUCCESS
@@ -3031,6 +3041,278 @@ fn cmd_delivery_inbox(rest: &[String]) -> ExitCode {
 /// Account DNS from the shell. `scan` runs the same checks as the Delivery
 /// tab's Account DNS view, but inline in this process: no daemon, no scan
 /// registry, nothing cached — the shell wants the answer, not an id to poll.
+fn cmd_footers(sub: Option<&str>, rest: &[String]) -> ExitCode {
+    use msfe_core::footers;
+    let cfg = Config::load(&config_path());
+    let dry = rest.iter().any(|a| a == "--dry-run");
+    let finish = |r: footers::Report| {
+        for l in &r.lines {
+            println!("{l}");
+        }
+        if r.ok {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(1)
+        }
+    };
+    match sub {
+        Some("status") => {
+            let st = footers::state(&cfg, &config_path());
+            if rest.iter().any(|a| a == "--json") {
+                println!("{}", footers::state_json(&st));
+                return ExitCode::SUCCESS;
+            }
+            if let Some(e) = &st.error {
+                eprintln!("msfe-ng footers: {e}");
+                return ExitCode::from(1);
+            }
+            println!(
+                "{}",
+                if st.on() {
+                    "MailScanner writes into delivered mail:"
+                } else {
+                    "delivered mail is left as sent:"
+                }
+            );
+            for d in &st.dirs {
+                println!(
+                    "  [{}] {} = {}{}",
+                    if !d.known {
+                        "n/a"
+                    } else if d.on() {
+                        "on "
+                    } else {
+                        "off"
+                    },
+                    d.key,
+                    d.effective,
+                    d.found
+                        .as_ref()
+                        .map(|f| format!("  ({})", f.file))
+                        .unwrap_or_else(|| "  (engine default)".into())
+                );
+            }
+            for t in &st.templates {
+                println!("  template {}", t.path.display());
+            }
+            ExitCode::SUCCESS
+        }
+        Some("off") => finish(footers::switch_off(&cfg, &config_path(), dry)),
+        Some("restore") => {
+            let stamp = match rest.iter().find(|a| !a.starts_with('-')) {
+                Some(s) => s.clone(),
+                None => match footers::backups(&config_path())
+                    .into_iter()
+                    .find(|b| b.applied)
+                {
+                    Some(b) => b.stamp,
+                    None => {
+                        eprintln!("msfe-ng footers restore: no backup to restore");
+                        return ExitCode::from(1);
+                    }
+                },
+            };
+            finish(footers::restore(&cfg, &config_path(), &stamp, dry))
+        }
+        Some("backups") => {
+            let b = footers::backups(&config_path());
+            if b.is_empty() {
+                println!("no backups");
+            }
+            for x in b {
+                println!(
+                    "{}  {}{}",
+                    x.stamp,
+                    if x.was_on.is_empty() {
+                        "nothing was on".to_string()
+                    } else {
+                        format!("was on: {}", x.was_on.join(", "))
+                    },
+                    if x.applied { "" } else { "  (unused)" }
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        _ => {
+            eprintln!("usage: {}", usage_of("footers"));
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn cmd_dmarc(sub: Option<&str>, rest: &[String]) -> ExitCode {
+    use msfe_core::dmarcjob;
+    let cfg = Config::load(&config_path());
+    let json = rest.iter().any(|a| a == "--json");
+    let print = |s: &dmarcjob::Summary| {
+        if json {
+            println!("{}", s.to_json());
+            return;
+        }
+        for l in &s.log {
+            println!("{l}");
+        }
+        println!(
+            "{}{} mail(s), {} report(s): {} stored, {} already stored, {} kept, {} failed, {} deleted{}",
+            if s.dry { "[dry run] " } else { "" },
+            s.mails,
+            s.reports,
+            s.stored,
+            s.duplicates,
+            s.skipped,
+            s.failed,
+            s.deleted,
+            if s.alerts > 0 { format!(", {} alert(s) sent", s.alerts) } else { String::new() }
+        );
+    };
+    match sub {
+        Some("fetch") => {
+            if !cfg.dmarc_configured() {
+                // cron runs this hourly on every host: quiet when unused
+                if !json {
+                    println!(
+                        "no DMARC report mailbox configured (Config tab → DMARC report mailbox)"
+                    );
+                }
+                return ExitCode::SUCCESS;
+            }
+            let opt = dmarcjob::Options {
+                dry: rest.iter().any(|a| a == "--dry-run"),
+                keep: rest.iter().any(|a| a == "--keep"),
+            };
+            let s = dmarcjob::run(&cfg, &opt);
+            print(&s);
+            if s.ok {
+                ExitCode::SUCCESS
+            } else {
+                for e in &s.errors {
+                    eprintln!("msfe-ng dmarc fetch: {e}");
+                }
+                ExitCode::from(1)
+            }
+        }
+        Some("import") => {
+            let files: Vec<&String> = rest.iter().filter(|a| !a.starts_with('-')).collect();
+            if files.is_empty() {
+                eprintln!("usage: {}", usage_of("dmarc"));
+                return ExitCode::from(2);
+            }
+            let mut bad = false;
+            for f in files {
+                let s = dmarcjob::import_file(&cfg, std::path::Path::new(f));
+                if !json {
+                    println!("{f}:");
+                }
+                print(&s);
+                bad |= !s.errors.is_empty();
+            }
+            if bad {
+                ExitCode::from(1)
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Some("status") => {
+            let last = dmarcjob::last_run(&cfg);
+            let counts = msfe_core::db::query(
+                &cfg,
+                "SELECT (SELECT COUNT(*) FROM dmarc_reports), (SELECT IFNULL(SUM(count),0) FROM dmarc_records), \
+                 (SELECT COUNT(*) FROM dmarc_sources), (SELECT IFNULL(MIN(day),'') FROM dmarc_reports), (SELECT IFNULL(MAX(day),'') FROM dmarc_reports)",
+            );
+            let c = counts
+                .ok()
+                .and_then(|r| r.into_iter().next())
+                .unwrap_or_default();
+            let g = |i: usize| c.get(i).cloned().unwrap_or_default();
+            if json {
+                println!(
+                    "{}",
+                    msfe_core::json::Json::Object(vec![
+                        (
+                            "configured".into(),
+                            msfe_core::json::Json::Bool(cfg.dmarc_configured())
+                        ),
+                        (
+                            "last_run".into(),
+                            last.unwrap_or(msfe_core::json::Json::Null)
+                        ),
+                        ("reports".into(), msfe_core::json::Json::str(g(0))),
+                        ("messages".into(), msfe_core::json::Json::str(g(1))),
+                        ("sources".into(), msfe_core::json::Json::str(g(2))),
+                    ])
+                );
+                return ExitCode::SUCCESS;
+            }
+            println!(
+                "mailbox: {}",
+                if cfg.dmarc_configured() {
+                    format!(
+                        "{} as {} ({})",
+                        msfe_core::imap::url(&cfg, true),
+                        cfg.dmarc_imap_user,
+                        cfg.dmarc_imap_folder
+                    )
+                } else {
+                    "not configured".into()
+                }
+            );
+            match last {
+                Some(l) => println!(
+                    "last fetch: {} — {} stored, {} kept, {} failed{}",
+                    l.get("at")
+                        .and_then(|v| v.as_i64())
+                        .map(|t| msfe_core::civil::Date::from_unix(t as u64).to_string())
+                        .unwrap_or_default(),
+                    l.get("stored").and_then(|v| v.as_i64()).unwrap_or(0),
+                    l.get("skipped").and_then(|v| v.as_i64()).unwrap_or(0),
+                    l.get("failed").and_then(|v| v.as_i64()).unwrap_or(0),
+                    l.get("errors")
+                        .and_then(|v| v.as_array())
+                        .and_then(|a| a.first())
+                        .and_then(|e| e.as_str())
+                        .map(|e| format!(" — {e}"))
+                        .unwrap_or_default()
+                ),
+                None => println!("last fetch: never"),
+            }
+            println!(
+                "stored: {} report(s), {} message(s), {} source(s), {} → {}",
+                g(0),
+                g(1),
+                g(2),
+                g(3),
+                g(4)
+            );
+            ExitCode::SUCCESS
+        }
+        Some("test") => {
+            let (ok, lines) = msfe_core::imap::test(&cfg);
+            for l in lines {
+                println!("{l}");
+            }
+            if ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
+        Some("prune") => match dmarcjob::prune(&cfg) {
+            Ok(()) => {
+                println!("rows older than {} days removed", cfg.dmarc_retention_days);
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("msfe-ng dmarc prune: {e}");
+                ExitCode::from(1)
+            }
+        },
+        _ => {
+            eprintln!("usage: {}", usage_of("dmarc"));
+            ExitCode::from(2)
+        }
+    }
+}
+
 fn cmd_acctdns(sub: Option<&str>, rest: &[String]) -> ExitCode {
     match sub {
         Some("scan") => cmd_acctdns_scan(rest),
@@ -3290,6 +3572,13 @@ COMMANDS:
                         (--user, --domain, --all for subdomains, --json)
     acctdns fix <domain> <spf|dkim|dmarc>   Install the missing record with cPanel's installer (--record
                         to publish your own; nothing is hand-edited in a zone file)
+    footers <status|off|restore [backup]|backups>   The text MailScanner writes into delivered mail
+                        (clean-mail footer, unscanned note, removed-attachment warning): switch it
+                        off with a backup of the settings and footer texts, or put a backup back
+    dmarc fetch         Read DMARC aggregate reports from the rua= mailbox (Config tab), store them,
+                        delete the imported mails (cron: hourly; --dry-run, --keep, --json)
+    dmarc import <file> Store report files (.xml, .xml.gz, .zip) or saved report mails (.eml)
+    dmarc status|test|prune   Last fetch and stored totals | IMAP login check | drop rows past retention
     digest [--dry-run]  Email quarantine digests to digest-enabled domains
     housekeeping        Prune old mail-log rows (cleanmysql retention)
     monitor [--dry-run] Auto-clean the delivery queue, fix misfiled spool files, send Telegram alerts (cron)

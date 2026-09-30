@@ -1012,6 +1012,40 @@
   .acct-table {
     width: 100%;
   }
+  /* Delivery → DMARC reports */
+  .dm-scroll {
+    overflow-x: auto;
+  }
+  .dm-table {
+    width: 100%;
+  }
+  .dm-two {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0 1rem;
+  }
+  @media (max-width: 720px) {
+    .dm-two {
+      grid-template-columns: 1fr;
+    }
+  }
+  .dm-table th {
+    font-size: 0.74rem;
+  }
+  .dm-table td {
+    vertical-align: top;
+  }
+  .dm-table tr.dlv-detail > td {
+    background: var(--surface-2);
+  }
+  .dm-rec th,
+  .dm-rec td {
+    font-size: 0.76rem;
+    vertical-align: top;
+  }
+  .dm-rec td.dm-auth {
+    white-space: pre; /* one auth result per line; the table scrolls instead */
+  }
   .acct-table th {
     font-size: 0.74rem;
   }

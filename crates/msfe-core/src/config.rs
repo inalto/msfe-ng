@@ -117,6 +117,27 @@ pub struct Config {
     pub alert_burst_per_hour: u32,
     /// Minimum minutes between repeats of the same alert.
     pub alert_cooldown_mins: u32,
+
+    // ---- DMARC aggregate reports (empty host disables the fetch) -------------
+    /// IMAP server of the mailbox that receives the domains' `rua=` reports.
+    pub dmarc_imap_host: String,
+    pub dmarc_imap_port: u16,
+    /// Implicit TLS (imaps, usually 993); off means STARTTLS on plain IMAP.
+    pub dmarc_imap_tls: bool,
+    /// Verify the server certificate (off only for e.g. `localhost` on cPanel).
+    pub dmarc_imap_verify: bool,
+    pub dmarc_imap_user: String,
+    /// Secret: never exposed via the API (only `dmarc_imap_configured`).
+    pub dmarc_imap_pass: String,
+    pub dmarc_imap_folder: String,
+    /// Delete a report mail once its rows are stored (non-reports are kept).
+    pub dmarc_delete_imported: bool,
+    /// Days of report rows kept before `dmarc fetch` prunes them.
+    pub dmarc_retention_days: u32,
+    /// Telegram alert for a new unknown source failing DMARC on at least this
+    /// many messages in one report; `dmarc_alerts = false` turns them off.
+    pub dmarc_alerts: bool,
+    pub dmarc_alert_min_messages: u32,
 }
 
 /// `true`/`yes`/`1` (case-insensitive) is on; anything else off.
@@ -184,6 +205,17 @@ impl Default for Config {
             alert_scan_stuck_mins: 0,
             alert_burst_per_hour: 0,
             alert_cooldown_mins: 60,
+            dmarc_imap_host: String::new(),
+            dmarc_imap_port: 993,
+            dmarc_imap_tls: true,
+            dmarc_imap_verify: true,
+            dmarc_imap_user: String::new(),
+            dmarc_imap_pass: String::new(),
+            dmarc_imap_folder: "INBOX".into(),
+            dmarc_delete_imported: true,
+            dmarc_retention_days: 180,
+            dmarc_alerts: true,
+            dmarc_alert_min_messages: 5,
         }
     }
 }
@@ -198,6 +230,13 @@ pub const MS_CONF_CANDIDATES: [&str; 2] = [
 impl Config {
     /// Load config from `path`, falling back to defaults for anything absent,
     /// then follow the engine actually installed (see `resolve_engine_paths`).
+    /// A DMARC report mailbox is set up (host, user and password all given).
+    pub fn dmarc_configured(&self) -> bool {
+        !self.dmarc_imap_host.is_empty()
+            && !self.dmarc_imap_user.is_empty()
+            && !self.dmarc_imap_pass.is_empty()
+    }
+
     pub fn load(path: &Path) -> Config {
         let text = std::fs::read_to_string(path).unwrap_or_default();
         let mut c = Config::from_toml_str(&text);
@@ -292,6 +331,25 @@ impl Config {
                 "alert_scan_stuck_mins" => c.alert_scan_stuck_mins = v.parse().unwrap_or(0),
                 "alert_burst_per_hour" => c.alert_burst_per_hour = v.parse().unwrap_or(0),
                 "alert_cooldown_mins" => c.alert_cooldown_mins = v.parse().unwrap_or(60),
+                "dmarc_imap_host" => c.dmarc_imap_host = v.trim().to_string(),
+                "dmarc_imap_port" => c.dmarc_imap_port = v.parse().unwrap_or(993),
+                "dmarc_imap_tls" => c.dmarc_imap_tls = truthy(&v),
+                "dmarc_imap_verify" => c.dmarc_imap_verify = truthy(&v),
+                "dmarc_imap_user" => c.dmarc_imap_user = v,
+                "dmarc_imap_pass" => c.dmarc_imap_pass = v,
+                "dmarc_imap_folder" => {
+                    c.dmarc_imap_folder = if v.trim().is_empty() {
+                        "INBOX".into()
+                    } else {
+                        v
+                    }
+                }
+                "dmarc_delete_imported" => c.dmarc_delete_imported = truthy(&v),
+                "dmarc_retention_days" => {
+                    c.dmarc_retention_days = v.parse().unwrap_or(180).clamp(7, 3650)
+                }
+                "dmarc_alerts" => c.dmarc_alerts = truthy(&v),
+                "dmarc_alert_min_messages" => c.dmarc_alert_min_messages = v.parse().unwrap_or(5),
                 _ => {} // unknown keys ignored
             }
         }
@@ -405,6 +463,43 @@ impl Config {
                 ),
             ),
             ("telegram_chat_id".into(), Json::str(&self.telegram_chat_id)),
+            // the DMARC mailbox password is a secret too
+            (
+                "dmarc_imap_configured".into(),
+                Json::Bool(self.dmarc_configured()),
+            ),
+            ("dmarc_imap_host".into(), Json::str(&self.dmarc_imap_host)),
+            (
+                "dmarc_imap_port".into(),
+                Json::Int(self.dmarc_imap_port as i64),
+            ),
+            ("dmarc_imap_tls".into(), Json::Bool(self.dmarc_imap_tls)),
+            (
+                "dmarc_imap_verify".into(),
+                Json::Bool(self.dmarc_imap_verify),
+            ),
+            ("dmarc_imap_user".into(), Json::str(&self.dmarc_imap_user)),
+            (
+                "dmarc_imap_pass_set".into(),
+                Json::Bool(!self.dmarc_imap_pass.is_empty()),
+            ),
+            (
+                "dmarc_imap_folder".into(),
+                Json::str(&self.dmarc_imap_folder),
+            ),
+            (
+                "dmarc_delete_imported".into(),
+                Json::Bool(self.dmarc_delete_imported),
+            ),
+            (
+                "dmarc_retention_days".into(),
+                Json::Int(self.dmarc_retention_days as i64),
+            ),
+            ("dmarc_alerts".into(), Json::Bool(self.dmarc_alerts)),
+            (
+                "dmarc_alert_min_messages".into(),
+                Json::Int(self.dmarc_alert_min_messages as i64),
+            ),
             // the AbuseIPDB key is a secret too
             (
                 "abuseipdb_configured".into(),
@@ -454,8 +549,15 @@ pub fn parse_flat(text: &str) -> Vec<(String, String)> {
 fn strip_comment(line: &str) -> &str {
     let mut in_s = false;
     let mut in_d = false;
+    let mut escaped = false;
     for (i, ch) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
         match ch {
+            // the writer escapes `"` as `\"` inside double quotes (conffile::render_value)
+            '\\' if in_d => escaped = true,
             '\'' if !in_d => in_s = !in_s,
             '"' if !in_s => in_d = !in_d,
             '#' if !in_s && !in_d => return &line[..i],
@@ -467,9 +569,9 @@ fn strip_comment(line: &str) -> &str {
 
 fn unquote(s: &str) -> String {
     let b = s.as_bytes();
-    if b.len() >= 2
-        && ((b[0] == b'"' && b[b.len() - 1] == b'"') || (b[0] == b'\'' && b[b.len() - 1] == b'\''))
-    {
+    if b.len() >= 2 && b[0] == b'"' && b[b.len() - 1] == b'"' {
+        s[1..s.len() - 1].replace("\\\"", "\"")
+    } else if b.len() >= 2 && b[0] == b'\'' && b[b.len() - 1] == b'\'' {
         s[1..s.len() - 1].to_string()
     } else {
         s.to_string()
@@ -479,6 +581,30 @@ fn unquote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_json_never_carries_the_dmarc_password() {
+        let c = Config::from_toml_str(
+            "dmarc_imap_host = \"mail.example.net\"\ndmarc_imap_user = \"dmarc@example.net\"\ndmarc_imap_pass = \"s3cret-Pw\"\n",
+        );
+        assert!(c.dmarc_configured());
+        let j = c.to_public_json().to_string();
+        assert!(!j.contains("s3cret-Pw"), "{j}");
+        assert!(j.contains("\"dmarc_imap_pass_set\":true"), "{j}");
+        assert!(j.contains("\"dmarc_imap_configured\":true"), "{j}");
+    }
+
+    #[test]
+    fn secrets_with_quotes_and_hashes_round_trip() {
+        for pw in ["p\"a#ss", "a\\\"b", "plain#x", "123456", "tail\\"] {
+            let (text, _) = crate::conffile::apply(
+                "",
+                &[("dmarc_imap_pass".into(), pw.into())],
+                crate::conffile::Style::Toml,
+            );
+            assert_eq!(Config::from_toml_str(&text).dmarc_imap_pass, pw, "{text}");
+        }
+    }
 
     #[test]
     fn parses_flat_with_quotes_and_comments() {

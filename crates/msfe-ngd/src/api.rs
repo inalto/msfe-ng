@@ -18,6 +18,21 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
     }
     match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/api/config") => Response::json(200, &cfg.to_public_json().to_string()),
+        ("GET", "/api/footers") => {
+            let st = msfe_core::footers::state(cfg, config_file);
+            Response::json(200, &msfe_core::footers::state_json(&st).to_string())
+        }
+        ("POST", "/api/footers/off") => {
+            let r = msfe_core::footers::switch_off(cfg, config_file, false);
+            Response::json(200, &msfe_core::footers::report_json(&r).to_string())
+        }
+        ("POST", "/api/footers/restore") => {
+            let stamp = Json::parse(&req.body)
+                .map(|v| v.str_field("stamp"))
+                .unwrap_or_default();
+            let r = msfe_core::footers::restore(cfg, config_file, &stamp, false);
+            Response::json(200, &msfe_core::footers::report_json(&r).to_string())
+        }
 
         ("GET", "/api/policy") => {
             let pdir = sync::policy_dir(config_file);
@@ -1164,6 +1179,9 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
         }
         (m, p) if p.starts_with("/api/acctdns/") => {
             crate::acctdns_api::handle(m, p, req, cfg, config_file)
+        }
+        (m, p) if p.starts_with("/api/dmarc/") => {
+            crate::dmarc_api::handle(m, p, req, cfg, config_file)
         }
         ("GET", "/api/engine/migrate") => engine_migrate_preflight(cfg, config_file),
         ("GET", "/api/legacy/decommission") => legacy_decommission_preflight(cfg, config_file),
