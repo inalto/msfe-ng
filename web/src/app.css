@@ -1472,6 +1472,24 @@
     width: 0.95rem;
     height: 0.95rem;
   }
+  /* the copy icon beside an IP or address in headers and message content */
+  a.cplink {
+    display: inline-block;
+    color: var(--muted);
+    cursor: copy;
+    margin-left: 0.15em;
+    line-height: 0;
+    vertical-align: -0.12em;
+  }
+  a.cplink:hover,
+  a.cplink:focus-visible {
+    color: var(--accent);
+    outline: none;
+  }
+  a.cplink .cpico {
+    width: 0.9em;
+    height: 0.9em;
+  }
   .toast {
     position: fixed;
     bottom: 1rem;
