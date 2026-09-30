@@ -953,73 +953,116 @@ async function renderSettings(){
   renderFootersCard(v);
 }
 
-// Message footers: what MailScanner writes into delivered mail (clean-mail
-// footer, unscanned note, removed-attachment warning) — off with a backup of
-// the settings and footer texts, or a backup put back.
+// What MailScanner changes in delivered mail: one switch per setting, grouped
+// (body text, attachments, subject tags, headers, rewriting, notices). Flipped
+// switches wait for one "Apply changes" (one lint, one restart); every apply
+// keeps a backup of the exact lines and the footer texts, and "Put back"
+// restores one.
 async function renderFootersCard(v){
-  const fc=el('div',{class:'card',id:'footers-card'},el('h2',{},'Message footers'),
+  const fc=el('div',{class:'card',id:'footers-card'},el('h2',{},'What MailScanner changes in mail'),
     el('div',{class:'muted',style:'margin-bottom:.6rem;font-size:.8rem'},
-      'MailScanner can write into the body of the mail it delivers: a “scanned by MailScanner, believed to be clean” footer, a note on mail it did not scan, a warning where it removed an attachment. Switch them off and recipients get the message as it was sent. Subject tags ({Spam?}) and X-MailScanner headers are not affected; mail already delivered keeps its footer.'));
+      'MailScanner can add text to the body, tags to the subject and headers to every message, rewrite parts of it, and send notices about what it blocked. Each switch below turns one of those on or off; flip as many as you like, then Apply — the configuration is checked with MailScanner --lint and MailScanner restarts once. Only new mail is affected. Protections such as script and form disarming are not here: they live in the Config tab.'));
   v.append(fc);
   const body=el('div',{},el('div',{class:'muted'},'Loading…'));fc.append(body);
   const out=el('pre',{class:'log',style:'display:none;max-height:14rem'});
+  const pending=new Map(); // key → wanted state
+  const bar=el('div',{class:'sw-bar',style:'display:none'});
+  const applyBtn=el('button',{class:'act'},'Apply changes');
+  const discard=el('button',{class:'act plain'},'Discard');
+  const barTxt=el('span',{class:'muted',style:'font-size:.8rem'});
+  bar.append(barTxt,applyBtn,discard);
+  let rows=[];
+  function paintBar(){
+    const n=pending.size;
+    bar.style.display=n?'':'none';
+    applyBtn.textContent=`Apply changes (${n})`;
+    barTxt.textContent=n?[...pending].map(([k,on])=>k+' '+(on?'on':'off')).join(' · '):'';
+  }
+  discard.onclick=()=>{pending.clear();rows.forEach(r=>{r.cb.checked=r.d.on;r.tr.classList.remove('pending');});paintBar();};
+  async function run(path,bodyObj,busy,okMsg){
+    out.style.display='';out.textContent=busy;
+    const r=await api(path,{method:'POST',body:bodyObj});
+    out.textContent=((r&&r.transcript)||[(r&&r.error)||'no response']).join('\n');
+    toast(r&&r.ok?okMsg:'Not changed — see the output');
+    return r;
+  }
+  applyBtn.onclick=async()=>{
+    const list=[...pending].map(([k,on])=>'• '+k+' → '+(on?'on':'off')).join('\n');
+    if(!confirm('Apply these changes?\n\n'+list+'\n\nA backup of the current lines is kept (Put back restores it). MailScanner restarts.'))return;
+    applyBtn.disabled=true;
+    const r=await run('/api/footers/apply',{changes:Object.fromEntries(pending)},'▶ checking and applying…','Applied — new mail follows the new settings');
+    applyBtn.disabled=false;
+    if(r&&r.ok){pending.clear();paintBar();draw();}
+  };
   async function draw(){
     const st=await api('/api/footers');
-    body.innerHTML='';
+    body.innerHTML='';rows=[];
     if(!st||st.error){body.append(el('div',{class:'note warn'},(st&&st.error)||'cannot read the MailScanner configuration'));return;}
-    body.append(el('div',{class:'statline',style:'margin-bottom:.5rem'},
-      el('span',{class:'dot',style:'background:'+(st.on?'var(--warning)':'var(--good)')}),
-      el('b',{},st.on?' MailScanner writes into delivered mail':' Delivered mail is left as sent')));
-    const t=el('table');
-    t.append(el('tr',{},...['Directive','Now','Adds'].map(h=>el('th',{},h))));
-    (st.directives||[]).forEach(d=>t.append(el('tr',{},
-      el('td',{class:'mono',style:'white-space:nowrap'},d.key),
-      el('td',{},!d.known?el('span',{class:'chip na'},'not in this version'):el('span',{class:'chip '+(d.on?'warn':'ok')},d.on?'on':'off'),
-        el('div',{class:'muted mono',style:'font-size:.72rem'},d.value+(d.file?' · '+d.file.replace(/^ms:/,''):' · engine default'))),
-      el('td',{class:'muted',style:'font-size:.8rem'},d.what))));
-    body.append(t);
-    const sig=(st.templates||[]).find(x=>/inline\.sig\.txt$/.test(x.path)&&x.text);
-    if(sig)body.append(el('details',{style:'margin:.5rem 0'},el('summary',{class:'muted',style:'font-size:.8rem'},'The footer text now in use ('+sig.path+')'),el('pre',{class:'log',style:'max-height:10rem'},sig.text)));
-    const ctl=el('div',{class:'ctl',style:'flex-wrap:wrap;margin-top:.4rem'});
-    if(st.on){
-      const off=el('button',{class:'act'},'Remove footers');
-      off.onclick=async()=>{
-        const list=(st.directives||[]).filter(d=>d.on).map(d=>'• '+d.key+' = no').join('\n');
-        if(!confirm('Stop MailScanner writing into delivered mail?\n\n'+list+'\n\nA backup of these settings and of the footer texts is kept first, so they can be put back. MailScanner restarts.'))return;
-        off.disabled=true;out.style.display='';out.textContent='▶ backing up and switching off…';
-        const r=await api('/api/footers/off',{method:'POST'});
-        off.disabled=false;
-        out.textContent=((r&&r.transcript)||[(r&&r.error)||'no response']).join('\n');
-        toast(r&&r.ok?'Footers removed — new mail is delivered as sent':'Not changed — see the output');
-        draw();
-      };
-      ctl.append(off);
-    }
-    body.append(ctl);
+    const dirs=st.directives||[];
+    (st.groups||[]).forEach(g=>{
+      const items=dirs.filter(d=>d.group===g.id&&d.known);
+      if(!items.length)return;
+      const onN=items.filter(d=>d.on).length;
+      const sec=el('div',{class:'sw-group'},el('h3',{},g.title,el('span',{class:'muted',style:'font-weight:400;font-size:.76rem'},` · ${onN} of ${items.length} on`)));
+      items.forEach(d=>{
+        const id='sw-'+d.key.replace(/\W+/g,'-');
+        const cb=el('input',{type:'checkbox',id,role:'switch','aria-label':d.key,...(d.on?{checked:'checked'}:{})});
+        const tr=el('div',{class:'sw-row'},
+          el('label',{class:'sw',for:id},cb,el('span',{class:'sw-track','aria-hidden':'true'})),
+          el('div',{class:'sw-text'},
+            el('div',{},el('label',{for:id,class:'mono sw-key'},d.key),
+              d.rules?el('span',{class:'chip warn',style:'margin-left:.4rem',title:'The value is a ruleset: MailScanner decides per sender/recipient. Off writes “'+d.off_value+'”; on puts the ruleset back.'},'per rules'):''),
+            el('div',{class:'muted',style:'font-size:.8rem'},d.what),
+            d.caution?el('div',{style:'font-size:.76rem;color:var(--warning)'},'⚠ '+d.caution):'',
+            el('div',{class:'muted mono',style:'font-size:.7rem'},d.value+(d.file?' · '+d.file.replace(/^ms:/,''):' · engine default'))));
+        cb.onchange=()=>{
+          if(cb.checked===d.on)pending.delete(d.key);else pending.set(d.key,cb.checked);
+          tr.classList.toggle('pending',pending.has(d.key));paintBar();
+        };
+        if(pending.has(d.key)){cb.checked=pending.get(d.key);tr.classList.add('pending');}
+        rows.push({d,cb,tr});
+        sec.append(tr);
+      });
+      if(g.id==='body'){
+        const sig=(st.templates||[]).find(x=>/inline\.sig\.txt$/.test(x.path)&&x.text);
+        if(sig)sec.append(el('details',{style:'margin:.4rem 0 0 3.2rem'},el('summary',{class:'muted',style:'font-size:.78rem'},'The footer text now in use'),el('pre',{class:'log',style:'max-height:10rem'},sig.text)));
+        if(st.on){
+          const off=el('button',{class:'act plain',style:'margin:.5rem 0 0 3.2rem'},'Remove all body text');
+          off.onclick=async()=>{
+            if(!confirm('Switch off everything in “'+g.title+'”?\n\nA backup is kept first. MailScanner restarts.'))return;
+            off.disabled=true;
+            const r=await run('/api/footers/off',null,'▶ backing up and switching off…','Body text removed — new mail is delivered as sent');
+            off.disabled=false;if(r&&r.ok){pending.clear();paintBar();draw();}
+          };
+          sec.append(off);
+        }
+      }
+      body.append(sec);
+    });
+    const unknown=dirs.filter(d=>!d.known).map(d=>d.key);
+    if(unknown.length)body.append(el('div',{class:'muted',style:'font-size:.76rem;margin-top:.4rem'},'Not in this MailScanner version: '+unknown.join(', ')));
+    paintBar();
     const bk=st.backups||[];
     if(bk.length){
-      const bt=el('table',{style:'margin-top:.6rem'});
-      bt.append(el('tr',{},...['Backup','Was on',''].map(h=>el('th',{},h))));
+      const bt=el('table',{style:'margin-top:.4rem'});
+      bt.append(el('tr',{},...['Backup','Changed',''].map(h=>el('th',{},h))));
       bk.forEach(b=>{
         const go=el('button',{class:'act plain'},'Put back');
         go.disabled=!b.applied;
-        go.title=b.applied?'Restore these settings and footer texts':'This backup was never applied (the switch-off failed)';
+        go.title=b.applied?'Put every line and footer text back as it was before this change':'This change was never applied (the check failed)';
         go.onclick=async()=>{
-          if(!confirm('Put the footers back as they were on '+fmtTime(b.at)+'?\n\n'+(b.was_on||[]).join(', ')+'\n\nThe settings and any footer text changed since are restored; MailScanner restarts.'))return;
-          go.disabled=true;out.style.display='';out.textContent='▶ restoring…';
-          const r=await api('/api/footers/restore',{method:'POST',body:{stamp:b.stamp}});
-          go.disabled=false;
-          out.textContent=((r&&r.transcript)||[(r&&r.error)||'no response']).join('\n');
-          toast(r&&r.ok?'Footers put back':'Not restored — see the output');
-          draw();
+          if(!confirm('Put everything back as it was before the change of '+fmtTime(b.at)+'?\n\n'+(b.was_on||[]).join(', ')+'\n\nMailScanner restarts.'))return;
+          go.disabled=true;
+          const r=await run('/api/footers/restore',{stamp:b.stamp},'▶ restoring…','Put back');
+          go.disabled=false;if(r&&r.ok){pending.clear();paintBar();draw();}
         };
         bt.append(el('tr',{},el('td',{},fmtTime(b.at),b.applied?'':el('span',{class:'muted'},' (unused)')),
           el('td',{class:'muted',style:'font-size:.8rem'},(b.was_on||[]).join(', ')||'—'),el('td',{},go)));
       });
-      body.append(el('div',{class:'muted',style:'font-size:.8rem;margin-top:.8rem'},'Backups (kept in /etc/msfe-ng/footers, also in msfe-ng backups):'),bt);
+      body.append(el('details',{style:'margin-top:.8rem'},el('summary',{class:'muted',style:'font-size:.8rem'},`Backups (${bk.length}) — kept in /etc/msfe-ng/footers, also in msfe-ng backups`),bt));
     }
   }
-  fc.append(out);
+  fc.append(bar,out);
   draw();
 }
 

@@ -26,6 +26,41 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             let r = msfe_core::footers::switch_off(cfg, config_file, false);
             Response::json(200, &msfe_core::footers::report_json(&r).to_string())
         }
+        ("POST", "/api/footers/apply") => {
+            let v = Json::parse(&req.body).unwrap_or(Json::Null);
+            let changes: Vec<(String, bool)> = match v.get("changes") {
+                Some(Json::Object(f)) => f
+                    .iter()
+                    .filter_map(|(k, b)| match b {
+                        Json::Bool(on) => Some((k.clone(), *on)),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            if changes.is_empty() {
+                return Response::json(
+                    400,
+                    r#"{"error":"changes: {\"<directive>\": true|false} required"}"#,
+                );
+            }
+            if let Some((k, _)) = changes
+                .iter()
+                .find(|(k, _)| msfe_core::footers::item(k).is_none())
+            {
+                return Response::json(
+                    400,
+                    &Json::Object(vec![(
+                        "error".into(),
+                        Json::str(format!("{k}: not a setting this card switches")),
+                    )])
+                    .to_string(),
+                );
+            }
+            let dry = matches!(v.get("dry"), Some(Json::Bool(true)));
+            let r = msfe_core::footers::apply(cfg, config_file, &changes, dry);
+            Response::json(200, &msfe_core::footers::report_json(&r).to_string())
+        }
         ("POST", "/api/footers/restore") => {
             let stamp = Json::parse(&req.body)
                 .map(|v| v.str_field("stamp"))

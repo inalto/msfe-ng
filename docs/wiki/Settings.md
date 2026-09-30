@@ -51,58 +51,61 @@ The **AbuseIPDB API key**, for reporting an address from the
 settings in the [Config](Config#telegram-alerts) tab (`abuseipdb_key`; a
 secret — the API only says whether it is set).
 
-## Message footers
+## What MailScanner changes in mail
 
-MailScanner can write into the **body** of the mail it delivers:
+MailScanner can add text to the body, tags to the subject and headers to
+every message, rewrite parts of it, and mail notices about what it blocked.
+This card gives each of those a **switch**, grouped:
 
-| Directive | What it adds |
+| Group | Switches |
 |---|---|
-| `Sign Clean Messages` | the "This message has been scanned for viruses and dangerous content by MailScanner, and is believed to be clean" footer on clean mail |
-| `Mark Unscanned Messages` | a note on mail it did not scan |
-| `Mark Infected Messages` | an inline warning where it removed an attachment |
+| Text added to the message body | Sign Clean Messages (the "scanned by MailScanner, believed to be clean" footer), Mark Unscanned Messages, Mark Infected Messages (inline warning where an attachment was removed), Highlight Phishing Fraud, Highlight Hidden URLs, Highlight Mailto Phishing, External Message Warning, Attach Image To Signature, Sign Messages Already Processed |
+| Attachments | Warning Is Attachment (VirusWarning.txt), Zip Attachments |
+| Subject tags | Spam / High Scoring Spam / Virus / Filename / Content / Size / Disarmed / Phishing / Scanned Modify Subject (`{Spam?}`, `{Virus?}`, …) |
+| Headers added | Add Envelope From / To Header, Add Watermark, Spam Score, Detailed Spam Report, Include Scores In SpamAssassin Report, Always Include SpamAssassin Report |
+| Content rewriting | Allow WebBugs (on = tracking images replaced), Use TNEF Contents (winmail.dat), Convert HTML To Text |
+| Notices MailScanner sends | Notify Senders (and of viruses / blocked filenames / blocked size / other content), Send Notices, Notices Include Full Headers |
 
-The card shows, for each directive:
-- whether it is on;
-- its value;
-- the file it is set in. MailScanner reads `MailScanner.conf` and then
-  `conf.d/*.conf`, and the last one wins; *engine default* means it is not set
-  anywhere.
+Each row shows what the setting does, a caution where switching it has a
+cost (for example *Add Watermark*, which bounce-backscatter protection relies
+on), the value in effect, and the file that sets it. MailScanner reads
+`MailScanner.conf` and then `conf.d/*.conf`, and the last one wins; *engine
+default* means the setting is not written anywhere. Settings this MailScanner
+version does not know are listed at the bottom, without a switch.
 
-It also shows the footer text now in use.
+**Flip, then apply.** Flipped switches are highlighted and collected in a bar
+at the bottom. **Apply changes** checks the whole set with `MailScanner
+--lint` and restarts MailScanner once. If the check fails, nothing is written.
+Only new mail is affected; mail already delivered keeps what it got.
 
-**Remove footers** sets each active directive to `no` on the line where it
-takes effect. That can be a `conf.d` file, and a ruleset value such as
-`%rules-dir%/sign.rules` is replaced too. After that, new mail is delivered as
-it was sent. The change goes through the same checked save as the
-[Config](Config) tab: `MailScanner --lint`, a history copy of every file, and
-one restart. If the lint fails, nothing is written.
+- **Off** writes the setting's off value (`no`; for *Allow WebBugs* it is
+  `yes`, meaning web bugs are allowed through untouched) on the line where it
+  takes effect. That can be a `conf.d` file, and a ruleset value such as
+  `%rules-dir%/external.message.rules` (shown as *per rules*) is replaced too.
+- **On** puts back the exact line an earlier switch replaced, including a
+  ruleset, a comment or the `start`/`end` choice. When there is no such line,
+  it writes MailScanner's default (`yes`, `start`, `replace`, `disarm`…).
 
-What is **not** affected:
-- subject tags (`{Spam?}`, `{Filename?}`);
-- the `X-…-MailScanner` headers;
-- the warning *attachment* for a removed file;
-- mail already delivered, which keeps its footer.
+**Remove all body text** switches off the whole first group in one go.
 
-**The backup.** Before switching off, the exact lines that were there are
-saved, or the fact that there were none, together with a copy of every footer
-template (`Inline Text/HTML Signature`, `Inline Text/HTML Warning`, in every
-language directory). Backups live in `/etc/msfe-ng/footers/<date-time>/`, so
-`msfe-ng backup` and snapshots include them. The last 10 are kept.
+**Backups.** Every apply first saves the exact lines it changes and a copy of
+every footer template (`Inline Text/HTML Signature`, `Inline Text/HTML
+Warning`, in every language) in `/etc/msfe-ng/footers/<date-time>/`. That
+directory is included in `msfe-ng backup` and snapshots, and the last 10 are
+kept. **Put back** on a backup restores everything as it was before that
+change, byte for byte. A line edited by hand in the meantime is left alone,
+and the output says so.
 
-**Put back** restores one backup:
-- each line becomes what it was;
-- a directive that was not set is removed again, so the engine default
-  applies;
-- any footer text changed since is restored too.
-
-A line edited by hand in the meantime is left alone, and the output says so.
-The files come back byte for byte.
+Not offered, on purpose: `Allow Script/Form/IFrame/Object Tags`, `Convert
+Dangerous HTML To Text`, and the scanning and quarantine switches. Those are
+protections, not cosmetics, and they stay in the [Config](Config) tab.
 
 From the command line:
 
 ```
-msfe-ng footers status [--json]          what is on, where, and the templates
-msfe-ng footers off [--dry-run]          back up, then switch every body insertion off
-msfe-ng footers restore [<backup>]       put a backup back (default: the latest applied one)
-msfe-ng footers backups                  list the backups
+msfe-ng footers status [--json]                             every switch, by group
+msfe-ng footers set "Spam Modify Subject" off [...] [--dry-run]   switch one or more (pairs)
+msfe-ng footers off [--dry-run]                             all body text off
+msfe-ng footers restore [<backup>]                          put a backup back (default: the latest)
+msfe-ng footers backups                                     list the backups
 ```

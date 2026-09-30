@@ -1012,6 +1012,92 @@
   .acct-table {
     width: 100%;
   }
+  /* Settings → What MailScanner changes in mail: switches */
+  .sw-group {
+    border-top: 1px solid var(--line);
+    padding: 0.6rem 0 0.4rem;
+  }
+  .sw-group h3 {
+    font-size: 0.86rem;
+    font-weight: 650;
+    margin: 0 0 0.3rem;
+  }
+  .sw-row {
+    display: flex;
+    gap: 0.8rem;
+    align-items: flex-start;
+    padding: 0.35rem 0.4rem;
+    border-radius: 8px;
+  }
+  .sw-row.pending {
+    background: var(--accent-weak);
+  }
+  .sw-key {
+    font-size: 0.82rem;
+    cursor: pointer;
+  }
+  .sw {
+    position: relative;
+    flex: 0 0 auto;
+    width: 2.4rem;
+    height: 1.35rem;
+    margin-top: 0.1rem;
+    cursor: pointer;
+  }
+  .sw input {
+    position: absolute;
+    opacity: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    cursor: pointer;
+  }
+  .sw-track {
+    position: absolute;
+    inset: 0;
+    border-radius: 999px;
+    background: var(--line);
+    transition: background 0.15s;
+  }
+  .sw-track::after {
+    content: "";
+    position: absolute;
+    top: 0.15rem;
+    left: 0.15rem;
+    width: 1.05rem;
+    height: 1.05rem;
+    border-radius: 50%;
+    background: var(--surface);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+    transition: transform 0.15s;
+  }
+  .sw input:checked + .sw-track {
+    background: var(--accent);
+  }
+  .sw input:checked + .sw-track::after {
+    transform: translateX(1.05rem);
+  }
+  .sw input:focus-visible + .sw-track {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .sw-bar {
+    position: sticky;
+    bottom: 0.5rem;
+    display: flex;
+    gap: 0.6rem;
+    align-items: center;
+    flex-wrap: wrap;
+    padding: 0.6rem 0.8rem;
+    margin-top: 0.6rem;
+    border: 1px solid var(--accent);
+    border-radius: 10px;
+    background: var(--surface);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+  }
+  .sw-bar > span {
+    flex: 1 1 14rem;
+  }
   /* Delivery → DMARC reports */
   .dm-scroll {
     overflow-x: auto;

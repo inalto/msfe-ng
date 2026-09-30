@@ -102,7 +102,7 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
         ("dmarc", Some("import" | "status")) => Some(&["--json"]),
         ("dmarc", _) => Some(NONE),
         ("footers", Some("status")) => Some(&["--json"]),
-        ("footers", Some("off" | "restore")) => Some(DRY),
+        ("footers", Some("off" | "restore" | "set")) => Some(DRY),
         ("footers", _) => Some(NONE),
         _ => None,
     }
@@ -138,7 +138,7 @@ fn usage_of(cmd: &str) -> &'static str {
         "conf" => "msfe-ng conf <test [--no-lint] [--json] [--with <id>=<file>]... | test-message <clean|gtube|eicar|file.eml> [--offline] [--json] | grep <text>>",
         "delivery" => "msfe-ng delivery <test <address> [--ip <sending ip>] [--selector <dkim selector>] [--audit] [--days <1-7>] [--json | --html] [--force] | eml <file.eml> [--bounce] [--address <a>] [--ip <ip>] [--selector <s>] [--audit] [--json | --html] | inbox <install [--dry-run] | uninstall [--dry-run] | status | new | poll <token> [--json] | remove <token> | sweep> | testmail --from <local address> --to <address> [--tag <t>] [--follow <secs>] [--json] | monitor <list [--json] | add <address> [--interval-mins n] [--audit] [--ip ..] [--selector ..] [--days n] | remove <id|address> | run [--dry-run] [--id n]>>",
         "acctdns" => "msfe-ng acctdns <scan [--user <account>] [--domain <domain>] [--all] [--json] | fix <domain> <spf|dkim|dmarc> [--record <record>] [--json]>",
-        "footers" => "msfe-ng footers <status [--json] | off [--dry-run] | restore [<backup>] [--dry-run] | backups>",
+        "footers" => "msfe-ng footers <status [--json] | set \"<directive>\" on|off [\"<directive>\" on|off]... [--dry-run] | off [--dry-run] | restore [<backup>] [--dry-run] | backups>",
         "dmarc" => "msfe-ng dmarc <fetch [--dry-run] [--keep] [--json] | import <file.xml|.gz|.zip|.eml>... [--json] | status [--json] | test | prune>",
         _ => "msfe-ng help",
     }
@@ -3069,28 +3069,31 @@ fn cmd_footers(sub: Option<&str>, rest: &[String]) -> ExitCode {
             println!(
                 "{}",
                 if st.on() {
-                    "MailScanner writes into delivered mail:"
+                    "MailScanner writes text into delivered mail"
                 } else {
-                    "delivered mail is left as sent:"
+                    "MailScanner adds no text to message bodies"
                 }
             );
-            for d in &st.dirs {
-                println!(
-                    "  [{}] {} = {}{}",
-                    if !d.known {
-                        "n/a"
-                    } else if d.on() {
-                        "on "
-                    } else {
-                        "off"
-                    },
-                    d.key,
-                    d.effective,
-                    d.found
-                        .as_ref()
-                        .map(|f| format!("  ({})", f.file))
-                        .unwrap_or_else(|| "  (engine default)".into())
-                );
+            for (gid, title) in footers::GROUPS {
+                println!("\n{title}:");
+                for d in st.dirs.iter().filter(|d| d.item.group == gid) {
+                    println!(
+                        "  [{}] {} = {}{}",
+                        if !d.known {
+                            "n/a"
+                        } else if d.on() {
+                            "on "
+                        } else {
+                            "off"
+                        },
+                        d.key,
+                        d.effective,
+                        d.found
+                            .as_ref()
+                            .map(|f| format!("  ({})", f.file))
+                            .unwrap_or_else(|| "  (engine default)".into())
+                    );
+                }
             }
             for t in &st.templates {
                 println!("  template {}", t.path.display());
@@ -3098,6 +3101,33 @@ fn cmd_footers(sub: Option<&str>, rest: &[String]) -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("off") => finish(footers::switch_off(&cfg, &config_path(), dry)),
+        Some("set") => {
+            let words: Vec<&String> = rest.iter().filter(|a| !a.starts_with("--")).collect();
+            if words.is_empty() || words.len() % 2 != 0 {
+                eprintln!("usage: {}", usage_of("footers"));
+                return ExitCode::from(2);
+            }
+            let mut changes = Vec::new();
+            for pair in words.chunks(2) {
+                let on = match pair[1].to_ascii_lowercase().as_str() {
+                    "on" | "yes" => true,
+                    "off" | "no" => false,
+                    other => {
+                        eprintln!("msfe-ng footers set: '{other}' is not on or off");
+                        return ExitCode::from(2);
+                    }
+                };
+                if footers::item(pair[0]).is_none() {
+                    eprintln!(
+                        "msfe-ng footers set: '{}' is not a setting this command switches (msfe-ng footers status lists them)",
+                        pair[0]
+                    );
+                    return ExitCode::from(2);
+                }
+                changes.push((pair[0].clone(), on));
+            }
+            finish(footers::apply(&cfg, &config_path(), &changes, dry))
+        }
         Some("restore") => {
             let stamp = match rest.iter().find(|a| !a.starts_with('-')) {
                 Some(s) => s.clone(),
@@ -3572,9 +3602,10 @@ COMMANDS:
                         (--user, --domain, --all for subdomains, --json)
     acctdns fix <domain> <spf|dkim|dmarc>   Install the missing record with cPanel's installer (--record
                         to publish your own; nothing is hand-edited in a zone file)
-    footers <status|off|restore [backup]|backups>   The text MailScanner writes into delivered mail
-                        (clean-mail footer, unscanned note, removed-attachment warning): switch it
-                        off with a backup of the settings and footer texts, or put a backup back
+    footers <status|set|off|restore [backup]|backups>   What MailScanner changes in delivered mail
+                        (body text, attachments, subject tags, headers, rewriting, notices):
+                        `set \"Spam Modify Subject\" off` switches one, `off` removes all body text;
+                        every change keeps a backup of the lines and footer texts, `restore` puts one back
     dmarc fetch         Read DMARC aggregate reports from the rua= mailbox (Config tab), store them,
                         delete the imported mails (cron: hourly; --dry-run, --keep, --json)
     dmarc import <file> Store report files (.xml, .xml.gz, .zip) or saved report mails (.eml)

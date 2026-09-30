@@ -461,7 +461,7 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
                 } else {
                     "Mark Infected Messages = yes — when an attachment is removed, MailScanner inserts an inline warning into the HTML part right after <html>, before <head>; Outlook and Apple Mail render such messages as a wreck".into()
                 },
-                "set Mark Infected Messages = no in MailScanner.conf (Config tab), or switch every body insertion off at once with Settings → Message footers (backup kept) — the {Filename?} subject tag and the …-Attachment-Warning.txt attachment (Warning Is Attachment = yes) still tell the recipient what was removed and why",
+                "set Mark Infected Messages = no in MailScanner.conf (Config tab), or switch it with Settings → What MailScanner changes in mail (backup kept) — the {Filename?} subject tag and the …-Attachment-Warning.txt attachment (Warning Is Attachment = yes) still tell the recipient what was removed and why",
             )
             .propose(
                 "set Mark Infected Messages = no and restart MailScanner",
