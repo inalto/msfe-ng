@@ -94,14 +94,14 @@ const rlbl=r=>r.reloaded?'reloaded':(r.changed===0?'no reload needed (unchanged)
 })();
 
 // ---- modal -------------------------------------------------------------------
-function modal(title){
+function modal(title,onClose){
   const body=el('div',{});
   const box=el('div',{class:'modal'},
     Object.assign(el('button',{class:'close',title:'Close'},'✕'),{onclick:close}),
     el('h2',{},title),body);
   const bg=el('div',{class:'modal-bg'},box);
   bg.onclick=e=>{if(e.target===bg)close();};
-  function close(){bg.remove();document.removeEventListener('keydown',esc);}
+  function close(){bg.remove();document.removeEventListener('keydown',esc);if(onClose)onClose();}
   function esc(e){if(e.key==='Escape')close();}
   document.addEventListener('keydown',esc);
   document.body.append(bg);
@@ -3006,7 +3006,17 @@ async function renderAcctDns(v){
   }
   function acdRepair(n,only){
     const r=n.row,d=(r.domain||{}).domain||'',dns=acdDns(r.zone);
-    const m=modal('Repair '+d);
+    // Once anything was applied, closing re-checks the domain so its row shows
+    // the zone as it is now, not the row the last installer call returned.
+    let applied=false;
+    const m=modal('Repair '+d,async()=>{
+      if(!applied)return;
+      n.tr.classList.add('busy');
+      const res=await api('/api/acctdns/scan',{method:'POST',body:{domain:d}});
+      n.tr.classList.remove('busy');
+      if(res&&res.row){upsert(res.row);order();draw();}
+      else toast((res&&res.error)||'could not re-check '+d);
+    });
     m.body.append(el('div',{class:'muted',style:'font-size:.8rem;margin-bottom:.5rem'},
       'Each selected change runs one of cPanel’s own installers for '+d+'. DNS: '+dns.label+' — '+dns.title+'.'));
     const parts=[];
@@ -3065,7 +3075,7 @@ async function renderAcctDns(v){
         out.textContent+='# '+p.label+'\n';
         const res=await acdFix(d,p.k,p.k==='dkim'?null:(p.value()||null));
         out.textContent+=(((res&&res.actions)||[]).join('\n')||(res&&res.error)||'no output')+'\n\n';
-        if(res&&res.ok){if(res.row){n.row=acdNorm(res.row);fillRow(n);order();draw();if(n.open)drawDetail(n);}}
+        if(res&&res.ok){applied=true;if(res.row){n.row=acdNorm(res.row);fillRow(n);order();draw();if(n.open)drawDetail(n);}}
         else bad++;
       }
       go.disabled=false;
