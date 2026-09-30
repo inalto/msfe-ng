@@ -56,7 +56,9 @@ msfe-ng delivery testmail --from <hosted address> --to <address> [--tag <t>] [--
 msfe-ng delivery monitor <list [--json] | add <address> [--interval-mins n] [--audit] [--ip ..] [--selector ..] | remove <id|address> | run [--dry-run] [--id n]>   scheduled re-tests (history in MySQL, regressions to Telegram)
 msfe-ng acctdns scan [--user <u>] [--domain <d>] [--all] [--json]   SPF, DKIM and DMARC for every domain hosted here (subdomains with --all; exit 1 on a failure, 3 on a non-cPanel host)
 msfe-ng acctdns fix <domain> <spf|dkim|dmarc> [--record <r>] [--json]   install the record through cPanel's own installer (exit 1 when it refused)
-msfe-ng footers <status [--json] | off [--dry-run] | restore [<backup>] [--dry-run] | backups>   the text MailScanner writes into delivered mail: off with a backup, or put back (see Settings → Message footers)
+msfe-ng service units [--json]   the daemons mail depends on: running now, and enabled at boot? (exit 1 when one needs attention)
+msfe-ng service unit <name> <enable|start|restart|enable-now>   act on one of them
+msfe-ng footers <status [--json] | set "<directive>" on|off ... [--dry-run] | off [--dry-run] | restore [<backup>] [--dry-run] | backups>   what MailScanner changes in delivered mail, one switch per setting, with backups (see Settings → What MailScanner changes in mail)
 msfe-ng dmarc fetch [--dry-run] [--keep] [--json]   read the DMARC report mailbox, store the reports, delete the imported mails (cron: hourly)
 msfe-ng dmarc import <file>... [--json]   store DMARC report files (.xml, .xml.gz, .zip) or saved report mails (.eml)
 msfe-ng dmarc <status [--json] | test | prune>   last fetch and stored totals | IMAP login check | drop rows past retention

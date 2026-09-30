@@ -47,6 +47,7 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
         ("legacy", _) => Some(NONE),
         ("engine", _) => Some(NONE),
         ("service", Some("spool-repair")) => Some(DRY),
+        ("service", Some("units")) => Some(&["--json"]),
         ("service", _) => Some(NONE),
         ("mailscanner", _) => Some(NONE),
         ("upgrade", _) => Some(&["--check"]),
@@ -123,7 +124,7 @@ fn usage_of(cmd: &str) -> &'static str {
             "msfe-ng engine <status|install|configure|enable|disable|lint|wire|unwire> [--dry-run]"
         }
         "service" => {
-            "msfe-ng service <status|start|stop|reload|restart|queue-fix|spool-repair [--dry-run]>"
+            "msfe-ng service <status|start|stop|reload|restart|queue-fix|spool-repair [--dry-run]|units [--json]|unit <name> <enable|start|restart|enable-now>>"
         }
         "mailscanner" => "msfe-ng mailscanner <status|enable-logging|disable-logging>",
         "legacy" => "msfe-ng legacy decommission [--run]",
@@ -191,6 +192,7 @@ fn main() -> ExitCode {
         "monitor" => cmd_monitor(args.get(1).map(String::as_str)),
         "digest" => cmd_digest(args.get(1).map(String::as_str)),
         "exim" => cmd_exim(args.get(1).map(String::as_str)),
+        "service" if matches!(sub, Some("units" | "unit")) => cmd_service_units(sub, rest),
         "service" => cmd_service(args.get(1).map(String::as_str)),
         "rules" => cmd_rules(args.get(1).map(String::as_str)),
         "engine" => cmd_engine(args.get(1).map(String::as_str)),
@@ -1927,6 +1929,86 @@ fn cmd_rules_adopt() -> ExitCode {
 }
 
 /// MailScanner service control and queue tooling (mirrors the Service tab).
+/// `service units`: the daemons the mail system needs, running and at boot;
+/// `service unit <name> <enable|start|restart|enable-now>` acts on one.
+fn cmd_service_units(sub: Option<&str>, rest: &[String]) -> ExitCode {
+    use msfe_core::units;
+    let cfg = Config::load(&config_path());
+    if sub == Some("unit") {
+        let (Some(unit), Some(action)) = (rest.first(), rest.get(1)) else {
+            eprintln!("usage: {}", usage_of("service"));
+            return ExitCode::from(2);
+        };
+        let (ok, lines) = units::act(&cfg, unit, action);
+        for l in lines {
+            println!("{l}");
+        }
+        return if ok {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(1)
+        };
+    }
+    let r = units::report(&cfg);
+    if rest.iter().any(|a| a == "--json") {
+        println!("{}", units::report_json(&r));
+        return ExitCode::SUCCESS;
+    }
+    println!(
+        "systemd: {}",
+        if r.system.is_empty() {
+            "unknown"
+        } else {
+            &r.system
+        }
+    );
+    let mut bad = false;
+    for u in &r.units {
+        let mark = match u.verdict {
+            units::Verdict::Ok => "ok  ",
+            units::Verdict::NotUsed => "--  ",
+            units::Verdict::Held => "held",
+            units::Verdict::NotAtBoot => {
+                bad = true;
+                "BOOT"
+            }
+            _ => {
+                bad = true;
+                "FAIL"
+            }
+        };
+        println!(
+            "  [{mark}] {:<18} {:<22} running: {:<16} at boot: {}{}",
+            u.label,
+            u.id.as_deref().unwrap_or("(not installed)"),
+            if u.id.is_some() {
+                format!("{} ({})", u.active, u.sub)
+            } else {
+                "-".into()
+            },
+            if u.id.is_some() {
+                u.file_state.as_str()
+            } else {
+                "-"
+            },
+            if u.restarts > 0 {
+                format!("  restarts: {}", u.restarts)
+            } else {
+                String::new()
+            }
+        );
+    }
+    for (unit, desc) in &r.failed {
+        println!("  failed on this host: {unit} — {desc}");
+    }
+    if bad {
+        println!("fix: msfe-ng service unit <name> enable-now   (or the Service tab)");
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
 fn cmd_service(sub: Option<&str>) -> ExitCode {
     use msfe_core::{mailflow, service};
     let cfg = Config::load(&config_path());
@@ -2028,7 +2110,7 @@ fn cmd_service(sub: Option<&str>) -> ExitCode {
         },
         _ => {
             eprintln!(
-                "usage: msfe-ng service <status|start|stop|reload|restart|queue-fix|spool-repair>"
+                "usage: msfe-ng service <status|start|stop|reload|restart|queue-fix|spool-repair|units|unit <name> <action>>"
             );
             ExitCode::from(2)
         }
@@ -3625,6 +3707,9 @@ COMMANDS:
     upgrade [--check]                 Upgrade MSFE-NG to the latest release (or just compare)
     resolver <status|install>         Private DNS resolver (unbound on loopback) so the blocklists answer
     service <status|start|stop|reload|restart|queue-fix|spool-repair>   MailScanner service & queues
+    service units [--json]   The daemons mail depends on (msfe-ng, MailScanner, Exim, clamd, database,
+                        cron; csf/lfd/unbound/dovecot when installed): running now, and enabled at boot?
+    service unit <name> <enable|start|restart|enable-now>   Act on one of them
     doctor [--fix]      Check every link of the scanning chain; names each fix (--fix applies the mechanical ones)
     doctor --apply <check name>   Apply the change a notice proposes (a decision made by you; validated, previous version kept)
     doctor ack <check name> [--days <n> | --forever] [--note <text>]   Acknowledge a notice: hidden while it stays at that level (30 days by default)

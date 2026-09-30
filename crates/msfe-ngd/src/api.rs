@@ -18,6 +18,26 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
     }
     match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/api/config") => Response::json(200, &cfg.to_public_json().to_string()),
+        ("GET", "/api/service/units") => Response::json(
+            200,
+            &msfe_core::units::report_json(&msfe_core::units::report(cfg)).to_string(),
+        ),
+        ("POST", "/api/service/units/action") => {
+            let v = Json::parse(&req.body).unwrap_or(Json::Null);
+            let (ok, transcript) =
+                msfe_core::units::act(cfg, &v.str_field("unit"), &v.str_field("action"));
+            Response::json(
+                200,
+                &Json::Object(vec![
+                    ("ok".into(), Json::Bool(ok)),
+                    (
+                        "transcript".into(),
+                        Json::Array(transcript.into_iter().map(Json::Str).collect()),
+                    ),
+                ])
+                .to_string(),
+            )
+        }
         ("GET", "/api/footers") => {
             let st = msfe_core::footers::state(cfg, config_file);
             Response::json(200, &msfe_core::footers::state_json(&st).to_string())

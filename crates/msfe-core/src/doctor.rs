@@ -496,6 +496,26 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
         scanning.describe().into(),
         "msfe-ng exim enable-scanning (or the mailflow toggle on the Service tab)",
     ));
+    // Daemons running now but not enabled come back only by hand after a
+    // reboot (a MailScanner unit set up by hand is typically left disabled)
+    let (boot_ok, boot_detail, boot_cmds) =
+        crate::units::boot_verdict(&crate::units::report(cfg).units);
+    let boot_check = check(
+        "services start at boot",
+        boot_ok,
+        Level::Warn,
+        boot_detail,
+        "Service tab → System services → Enable at boot (systemctl enable <unit>)",
+    );
+    out.push(if boot_cmds.is_empty() {
+        boot_check
+    } else {
+        let names: Vec<String> = boot_cmds.iter().filter_map(|c| c.last().cloned()).collect();
+        boot_check.propose(
+            format!("systemctl enable {}", names.join(" ")),
+            Proposal::Commands(boot_cmds),
+        )
+    });
     // A MailScanner.service left by another era, pointing at a binary that
     // is gone (a ConfigServer-era unit, enabled, failing at every boot)
     let stale_units = crate::legacy::stale_engine_units(Path::new("/"));

@@ -90,6 +90,7 @@ pub mod telegram;
 pub mod testmail;
 pub mod tlsprobe;
 pub mod tschecks;
+pub mod units;
 pub mod upgrade;
 pub mod users;
 pub mod xml;

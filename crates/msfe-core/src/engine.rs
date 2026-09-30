@@ -1231,12 +1231,23 @@ pub fn wire(cfg: &Config, dry: bool) -> io::Result<WireReport> {
     // 4. rebuild + restart Exim so the ACL takes effect
     exim_rebuild(&mut actions, dry);
 
-    // 5. restart MailScanner so it re-reads its queue dirs (only if allowed)
+    // 5. restart MailScanner so it re-reads its queue dirs (only if allowed),
+    // and make sure it comes back after a reboot: with Exim routing mail
+    // through it, a MailScanner that does not start leaves mail queued
     if !dry && service::engine_run_enabled(cfg) == Some(true) {
         let o = service::control("restart");
         actions.push(format!(
             "restarted MailScanner: {}",
             if o.ok { "ok" } else { "FAILED" }
+        ));
+        let unit = crate::layout::service_unit();
+        let enabled = std::process::Command::new("systemctl")
+            .args(["enable", unit])
+            .output()
+            .is_ok_and(|o| o.status.success());
+        actions.push(format!(
+            "enabled {unit} at boot: {}",
+            if enabled { "ok" } else { "FAILED" }
         ));
     }
     Ok(WireReport {

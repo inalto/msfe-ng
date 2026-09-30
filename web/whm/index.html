@@ -1645,6 +1645,69 @@ async function renderService(){
   svc.append(el('div',{class:'ctl'},wireBtn,previewBtn));
   v.append(con);
 
+  // System services: are the daemons mail depends on running, and will they
+  // start again after a reboot? (systemctl is-active / is-enabled)
+  const su=el('div',{class:'card',id:'units-card'},el('h2',{},'System services — running now, and at boot'),
+    el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},
+      'Every daemon the mail system depends on, as systemd sees it. “Not at boot” means it runs now but would stay stopped after a reboot — enable it. Optional services are checked only when installed.'));
+  v.append(su);
+  const suHead=el('div',{class:'ctl'});
+  const suBody=el('div',{},el('span',{class:'muted'},'Checking…'));
+  const suOut=el('pre',{class:'log',style:'display:none;max-height:12rem'});
+  su.append(suHead,suBody,suOut);
+  const SU_CHIP={ok:['ok','running · at boot'],not_at_boot:['warn','running · NOT at boot'],not_running:['fail','not running'],
+    missing:['fail','not installed'],not_used:['na','not in use'],held:['na','held by the safety switch']};
+  async function suAct(u,action,label){
+    const risky=action!=='enable'&&['exim','mysqld','mariadb','mysql'].includes(u.name);
+    if(!confirm(`${label}: ${u.unit}?`+(risky?'\n\n'+u.label+' is briefly unavailable while it restarts.':'')))return;
+    suOut.style.display='';suOut.textContent='▶ systemctl …';
+    const r=await api('/api/service/units/action',{method:'POST',body:{unit:u.name,action}});
+    suOut.textContent=((r&&r.transcript)||[(r&&r.error)||'no response']).join('\n');
+    toast(r&&r.ok?label+': done':label+' failed — see the output');
+    loadUnits();
+  }
+  async function loadUnits(){
+    const r=await api('/api/service/units');
+    suHead.innerHTML='';suBody.innerHTML='';
+    if(!r||r.error){suBody.append(el('div',{class:'note warn'},(r&&r.error)||'cannot ask systemd'));return;}
+    const us=r.units||[];
+    const bad=us.filter(u=>['not_at_boot','not_running','missing'].includes(u.verdict));
+    const sys=r.system||'unknown';
+    suHead.append(
+      el('span',{class:'statline'},el('span',{class:'dot',style:'background:'+(bad.length?'var(--warning)':'var(--good)')}),
+        el('b',{},bad.length?` ${bad.length} service(s) need attention`:' Everything is running and starts at boot')),
+      el('span',{class:'chip '+(sys==='running'?'ok':sys==='degraded'?'warn':'na'),title:'systemctl is-system-running'},'systemd: '+sys),
+      Object.assign(el('button',{class:'act plain',style:'margin-left:auto'},'Check again'),{onclick:loadUnits}));
+    const t=el('table',{class:'dm-table'});
+    t.append(el('tr',{},...['Service','Unit','State','Since','',''].map(h=>el('th',{},h))));
+    us.forEach(u=>{
+      const [cls,txt]=SU_CHIP[u.verdict]||['na',u.verdict];
+      const acts=el('td',{style:'white-space:nowrap;text-align:right'});
+      const b=(label,action,primary)=>Object.assign(el('button',{class:primary?'act':'act plain',style:'margin-left:.3rem'},label),{onclick:()=>suAct(u,action,label)});
+      if(u.unit){
+        if(u.verdict==='not_at_boot')acts.append(b('Enable at boot','enable',true));
+        else if(u.verdict==='not_running')acts.append(b(u.at_boot?'Start':'Enable & start',u.at_boot?'start':'enable-now',true));
+        else if(u.verdict==='held'&&!u.at_boot)acts.append(b('Enable at boot','enable',false));
+        if(u.running&&u.name!=='msfe-ng')acts.append(b('Restart','restart',false));
+      }
+      t.append(el('tr',{style:u.verdict==='not_used'?'opacity:.6':''},
+        el('td',{},el('b',{},u.label),u.required?'':el('span',{class:'muted',style:'font-size:.72rem'},' optional'),
+          el('div',{class:'muted',style:'font-size:.74rem'},u.why)),
+        el('td',{class:'mono',style:'font-size:.78rem'},u.unit||'—'),
+        el('td',{},el('span',{class:'chip '+cls,style:'white-space:nowrap'},txt),
+          u.unit?el('div',{class:'muted mono',style:'font-size:.7rem'},`${u.active}${u.sub?' ('+u.sub+')':''} · ${u.file_state||'?'}`+(u.restarts?` · ${u.restarts} restart(s)`:'')):''),
+        el('td',{class:'muted',style:'font-size:.76rem'},u.running?u.since:''),
+        el('td',{}),acts));
+    });
+    suBody.append(el('div',{class:'dm-scroll'},t));
+    if((r.failed||[]).length){
+      suBody.append(el('div',{class:'note warn',style:'margin-top:.5rem;font-size:.8rem'},
+        'Failed units on this server (systemd is “degraded” because of them; not necessarily mail-related): ',
+        ...r.failed.map((f,i)=>el('span',{},i?', ':'',el('code',{class:'mono'},f.unit),f.description?' ('+f.description+')':''))));
+    }
+  }
+  loadUnits();
+
   // Health check: MailScanner's own self-test, with a plain verdict.
   const hc=el('div',{class:'card'},el('h2',{},'Health check'),
     el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},

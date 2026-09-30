@@ -55,6 +55,50 @@ the right.
 The **Activity console** below shows each command and its output, then follows
 the MailScanner journal for ~20 s so startup progress and errors are visible.
 
+## System services — running now, and at boot
+
+One row for every daemon the mail system depends on, as systemd sees it.
+The first six are required; the rest are optional and checked only when
+they are installed.
+
+| Service | Unit(s) looked for | Role |
+|---|---|---|
+| MSFE-NG | `msfe-ng` | this panel's daemon |
+| MailScanner | `mailscanner` / `MailScanner` | scans the mail Exim queues for it |
+| Exim | `exim` | receives and delivers all mail |
+| ClamAV | `clamd` / `clamd@scan` | the virus scanner |
+| Database | `mysqld` / `mariadb` / `mysql` | message log, quarantine index, DMARC reports |
+| Cron | `crond` / `cron` | msfe-ng's scheduled jobs |
+| Dovecot, csf, lfd, Unbound | same names | mailboxes, firewall, login-failure daemon, local resolver (optional) |
+
+Each row shows one of these states:
+
+| State | Meaning |
+|---|---|
+| *running · at boot* | fine |
+| ***running · NOT at boot*** | it runs now but stays stopped after a reboot. **Enable at boot** fixes it |
+| *not running* | it should be running. **Start**, or **Enable & start** when it is not enabled either |
+| *not installed* | a required service has no unit |
+| *held by the safety switch* | MailScanner is stopped on purpose (see [MailScanner service](#mailscanner-service)) |
+| *not in use* | an optional service that is not installed or not enabled |
+
+Running services also have **Restart**, except msfe-ng itself: restarting it
+from the page would cut the page off. Use `systemctl restart msfe-ng`. Every
+action asks first and shows the `systemctl` output.
+
+The header shows systemd's overall state (`systemctl is-system-running`). A
+*degraded* state lists the failed units on the server, which are often not
+mail-related (for example cPanel's greylisting daemon).
+
+A MailScanner set up by hand is often left **not enabled at boot**. It runs
+until the next reboot, and then mail waits unscanned in the queue. The
+[doctor](Admin-UI-basics) reports this as *services start at boot*, with a
+one-click `systemctl enable`. Wiring Exim to MailScanner from this tab now
+enables the unit too.
+
+From the command line: `msfe-ng service units` (exit 1 when something needs
+attention) and `msfe-ng service unit <name> <enable|start|restart|enable-now>`.
+
 ## Health check
 
 **Test that everything is OK** runs MailScanner's built-in self-check

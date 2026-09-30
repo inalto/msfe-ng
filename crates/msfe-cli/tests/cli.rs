@@ -651,3 +651,33 @@ fn footers_flags_and_usage() {
     );
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn footers_set_validates_before_touching_anything() {
+    let d = tmp("footers-set");
+    std::fs::write(d.join("config.toml"), "").unwrap();
+    for args in [
+        vec!["footers", "set", "Allow Script Tags", "off"],
+        vec!["footers", "set", "Spam Modify Subject", "maybe"],
+        vec!["footers", "set", "Spam Modify Subject"],
+    ] {
+        let out = msfe_ng(&d, &args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+    }
+    assert!(!d.join("footers").exists());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn service_unit_needs_a_name_and_an_action() {
+    let d = tmp("units");
+    std::fs::write(d.join("config.toml"), "").unwrap();
+    let out = msfe_ng(&d, &["service", "unit", "mailscanner"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let out = msfe_ng(&d, &["service", "units", "--all"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let out = msfe_ng(&d, &["service", "unit", "sshd", "start"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("not one of the services"));
+    let _ = std::fs::remove_dir_all(&d);
+}
