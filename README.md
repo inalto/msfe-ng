@@ -11,6 +11,8 @@ ConfigServer MailScanner Front-End (MSFE). It reads MSFE's old config files so
 you can migrate, but ships **no licensing, no phone-home, and no obfuscation** —
 just maintainable, auditable code.
 
+[![GitHub stars](https://img.shields.io/github/stars/inalto/msfe-ng?style=social)](https://github.com/inalto/msfe-ng)
+
 > **Status: v1.0 — in production.** Runs on a live cPanel/Exim server:
 > installs (optionally including MailScanner itself), wires Exim to the scanner,
 > logs and archives every message to MySQL, edits and tests every MailScanner
@@ -158,6 +160,9 @@ Full documentation: **[Usage wiki](https://github.com/inalto/msfe-ng/wiki)** ·
 **[Admin guide](docs/admin-guide.md)** ·
 **[User guide](docs/user-guide.md)** · **[Migration guide](docs/migration.md)** ·
 **[Architecture](docs/architecture.md)**.
+
+If MSFE-NG saves you time, please ⭐ [star the repo](https://github.com/inalto/msfe-ng) — it helps
+other MailScanner admins find it.
 
 ## Architecture
 

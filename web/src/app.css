@@ -218,6 +218,9 @@
     color: var(--accent);
     text-decoration: underline;
   }
+  .rail .foot .links a.star:hover {
+    color: #e3b341;
+  }
   .rail .health {
     display: flex;
     align-items: center;

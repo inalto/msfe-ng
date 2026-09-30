@@ -28,7 +28,7 @@
           <button class="iconbtn" id="themebtn" title="Toggle light / dark / auto">◑ Theme</button>
         </div>
         <div class="version">{{VIEW}} · {{PANEL}} · v{{VERSION}}</div>
-        <div class="links"><a href="https://github.com/inalto/msfe-ng" target="_blank" rel="noopener">GitHub</a> · <a href="https://github.com/inalto/msfe-ng/wiki" target="_blank" rel="noopener">Wiki</a> · <a href="https://github.com/inalto/msfe-ng/issues" target="_blank" rel="noopener">Issues</a></div>
+        <div class="links"><a class="star" href="https://github.com/inalto/msfe-ng" target="_blank" rel="noopener" title="Like MSFE-NG? A star on GitHub helps others find it">★ Star</a> · <a href="https://github.com/inalto/msfe-ng" target="_blank" rel="noopener">GitHub</a> · <a href="https://github.com/inalto/msfe-ng/wiki" target="_blank" rel="noopener">Wiki</a> · <a href="https://github.com/inalto/msfe-ng/issues" target="_blank" rel="noopener">Issues</a></div>
       </div>
     </aside>
     <div class="content">
@@ -1842,7 +1842,9 @@ async function renderService(){
       el('a',{href:'https://github.com/MailScanner/v5/releases',target:'_blank'},'release notes'));
       engBtn.dataset.latest=e.latest;engBtn.style.display='';}
   };
-  up.append(upline,engline,el('div',{class:'ctl'},upBtn,selfBtn,engBtn),jobCon);uc.append(up);
+  const starline=el('div',{class:'muted',style:'font-size:.78rem;margin-top:.6rem'},'Useful? ',
+    el('a',{href:'https://github.com/inalto/msfe-ng',target:'_blank',rel:'noopener'},'★ Star MSFE-NG on GitHub'),' — it helps other MailScanner admins find it.');
+  up.append(upline,engline,el('div',{class:'ctl'},upBtn,selfBtn,engBtn),jobCon,starline);uc.append(up);
   // Private DNS resolver: the blocklists refuse shared resolvers. Shown until
   // unbound answers on loopback and resolv.conf points there.
   const rs=el('div',{class:'card',style:'display:none'},el('h2',{},'Private DNS resolver'));

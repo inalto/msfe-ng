@@ -36,4 +36,4 @@ the discontinued ConfigServer MSFE.
 - [CLI reference](CLI)
 - [Troubleshooting](Troubleshooting) — doctor, common incidents, Exim 4.100
 
-Source, releases and issues: <https://github.com/inalto/msfe-ng>.
+Source, releases and issues: <https://github.com/inalto/msfe-ng>. If MSFE-NG is useful to you, a ⭐ on GitHub helps others find it.
