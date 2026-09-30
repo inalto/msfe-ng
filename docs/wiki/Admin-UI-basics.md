@@ -26,7 +26,8 @@ every tab is described on its own wiki page.
   when and until when, your note, and *Unacknowledge*.
 - **Theme** — cycles Auto → Light → Dark; remembered in the browser.
 - **Version** — the running daemon's version, with links to the project on
-  GitHub, this wiki and the issue tracker.
+  GitHub, this wiki and the issue tracker. **★ Star** opens the GitHub page:
+  if MSFE-NG is useful to you, a star helps other MailScanner admins find it.
 
 ## The doctor banner
 
