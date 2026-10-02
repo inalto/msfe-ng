@@ -55,14 +55,14 @@ fn fixture_enabled() -> bool {
 
 pub fn infos(cfg: &Config) -> Vec<Info> {
     let mut v = vec![
-        hibp_info(cfg),
+        delivery_info(),
         gravatar_info(),
         rdap_info(),
-        search_info(cfg),
-        hunter_info(cfg),
         github_info(),
         pgp_info(),
-        delivery_info(),
+        hibp_info(cfg),
+        search_info(cfg),
+        hunter_info(cfg),
     ];
     if fixture_enabled() {
         v.push(Info {
@@ -1817,7 +1817,7 @@ fn github(q: &QueryCtx) -> Outcome {
         host: GITHUB_HOST.to_string(),
         path: "/search/users".to_string(),
         query: vec![
-            ("q", format!("{addr} in:email")),
+            ("q", format!("\"{addr}\" in:email")),
             ("per_page", GITHUB_MAX_PROFILES.to_string()),
         ],
         headers: vec![
@@ -3389,7 +3389,10 @@ mod tests {
             assert_eq!(o.source.retry_after, retry, "{reply}");
             let line = head.lines().next().unwrap();
             assert!(line.starts_with("GET /search/users?q="), "{line}");
-            assert!(line.contains("a%2Bb%40example.org%20in%3Aemail"), "{line}");
+            assert!(
+                line.contains("%22a%2Bb%40example.org%22%20in%3Aemail"),
+                "{line}"
+            );
             assert!(line.contains("per_page=3"), "{line}");
             let low = head.to_ascii_lowercase();
             assert!(

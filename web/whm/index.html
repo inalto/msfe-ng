@@ -2764,7 +2764,8 @@ async function renderOsint(v){
     const linked=p.id==='delivery';
     const cb=el('input',{type:'checkbox'});
     // The Delivery context source is ticked and fixed only when a run is linked.
-    if(!linked||hasLink)cb.checked=true;
+    // The paid mailbox-probing Hunter check is an explicit choice for each run.
+    if((!linked||hasLink)&&p.id!=='hunter')cb.checked=true;
     if(linked&&hasLink)cb.disabled=true;
     cb.dataset.id=p.id;boxes.push(cb);
     srcRow.append(el('label',{style:'display:block;font-size:.85rem'},cb,' ',el('b',{},p.name),el('span',{class:'muted'},' — '+p.disclosure+(p.configured===false?' — not configured':''))));

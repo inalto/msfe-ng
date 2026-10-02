@@ -194,7 +194,7 @@ impl Default for Config {
             osint_runs_per_min: 3,
             osint_max_concurrent: 2,
             osint_deadline_secs: 30,
-            osint_max_external_queries: 5,
+            osint_max_external_queries: 8,
             osint_cache_secs: 3600,
             osint_retention_hours: 24,
             delivery_log_days: 2,
@@ -334,7 +334,7 @@ impl Config {
                     c.osint_deadline_secs = v.parse().unwrap_or(30).clamp(5, 120)
                 }
                 "osint_max_external_queries" => {
-                    c.osint_max_external_queries = v.parse().unwrap_or(5).clamp(1, 20)
+                    c.osint_max_external_queries = v.parse().unwrap_or(8).clamp(1, 20)
                 }
                 "osint_cache_secs" => c.osint_cache_secs = v.parse().unwrap_or(3600),
                 "osint_retention_hours" => {
@@ -681,6 +681,7 @@ mod tests {
         let d = Config::default();
         assert!(!d.osint_enabled);
         assert_eq!((d.osint_runs_per_min, d.osint_max_concurrent), (3, 2));
+        assert_eq!(d.osint_max_external_queries, 8);
         let c = Config::from_toml_str(
             "osint_enabled = true\nosint_runs_per_min = 999\nosint_deadline_secs = 1\n",
         );

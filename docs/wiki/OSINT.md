@@ -59,9 +59,11 @@ can use it.
 | `osint_runs_per_min` | 3 | runs accepted per minute (1-30) |
 | `osint_max_concurrent` | 2 | runs at the same time (1-8) |
 | `osint_deadline_secs` | 30 | a run is stopped after this long (5-120); what finished is kept as a partial report |
-| `osint_max_external_queries` | 5 | most outside lookups one run may make (1-20) |
+| `osint_max_external_queries` | 8 | most outside lookups one run may make (1-20) |
 | `osint_cache_secs` | 3600 | a repeat of the same lookup inside this time reuses the earlier report; *Fresh lookup* bypasses it |
 | `osint_retention_hours` | 24 | how long a report and its avatar are kept (1-720) |
+
+Only configured outside sources use this budget; a source with no key is reported as not configured without spending it. In the shell every configured source is ticked by default except Hunter, whose paid mailbox check you tick for the runs where you want it.
 
 A run request may carry `external_query_limit` to lower the outside-lookup budget
 for that run; it is clamped to `osint_max_external_queries` and never raises it. The shell runs the controller in its own process, so the

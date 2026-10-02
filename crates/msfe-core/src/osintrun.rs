@@ -282,6 +282,37 @@ pub fn start(cfg: &Config, inputs: Inputs) -> Result<StartOk, StartError> {
     Ok(StartOk::Started(id))
 }
 
+/// Which requested sources run, in the order requested. Only a configured
+/// external source uses the budget: the Delivery pseudo-source never leaves the
+/// server, and an unconfigured one makes no request (its adapter just reports
+/// `not_configured`), so neither can crowd out a later source.
+pub(crate) fn plan_with_budget(
+    infos: &[osintproviders::Info],
+    requested: &[String],
+    budget: usize,
+) -> Vec<(String, bool)> {
+    let mut used = 0usize;
+    requested
+        .iter()
+        .map(|id| {
+            let local = id == osintproviders::DELIVERY_ID;
+            let configured = infos
+                .iter()
+                .find(|i| i.id == id.as_str())
+                .map(|i| i.configured)
+                .unwrap_or(true);
+            if local || !configured {
+                return (id.clone(), true);
+            }
+            if used >= budget {
+                return (id.clone(), false);
+            }
+            used += 1;
+            (id.clone(), true)
+        })
+        .collect()
+}
+
 fn worker(
     id: String,
     inputs: Inputs,
@@ -299,16 +330,13 @@ fn worker(
     let mut sources = Vec::new();
     let mut findings: Vec<Finding> = Vec::new();
     let mut assets: Vec<Asset> = Vec::new();
-    let mut ran = 0usize;
     let mut panicked = false;
-    for p in &inputs.providers {
+    let plan = plan_with_budget(&osintproviders::infos(&cfg), &inputs.providers, max_q);
+    for (p, runs) in &plan {
         if cancel.load(Ordering::Relaxed) || Instant::now() >= deadline {
             break;
         }
-        // The Delivery pseudo-source never leaves the server: it does not use
-        // the external query budget.
-        let local = p == osintproviders::DELIVERY_ID;
-        if !local && ran >= max_q {
+        if !runs {
             sources.push(SourceStatus {
                 id: p.clone(),
                 state: SourceState::NotRequested,
@@ -316,9 +344,6 @@ fn worker(
                 detail: "skipped: external query limit for this run reached".into(),
             });
             continue;
-        }
-        if !local {
-            ran += 1;
         }
         let q = QueryCtx {
             address: &inputs.address,
@@ -1231,6 +1256,85 @@ mod tests {
             !report_dir().join(format!("{id}.json")).exists(),
             "a removed run is never persisted"
         );
+    }
+
+    fn info(id: &'static str, configured: bool) -> osintproviders::Info {
+        osintproviders::Info {
+            id,
+            name: id,
+            disclosure: String::new(),
+            configured,
+        }
+    }
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn unconfigured_sources_do_not_use_the_budget_and_keyless_ones_still_run() {
+        let infos = vec![
+            info("delivery", true),
+            info("gravatar", true),
+            info("rdap", true),
+            info("github", true),
+            info("openpgp", true),
+            info("hibp", false),
+            info("search", false),
+            info("hunter", false),
+        ];
+        let req = ids(&[
+            "delivery", "gravatar", "rdap", "github", "openpgp", "hibp", "search", "hunter",
+        ]);
+        let p = plan_with_budget(&infos, &req, 4);
+        assert!(p.iter().all(|(_, run)| *run), "{p:?}");
+        // With every key set the same budget is spent on the first four.
+        let all: Vec<_> = infos.into_iter().map(|i| info(i.id, true)).collect();
+        let p = plan_with_budget(&all, &req, 4);
+        let skipped: Vec<&str> = p.iter().filter(|x| !x.1).map(|x| x.0.as_str()).collect();
+        assert_eq!(skipped, ["hibp", "search", "hunter"]);
+    }
+
+    #[test]
+    fn a_low_limit_skips_later_sources_and_delivery_stays_exempt() {
+        let infos = vec![
+            info("delivery", true),
+            info("gravatar", true),
+            info("rdap", true),
+        ];
+        let p = plan_with_budget(&infos, &ids(&["gravatar", "rdap", "delivery"]), 1);
+        assert_eq!(
+            p,
+            vec![
+                ("gravatar".to_string(), true),
+                ("rdap".to_string(), false),
+                ("delivery".to_string(), true)
+            ]
+        );
+    }
+
+    #[test]
+    fn real_info_order_puts_keyless_sources_first() {
+        let order: Vec<&str> = osintproviders::infos(&Config::default())
+            .iter()
+            .map(|i| i.id)
+            .filter(|id| *id != "fixture")
+            .collect();
+        assert_eq!(
+            order,
+            ["delivery", "gravatar", "rdap", "github", "openpgp", "hibp", "search", "hunter"]
+        );
+    }
+
+    #[test]
+    fn a_default_run_without_keys_reaches_the_keyless_sources() {
+        let cfg = Config::default();
+        let req = ids(&[
+            "delivery", "gravatar", "rdap", "github", "openpgp", "hibp", "search", "hunter",
+        ]);
+        let budget = query_budget(&cfg, &inp("quiet.plan@example.org", true));
+        let p = plan_with_budget(&osintproviders::infos(&cfg), &req, budget);
+        assert!(p.iter().all(|(_, run)| *run), "{p:?}");
     }
 
     #[test]
