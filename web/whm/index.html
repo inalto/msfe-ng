@@ -2859,7 +2859,7 @@ async function renderOsint(v){
     if(!d||d.error){moBody.append(el('div',{class:'note warn',style:'font-size:.8rem'},(d&&d.error)||'cannot load the monitors'));return;}
     const b=d.budget||{};
     moBody.append(el('div',{class:'muted',style:'font-size:.8rem;margin:.4rem 0'},
-      `A monitor re-runs the lookup with the sources you tick, at most once a day (${d.max} monitors at most). Every run uses provider quota. The first run is a baseline and never alerts; later runs report new public exposure or a source that stops answering${d.telegram?' on Telegram':' (Telegram is not configured: Settings → Telegram alerts — the history still records changes)'}. History is kept for 90 days.`));
+      `A monitor re-runs the lookup with the sources you tick, at most once a day (${d.max} monitors at most). Every run uses provider quota. The first run is a baseline and never alerts; later runs report new public exposure or a source that stops answering${d.telegram?' on Telegram':' (Telegram is not configured: Settings → Telegram alerts — the history still records changes)'}. History is kept for ${d.history_days>0?d.history_days:90} days.`));
     moBody.append(el('div',{class:'muted',style:'font-size:.8rem;margin:.2rem 0 .5rem'},
       'Monthly budget '+(b.period||'')+': '+(b.used||0)+' / '+(b.cap?b.cap:'unlimited')+' provider units used.'+(d.enabled?'':' OSINT is switched off, so monitors do not run.')));
     const mAddr=el('input',{type:'email',placeholder:'user@example.org',style:'max-width:18rem',value:addr.value.trim()});

@@ -170,6 +170,10 @@ fn monitors_list(cfg: &Config, store: &dyn Store) -> Response {
                 Json::Bool(msfe_core::telegram::configured(cfg)),
             ),
             ("enabled".into(), Json::Bool(cfg.osint_enabled)),
+            (
+                "history_days".into(),
+                Json::Int(cfg.osint_history_days as i64),
+            ),
         ])
         .to_string(),
     )
@@ -1058,6 +1062,7 @@ mod tests {
         let c = Config {
             osint_max_monitors: 7,
             osint_monitor_budget: 42,
+            osint_history_days: 30,
             ..setup()
         };
         let st = FakeStore::default();
@@ -1075,6 +1080,7 @@ mod tests {
         let j = Json::parse(r.body_str()).unwrap();
         assert_eq!(j.get("monitors").and_then(Json::as_array).unwrap().len(), 1);
         assert_eq!(j.get("max").and_then(Json::as_i64), Some(7));
+        assert_eq!(j.get("history_days").and_then(Json::as_i64), Some(30));
         assert!(matches!(j.get("telegram"), Some(Json::Bool(false))));
         assert!(matches!(j.get("enabled"), Some(Json::Bool(true))));
         let b = j.get("budget").unwrap();
