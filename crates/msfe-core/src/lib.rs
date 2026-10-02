@@ -72,6 +72,7 @@ pub mod osint;
 pub mod osinthtml;
 pub mod osintrun;
 pub mod panel;
+pub mod providerhttp;
 pub mod psl;
 pub mod quarantine;
 pub mod queueview;
