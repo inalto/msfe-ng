@@ -53,19 +53,55 @@ const MON: &str = "/api/delivery/osint/monitors";
 const MAX_BODY: usize = 4096;
 const MIGRATE_HINT: &str = "apply the pending migration: msfe-ng db-migrate";
 
+enum DbFault {
+    /// The table is not there: the migration has not been applied.
+    Missing,
+    /// The database cannot be reached or refused the login.
+    Unavailable,
+    /// The server answered with an SQL error (constraint, data, statement).
+    Other,
+}
+
+fn classify(e: &str) -> DbFault {
+    if e.contains("doesn't exist") {
+        return DbFault::Missing;
+    }
+    let access = [
+        "ERROR 1040",
+        "ERROR 1044",
+        "ERROR 1045",
+        "ERROR 1049",
+        "ERROR 1129",
+        "ERROR 1130",
+    ];
+    if e.contains("ERROR 1") && !access.iter().any(|a| e.contains(a)) {
+        DbFault::Other
+    } else {
+        DbFault::Unavailable
+    }
+}
+
 /// A store error as a short fixed message: the raw database text (which can
 /// name users, hosts or paths) never reaches the client.
 fn db_error(e: &str) -> Response {
-    if e.contains("doesn't exist") {
-        return err(
+    match classify(e) {
+        DbFault::Missing => err(
             503,
             &format!("the OSINT monitors tables are missing — {MIGRATE_HINT}"),
-        );
+        ),
+        DbFault::Unavailable | DbFault::Other => err(
+            503,
+            &format!("the database is not available — check it, then {MIGRATE_HINT} if it is new"),
+        ),
     }
-    err(
-        503,
-        &format!("the database is not available — check it, then {MIGRATE_HINT} if it is new"),
-    )
+}
+
+/// Like `db_error`, but an SQL error from a reachable database is a 500.
+fn db_error_write(e: &str) -> Response {
+    match classify(e) {
+        DbFault::Other => err(500, "could not save the monitor"),
+        _ => db_error(e),
+    }
 }
 
 fn body_json(req: &Request) -> Result<Json, Response> {
@@ -178,7 +214,7 @@ fn monitors_add(req: &Request, cfg: &Config, store: &dyn Store) -> Response {
     match store.add(&address, "", &sources, interval, cfg.osint_max_monitors) {
         Ok(m) => Response::json(201, &m.to_json().to_string()),
         Err(e) if e.starts_with("the limit of ") => err(400, &e),
-        Err(e) => db_error(&e),
+        Err(e) => db_error_write(&e),
     }
 }
 
@@ -234,6 +270,9 @@ fn spawn_pass(cfg: &Config) {
 fn spawn_pass(_cfg: &Config) {}
 
 fn monitors_run(req: &Request, cfg: &Config, store: &dyn Store) -> Response {
+    if !cfg.osint_enabled {
+        return err(403, "OSINT is switched off — enable it in Config first");
+    }
     let id = match id_of(req) {
         Ok(i) => i,
         Err(r) => return r,
@@ -245,6 +284,13 @@ fn monitors_run(req: &Request, cfg: &Config, store: &dyn Store) -> Response {
     };
     if !m.enabled {
         return err(409, "the monitor is paused — resume it first");
+    }
+    // A pass in flight would return at once without running anything.
+    if osintmon::pass_running(store, msfe_core::osint::now_secs()) {
+        return err(
+            409,
+            "a monitoring pass is already running — it will pick this monitor up on its next pass",
+        );
     }
     if let Err(e) = store.touch_last_run(m.id, 0) {
         return db_error(&e);
@@ -1190,5 +1236,64 @@ mod tests {
             404
         );
         assert_eq!(call("PUT", MON, "", &c, &st).status, 404);
+    }
+
+    #[test]
+    fn run_now_is_403_when_off_and_409_while_a_pass_runs() {
+        let mut c = setup();
+        let st = FakeStore::default();
+        call(
+            "POST",
+            MON,
+            r#"{"address":"a@example.org","sources":["fixture"]}"#,
+            &c,
+            &st,
+        );
+        st.touch_last_run(1, 777).unwrap();
+        st.kv_set(
+            "osintmon_running",
+            &msfe_core::osint::now_secs().to_string(),
+        )
+        .unwrap();
+        let r = call("POST", &format!("{MON}/run"), r#"{"id":1}"#, &c, &st);
+        assert_eq!(r.status, 409);
+        assert!(r.body_str().contains("already running"));
+        assert_eq!(st.get(1).unwrap().unwrap().last_run_at, 777);
+        // a stale guard does not block
+        st.kv_set(
+            "osintmon_running",
+            &(msfe_core::osint::now_secs() - 700).to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            call("POST", &format!("{MON}/run"), r#"{"id":1}"#, &c, &st).status,
+            202
+        );
+        c.osint_enabled = false;
+        st.touch_last_run(1, 777).unwrap();
+        assert_eq!(
+            call("POST", &format!("{MON}/run"), r#"{"id":1}"#, &c, &st).status,
+            403
+        );
+        assert_eq!(st.get(1).unwrap().unwrap().last_run_at, 777);
+    }
+
+    #[test]
+    fn database_faults_are_classified() {
+        let missing =
+            "mysql query failed: ERROR 1146 (42S02): Table 'x.osint_monitors' doesn't exist";
+        let down = "mysql query failed: ERROR 2002 (HY000): Can't connect to local server";
+        let denied = "mysql query failed: ERROR 1045 (28000): Access denied for user 'u'";
+        let nobin = "No such file or directory (os error 2)";
+        let sql = "mysql query failed: ERROR 1366 (22007): Incorrect string value 'secret'";
+        for e in [missing, down, denied, nobin] {
+            assert_eq!(db_error_write(e).status, 503, "{e}");
+        }
+        assert!(db_error_write(missing).body_str().contains("db-migrate"));
+        assert!(db_error_write(down).body_str().contains("db-migrate"));
+        let r = db_error_write(sql);
+        assert_eq!(r.status, 500);
+        assert_eq!(r.body_str(), r#"{"error":"could not save the monitor"}"#);
+        assert_eq!(db_error(sql).status, 503);
     }
 }

@@ -1271,6 +1271,15 @@ impl Drop for PassGuard<'_> {
 
 const GUARD_STALE_SECS: u64 = 600;
 
+/// A monitoring pass holds the guard and is not stale (10 minutes).
+pub fn pass_running(store: &dyn Store, now: u64) -> bool {
+    store
+        .kv_get("osintmon_running")
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|t| now.saturating_sub(t) < GUARD_STALE_SECS && t <= now)
+        .unwrap_or(false)
+}
+
 /// Run every due monitor (public entry: the real runner and Telegram).
 pub fn run_due(cfg: &Config, dry: bool) -> Vec<String> {
     run_due_with(
@@ -1345,12 +1354,7 @@ pub fn run_due_with(
         }
         return notes;
     }
-    let fresh = store
-        .kv_get("osintmon_running")
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .map(|t| now.saturating_sub(t) < GUARD_STALE_SECS && t <= now)
-        .unwrap_or(false);
-    if fresh {
+    if pass_running(store, now) {
         notes.push("osint monitors: previous pass still running".into());
         return notes;
     }
