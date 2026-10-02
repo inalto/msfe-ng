@@ -8,7 +8,8 @@
 use crate::config::Config;
 use crate::db;
 use crate::json::Json;
-use crate::osint::{OsintReport, SourceState};
+use crate::osint::{Finding, Group, OsintReport, Severity, SourceState};
+use crate::osintproviders::clean_text;
 
 pub const MIN_INTERVAL_MINS: u32 = 1440;
 pub const MAX_INTERVAL_MINS: u32 = 10080;
@@ -930,6 +931,227 @@ impl FakeStore {
     }
 }
 
+// ---- change detection (pure) ----
+
+/// A finding as the monitor remembers it: only what an alert may show.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FindingRef {
+    pub source_id: String,
+    pub group: Group,
+    pub title: String,
+    pub source_url: Option<String>,
+    pub severity: Severity,
+}
+
+/// A source whose usability changed between two runs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceRef {
+    pub id: String,
+    pub from: SourceState,
+    pub to: SourceState,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Delta {
+    pub new_findings: Vec<FindingRef>,
+    pub gone_findings: Vec<FindingRef>,
+    pub went_bad: Vec<SourceRef>,
+    pub recovered: Vec<SourceRef>,
+}
+
+/// Stable identity of a finding: never the observation time, evidence,
+/// confidence or severity.
+pub fn finding_key(f: &Finding) -> String {
+    format!(
+        "{}|{}|{}",
+        f.source_id,
+        f.group.as_str(),
+        f.source_url.clone().unwrap_or_else(|| f.title.clone())
+    )
+}
+
+fn finding_ref(f: &Finding) -> FindingRef {
+    FindingRef {
+        source_id: f.source_id.clone(),
+        group: f.group.clone(),
+        title: f.title.clone(),
+        source_url: f.source_url.clone(),
+        severity: f.severity.clone(),
+    }
+}
+
+fn answered(s: &SourceState) -> bool {
+    matches!(s, SourceState::Matched | SourceState::NoMatch)
+}
+fn broken(s: &SourceState) -> bool {
+    matches!(s, SourceState::Failed | SourceState::Restricted)
+}
+
+/// Compare two runs of the same monitor. Transitions to states that say
+/// nothing about the source (rate limited, inconclusive, not configured, not
+/// requested, unknown) are ignored, and a source that did not answer now
+/// never makes its earlier findings "gone".
+pub fn diff_reports(prev: &OsintReport, cur: &OsintReport) -> Delta {
+    let mut d = Delta::default();
+    let mut prev_keys: Vec<String> = Vec::new();
+    for f in &prev.findings {
+        let k = finding_key(f);
+        if !prev_keys.contains(&k) {
+            prev_keys.push(k);
+        }
+    }
+    let mut cur_keys: Vec<String> = Vec::new();
+    for f in &cur.findings {
+        let k = finding_key(f);
+        if cur_keys.contains(&k) {
+            continue;
+        }
+        if !prev_keys.contains(&k) {
+            d.new_findings.push(finding_ref(f));
+        }
+        cur_keys.push(k);
+    }
+    let mut seen: Vec<String> = Vec::new();
+    for f in &prev.findings {
+        let k = finding_key(f);
+        if seen.contains(&k) {
+            continue;
+        }
+        seen.push(k.clone());
+        if cur_keys.contains(&k) {
+            continue;
+        }
+        let src_answered = cur
+            .sources
+            .iter()
+            .find(|s| s.id == f.source_id)
+            .map(|s| answered(&s.state))
+            .unwrap_or(false);
+        if src_answered {
+            d.gone_findings.push(finding_ref(f));
+        }
+    }
+    for c in &cur.sources {
+        let Some(p) = prev.sources.iter().find(|s| s.id == c.id) else {
+            continue;
+        };
+        let r = SourceRef {
+            id: c.id.clone(),
+            from: p.state.clone(),
+            to: c.state.clone(),
+            detail: c.detail.clone(),
+        };
+        if answered(&p.state) && broken(&c.state) {
+            d.went_bad.push(r);
+        } else if broken(&p.state) && answered(&c.state) {
+            d.recovered.push(r);
+        }
+    }
+    d
+}
+
+/// `None` when there is no previous report: the first run (or a pruned
+/// baseline) is a baseline run and never alerts.
+pub fn diff_or_baseline(prev: Option<&OsintReport>, cur: &OsintReport) -> Option<Delta> {
+    prev.map(|p| diff_reports(p, cur))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlertKind {
+    Findings,
+    Providers,
+    Budget,
+}
+
+impl AlertKind {
+    pub fn key_part(&self) -> &'static str {
+        match self {
+            AlertKind::Findings => "findings",
+            AlertKind::Providers => "providers",
+            AlertKind::Budget => "budget",
+        }
+    }
+}
+
+const MAX_ALERT_LINES: usize = 5;
+
+fn alertable(g: &Group) -> bool {
+    matches!(
+        g,
+        Group::Exposure | Group::Profile | Group::Reference | Group::Domain | Group::Validation
+    )
+}
+
+/// One message per kind that has something to say. Recoveries and findings
+/// that are no longer listed are history only. Texts carry no evidence and
+/// no URLs.
+pub fn alert_texts(host: &str, address: &str, delta: &Delta) -> Vec<(AlertKind, String)> {
+    let mut out = Vec::new();
+    let new: Vec<&FindingRef> = delta
+        .new_findings
+        .iter()
+        .filter(|f| alertable(&f.group))
+        .collect();
+    if !new.is_empty() {
+        let mut s = format!(
+            "OSINT watch of {address} on {host}: {} new public item(s)\n",
+            new.len()
+        );
+        for f in new.iter().take(MAX_ALERT_LINES) {
+            s.push_str(&format!(
+                "• [{}] {}\n",
+                f.group.as_str(),
+                clean_text(&f.title, 100)
+            ));
+        }
+        if new.len() > MAX_ALERT_LINES {
+            s.push_str(&format!("…and {} more\n", new.len() - MAX_ALERT_LINES));
+        }
+        out.push((AlertKind::Findings, s.trim_end().to_string()));
+    }
+    if !delta.went_bad.is_empty() {
+        let mut s = format!("OSINT watch of {address} on {host}: source problem\n");
+        for r in delta.went_bad.iter().take(MAX_ALERT_LINES) {
+            s.push_str(&format!(
+                "• {}: answered before, now {} ({})\n",
+                clean_text(&r.id, 40),
+                r.to.as_str(),
+                clean_text(&r.detail, 80)
+            ));
+        }
+        if delta.went_bad.len() > MAX_ALERT_LINES {
+            s.push_str(&format!(
+                "…and {} more\n",
+                delta.went_bad.len() - MAX_ALERT_LINES
+            ));
+        }
+        out.push((AlertKind::Providers, s.trim_end().to_string()));
+    }
+    out
+}
+
+pub fn budget_text(host: &str, used: u32, cap: u32, period: &str) -> String {
+    format!(
+        "OSINT watch on {host}: monthly provider budget reached ({used} of {cap} units, period {period}). Scheduled checks are paused until next month or a higher osint_monitor_budget."
+    )
+}
+
+/// True when the monitor's baseline may advance to the current run: nothing
+/// needed an alert, or every needed alert was sent (or Telegram is not
+/// configured). A failed send or a cooldown suppression keeps the old
+/// baseline so the change is raised again.
+pub fn baseline_decision(delta_has_alerts: bool, all_sent_or_unconfigured: bool) -> bool {
+    !delta_has_alerts || all_sent_or_unconfigured
+}
+
+pub fn cooldown_ok(now: u64, last: Option<u64>, cooldown_mins: u32) -> bool {
+    match last {
+        None => true,
+        Some(l) => now.saturating_sub(l) >= cooldown_mins as u64 * 60,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1391,5 +1613,290 @@ mod tests {
         );
         assert!(sql_prune(40_000_000, 90)
             .contains("DELETE FROM osint_usage WHERE created_at < 5440000;"));
+    }
+}
+
+#[cfg(test)]
+mod change_tests {
+    use super::*;
+    use crate::osint::{
+        Confidence, Finding, Group, OsintReport, RunState, Severity, SourceState, SourceStatus,
+    };
+
+    fn f(src: &str, group: Group, url: Option<&str>, title: &str) -> Finding {
+        Finding {
+            group,
+            confidence: Confidence::Medium,
+            confidence_reason: "r".into(),
+            severity: Severity::Info,
+            observed_at: 1,
+            event_at: None,
+            source_id: src.into(),
+            source_url: url.map(|u| u.to_string()),
+            title: title.into(),
+            evidence: "SECRET-EVIDENCE".into(),
+            limitations: vec![],
+            asset_id: None,
+            asset_mime: None,
+        }
+    }
+    fn rep(sources: &[(&str, SourceState)], findings: Vec<Finding>) -> OsintReport {
+        OsintReport {
+            run_id: "0123456789abcdef".into(),
+            address: "a@x.org".into(),
+            started: 1,
+            finished: Some(2),
+            state: RunState::Complete,
+            cached: false,
+            planned: vec![],
+            sources: sources
+                .iter()
+                .map(|(i, s)| SourceStatus {
+                    id: i.to_string(),
+                    state: s.clone(),
+                    retry_after: None,
+                    detail: "why".into(),
+                })
+                .collect(),
+            findings,
+            delivery_run_id: None,
+            limitations: vec![],
+        }
+    }
+    fn ok() -> Vec<(&'static str, SourceState)> {
+        vec![("hibp", SourceState::Matched)]
+    }
+
+    #[test]
+    fn identical_reports_have_empty_delta() {
+        let a = rep(&ok(), vec![f("hibp", Group::Exposure, Some("u1"), "t")]);
+        let d = diff_reports(&a, &a.clone());
+        assert!(d.new_findings.is_empty() && d.gone_findings.is_empty());
+        assert!(d.went_bad.is_empty() && d.recovered.is_empty());
+    }
+
+    #[test]
+    fn new_finding_detected_and_key_is_stable() {
+        let a = rep(&ok(), vec![f("hibp", Group::Exposure, Some("u1"), "t")]);
+        let mut changed = f("hibp", Group::Exposure, Some("u1"), "other title");
+        changed.observed_at = 999;
+        changed.evidence = "different".into();
+        changed.severity = Severity::High;
+        changed.confidence = Confidence::Low;
+        let b = rep(
+            &ok(),
+            vec![changed, f("hibp", Group::Exposure, Some("u2"), "new")],
+        );
+        let d = diff_reports(&a, &b);
+        assert_eq!(d.new_findings.len(), 1);
+        assert_eq!(d.new_findings[0].source_url.as_deref(), Some("u2"));
+        assert!(d.gone_findings.is_empty());
+    }
+
+    #[test]
+    fn no_url_keyed_by_title_and_duplicates_collapse() {
+        let a = rep(&ok(), vec![f("hibp", Group::Profile, None, "one")]);
+        let b = rep(
+            &ok(),
+            vec![
+                f("hibp", Group::Profile, None, "one"),
+                f("hibp", Group::Profile, None, "two"),
+                f("hibp", Group::Profile, None, "two"),
+            ],
+        );
+        let d = diff_reports(&a, &b);
+        assert_eq!(d.new_findings.len(), 1);
+        assert_eq!(d.new_findings[0].title, "two");
+        assert_eq!(
+            finding_key(&f("hibp", Group::Profile, None, "one")),
+            "hibp|profile|one"
+        );
+        assert_eq!(
+            finding_key(&f("hibp", Group::Exposure, Some("U"), "one")),
+            "hibp|exposure|U"
+        );
+    }
+
+    #[test]
+    fn gone_only_when_source_answered() {
+        let a = rep(&ok(), vec![f("hibp", Group::Exposure, Some("u1"), "t")]);
+        let d = diff_reports(&a, &rep(&[("hibp", SourceState::NoMatch)], vec![]));
+        assert_eq!(d.gone_findings.len(), 1);
+        let d = diff_reports(&a, &rep(&[("hibp", SourceState::Matched)], vec![]));
+        assert_eq!(d.gone_findings.len(), 1);
+        for s in [
+            SourceState::Failed,
+            SourceState::Restricted,
+            SourceState::RateLimited,
+            SourceState::Inconclusive,
+            SourceState::NotConfigured,
+            SourceState::NotRequested,
+            SourceState::Unknown("x".into()),
+        ] {
+            let d = diff_reports(&a, &rep(&[("hibp", s.clone())], vec![]));
+            assert!(d.gone_findings.is_empty(), "{:?}", s);
+        }
+        // source absent from cur
+        let d = diff_reports(&a, &rep(&[], vec![]));
+        assert!(d.gone_findings.is_empty() && d.went_bad.is_empty());
+    }
+
+    #[test]
+    fn went_bad_and_recovered() {
+        for from in [SourceState::Matched, SourceState::NoMatch] {
+            for to in [SourceState::Failed, SourceState::Restricted] {
+                let a = rep(&[("hibp", from.clone())], vec![]);
+                let b = rep(&[("hibp", to.clone())], vec![]);
+                let d = diff_reports(&a, &b);
+                assert_eq!(d.went_bad.len(), 1);
+                assert_eq!(d.went_bad[0].id, "hibp");
+                assert_eq!(d.went_bad[0].from, from);
+                assert_eq!(d.went_bad[0].to, to);
+                assert_eq!(d.went_bad[0].detail, "why");
+                assert!(d.recovered.is_empty());
+                let r = diff_reports(&b, &a);
+                assert_eq!(r.recovered.len(), 1);
+                assert!(r.went_bad.is_empty());
+            }
+        }
+        for to in [
+            SourceState::RateLimited,
+            SourceState::NotConfigured,
+            SourceState::Inconclusive,
+            SourceState::NotRequested,
+            SourceState::Unknown("x".into()),
+        ] {
+            let a = rep(&[("hibp", SourceState::Matched)], vec![]);
+            let b = rep(&[("hibp", to)], vec![]);
+            let d = diff_reports(&a, &b);
+            assert!(d.went_bad.is_empty() && d.recovered.is_empty());
+            let d = diff_reports(&b, &a);
+            assert!(d.went_bad.is_empty() && d.recovered.is_empty());
+        }
+        let a = rep(&[("hibp", SourceState::Failed)], vec![]);
+        let d = diff_reports(&a, &a.clone());
+        assert!(d.went_bad.is_empty() && d.recovered.is_empty());
+        // flapping matched -> rate_limited -> matched never alerts
+        let m = rep(&ok(), vec![]);
+        let rl = rep(&[("hibp", SourceState::RateLimited)], vec![]);
+        assert!(diff_reports(&m, &rl).went_bad.is_empty());
+        assert!(diff_reports(&rl, &m).recovered.is_empty());
+    }
+
+    #[test]
+    fn baseline_missing_is_none() {
+        let a = rep(&ok(), vec![]);
+        assert!(diff_or_baseline(None, &a).is_none());
+        assert!(diff_or_baseline(Some(&a), &a).is_some());
+    }
+
+    fn delta_new(n: usize, group: Group) -> Delta {
+        Delta {
+            new_findings: (0..n)
+                .map(|i| FindingRef {
+                    source_id: "hibp".into(),
+                    group: group.clone(),
+                    title: format!("title {i}"),
+                    source_url: Some(format!("https://secret.example/{i}")),
+                    severity: Severity::Info,
+                })
+                .collect(),
+            ..Delta::default()
+        }
+    }
+
+    #[test]
+    fn findings_text_limits_and_privacy() {
+        let t = alert_texts("h1", "a@x.org", &delta_new(7, Group::Exposure));
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].0, AlertKind::Findings);
+        let s = &t[0].1;
+        assert!(s.starts_with("OSINT watch of a@x.org on h1: 7 new public item(s)\n"));
+        assert_eq!(s.matches("• [exposure] ").count(), 5);
+        assert!(s.contains("…and 2 more"));
+        assert_eq!(s.matches("a@x.org").count(), 1);
+        assert!(!s.contains("http") && !s.contains("SECRET"));
+    }
+
+    #[test]
+    fn findings_text_cleans_and_caps_titles_and_skips_context() {
+        let mut d = delta_new(1, Group::Profile);
+        d.new_findings[0].title = format!("<b>bold</b> {}", "x".repeat(300));
+        let s = &alert_texts("h", "a@x.org", &d)[0].1;
+        assert!(!s.contains("<b>"));
+        let line = s.lines().nth(1).unwrap();
+        assert!(line.chars().count() <= "• [profile] ".chars().count() + 100);
+        // context and unknown groups never alert
+        assert!(alert_texts("h", "a@x.org", &delta_new(2, Group::Context)).is_empty());
+        assert!(alert_texts("h", "a@x.org", &delta_new(2, Group::Unknown("z".into()))).is_empty());
+        for g in [Group::Reference, Group::Domain, Group::Validation] {
+            assert_eq!(alert_texts("h", "a@x.org", &delta_new(1, g)).len(), 1);
+        }
+    }
+
+    #[test]
+    fn provider_text_and_no_text_for_gone_or_recovered() {
+        let sr = |i: usize| SourceRef {
+            id: format!("src{i}"),
+            from: SourceState::Matched,
+            to: SourceState::Failed,
+            detail: format!("<i>boom</i> {}", "y".repeat(200)),
+        };
+        let d = Delta {
+            went_bad: (0..7).map(sr).collect(),
+            ..Delta::default()
+        };
+        let t = alert_texts("h", "a@x.org", &d);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].0, AlertKind::Providers);
+        let s = &t[0].1;
+        assert!(s.starts_with("OSINT watch of a@x.org on h: source problem\n"));
+        assert_eq!(s.matches("• src").count(), 5);
+        assert!(s.contains("• src0: answered before, now failed (boom"));
+        assert!(!s.contains("<i>"));
+        assert_eq!(s.matches("a@x.org").count(), 1);
+        let only = Delta {
+            gone_findings: delta_new(2, Group::Exposure).new_findings,
+            recovered: vec![sr(1)],
+            ..Delta::default()
+        };
+        assert!(alert_texts("h", "a@x.org", &only).is_empty());
+        // both kinds
+        let both = Delta {
+            new_findings: delta_new(1, Group::Exposure).new_findings,
+            went_bad: vec![sr(1)],
+            ..Delta::default()
+        };
+        let t = alert_texts("h", "a@x.org", &both);
+        assert_eq!(
+            t.iter().map(|x| x.0).collect::<Vec<_>>(),
+            vec![AlertKind::Findings, AlertKind::Providers]
+        );
+    }
+
+    #[test]
+    fn kinds_and_budget_text() {
+        assert_eq!(AlertKind::Findings.key_part(), "findings");
+        assert_eq!(AlertKind::Providers.key_part(), "providers");
+        assert_eq!(AlertKind::Budget.key_part(), "budget");
+        let b = budget_text("h1", 300, 300, "202610");
+        assert!(b.contains("h1") && b.contains("300") && b.contains("202610"));
+    }
+
+    #[test]
+    fn baseline_truth_table() {
+        assert!(baseline_decision(false, false));
+        assert!(baseline_decision(false, true));
+        assert!(baseline_decision(true, true));
+        assert!(!baseline_decision(true, false));
+    }
+
+    #[test]
+    fn cooldown_boundary() {
+        assert!(cooldown_ok(100, None, 60));
+        assert!(!cooldown_ok(100 + 3599, Some(100), 60));
+        assert!(cooldown_ok(100 + 3600, Some(100), 60));
+        assert!(cooldown_ok(50, Some(100), 0));
+        assert!(!cooldown_ok(50, Some(100), 60));
     }
 }
