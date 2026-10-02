@@ -28,7 +28,7 @@ const IP_MARKER: &str = "\n--msfe-remote-ip:";
 #[derive(Debug, Clone)]
 pub struct Request {
     pub provider: &'static str,
-    pub host: &'static str,
+    pub host: String,
     pub path: String,
     pub query: Vec<(&'static str, String)>,
     pub headers: Vec<(&'static str, String)>,
@@ -289,10 +289,10 @@ fn path_allowed(path: &str) -> bool {
         })
 }
 
-fn resolve(host: &'static str) -> Result<Vec<IpAddr>, HttpError> {
+fn resolve(host: String) -> Result<Vec<IpAddr>, HttpError> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let r = (host, 443u16)
+        let r = (host.as_str(), 443u16)
             .to_socket_addrs()
             .map(|it| it.map(|a| a.ip()).collect::<Vec<_>>())
             .map_err(|e| e.to_string());
@@ -336,7 +336,38 @@ fn kill_group(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
+/// Strict public DNS name check for hosts discovered at run time (RDAP
+/// bootstrap). Lower-case ASCII letters, digits, `-` and `.` only; at least
+/// two labels; the last label starts with a letter, which rules out every
+/// numeric IPv4 form (`1.2.3.4`, `127.1`, `0x7f.1`); no `localhost`.
+pub fn valid_public_hostname(h: &str) -> bool {
+    if h.len() < 3 || h.len() > 253 || !h.contains('.') {
+        return false;
+    }
+    if !h
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
+    {
+        return false;
+    }
+    let labels: Vec<&str> = h.split('.').collect();
+    if labels
+        .iter()
+        .any(|l| l.is_empty() || l.len() > 63 || l.starts_with('-') || l.ends_with('-'))
+    {
+        return false;
+    }
+    let last = labels[labels.len() - 1];
+    if !last.as_bytes()[0].is_ascii_lowercase() {
+        return false;
+    }
+    !(h == "localhost" || h.ends_with(".localhost"))
+}
+
 pub fn fetch(req: &Request) -> Result<Response, HttpError> {
+    if !valid_public_hostname(&req.host) {
+        return Err(HttpError::Refused("invalid host".into()));
+    }
     if !path_allowed(&req.path) {
         return Err(HttpError::Refused(
             "request path must start with / and hold only unreserved characters, % and /".into(),
@@ -368,7 +399,7 @@ pub fn fetch(req: &Request) -> Result<Response, HttpError> {
     let chosen = if over.is_some() {
         None
     } else {
-        Some(choose_address(&resolve(req.host)?)?)
+        Some(choose_address(&resolve(req.host.clone())?)?)
     };
     let pin = chosen.map(|ip| format!("{}:443:{ip}", req.host));
     let args = curl_args(
@@ -581,13 +612,71 @@ mod tests {
     fn req(provider: &'static str, path: &str) -> Request {
         Request {
             provider,
-            host: "haveibeenpwned.com",
+            host: "haveibeenpwned.com".to_string(),
             path: path.into(),
             query: vec![],
             headers: vec![("hibp-api-key", "SECRETKEY123".into())],
             timeout: Duration::from_secs(10),
             max_body: 64 * 1024,
         }
+    }
+
+    #[test]
+    fn hostname_validation_accepts_public_names_only() {
+        for ok in [
+            "rdap.verisign.com",
+            "a-b.example.org",
+            "xn--p1ai.example.com",
+            "a1.b2.io",
+        ] {
+            assert!(valid_public_hostname(ok), "{ok}");
+        }
+        let long_name = format!("{}.com", "a.".repeat(125));
+        let long_label = format!("{}.com", "a".repeat(64));
+        let bad = [
+            "",
+            "localhost",
+            "LOCALHOST.com",
+            "Example.org",
+            "1.2.3.4",
+            "[::1]",
+            "a b.com",
+            "a..b.com",
+            "-a.com",
+            "a-.com",
+            "host:8080",
+            "host.com.",
+            "host.com/path",
+            "x",
+            "127.1",
+            "0x7f.1",
+            "0x7f.0x1",
+            "a.0x7f",
+            "2130706433",
+            "999.999.999.999",
+            ".example.com",
+            "..",
+            "a.localhost",
+            "host.com@evil.com",
+            "exämple.com",
+            "ex_ample.com",
+            "a.b.c.1",
+            &long_name,
+            &long_label,
+        ];
+        assert_eq!(long_name.len(), 254);
+        for b in bad {
+            assert!(!valid_public_hostname(b), "{b:?}");
+        }
+    }
+
+    #[test]
+    fn fetch_refuses_invalid_hosts_even_with_override() {
+        let mut r = req("hibp", "/x");
+        r.host = "127.0.0.1".into();
+        assert!(matches!(fetch(&r), Err(HttpError::Refused(_))));
+        r.host = "localhost".into();
+        assert!(matches!(fetch(&r), Err(HttpError::Refused(_))));
     }
 
     #[test]

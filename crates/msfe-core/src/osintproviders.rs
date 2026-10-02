@@ -480,7 +480,7 @@ fn hibp(q: &QueryCtx) -> Outcome {
     };
     let req = Request {
         provider: "hibp",
-        host: HIBP_HOST,
+        host: HIBP_HOST.to_string(),
         path,
         query,
         headers: vec![("hibp-api-key", key.clone())],
@@ -634,7 +634,7 @@ fn gravatar(q: &QueryCtx) -> Outcome {
     };
     let req = Request {
         provider: "gravatar",
-        host: GRAVATAR_HOST,
+        host: GRAVATAR_HOST.to_string(),
         path: format!("/avatar/{hash}"),
         query: vec![("d", "404".into()), ("s", "256".into()), ("r", "g".into())],
         headers: Vec::new(),
