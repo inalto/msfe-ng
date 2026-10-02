@@ -33,9 +33,10 @@ data).
   breaches are labelled as historical.
 - **Candidates are not verified.** A name or profile inferred from an address
   is a lead to check, not a fact. Web search results are search snippets only:
-  the pages are not fetched or checked, so they are candidates. A GitHub match is
-  stronger (the profile publishes this exact address) but is still a public claim
-  by that profile, and a published OpenPGP key only shows that its owner verified
+  the pages are not fetched or checked, so they are candidates. A GitHub result is
+  stronger (GitHub matched the address against the profile's public email field)
+  but is still a candidate: the search answer does not include the email and
+  MSFE-NG does not check it. A published OpenPGP key only shows that its owner verified
   the address with the key server. Hunter's answer is a vendor assertion, never
   proof.
 - **Nothing changes mail handling.** The view never alters scanning, blocklists,
@@ -66,7 +67,7 @@ can use it.
 |---|---|---|
 | `osint_runs_per_min` | 3 | runs accepted per minute (1-30) |
 | `osint_max_concurrent` | 2 | runs at the same time (1-8) |
-| `osint_deadline_secs` | 30 | a run is stopped after this long (5-120); what finished is kept as a partial report |
+| `osint_deadline_secs` | 60 | a run is stopped after this long (5-120); what finished is kept as a partial report |
 | `osint_max_external_queries` | 8 | most outside lookups one run may make (1-20) |
 | `osint_cache_secs` | 3600 | a repeat of the same lookup inside this time reuses the earlier report; *Fresh lookup* bypasses it |
 | `osint_retention_hours` | 24 | how long a report and its avatar are kept (1-720) |
@@ -74,23 +75,33 @@ can use it.
 Only configured outside sources use the per-run query budget. A source whose key
 is missing is reported as **not configured** without spending any of it (and makes
 the run partial), and the **Delivery test context** source never leaves the server
-so it is exempt too; neither can crowd out a later source. In the shell every
-configured source is ticked by default, except **Hunter**, whose paid mailbox check
-you tick for the runs where you want it. Delivery test context is ticked only when
-the view was opened from a linked Address test.
+so it is exempt too; neither can crowd out a later source.
+
+Defaults differ between the two front ends. In the **web view** every source is
+ticked by default except **Hunter** (its paid mailbox check is chosen for each
+run) and, unless the view was opened from a linked Address test, **Delivery test
+context**; a source without a key stays ticked and simply reports *not
+configured*. The **CLI** without `--providers` runs the configured sources
+except `delivery` and `hunter`; name them in `--providers` to use them. Naming
+`delivery` in the CLI links no Delivery run, so it reports *not requested* and
+the run is partial.
+
+The sources run one after another, so a slow source (RDAP may make two requests,
+Hunter may take up to 20 seconds) can push later ones past the deadline; those
+are then reported as not finished and the run is partial. Raise
+`osint_deadline_secs` if that happens often.
 
 A run request may carry `external_query_limit` to lower the outside-lookup budget
-for that run; it is clamped to `osint_max_external_queries` and never raises it. The shell runs the controller in its own process, so the
-CLI's rate and concurrency limits are separate from the daemon's.
+for that run; it is clamped to `osint_max_external_queries` and never raises it. The CLI runs the controller in its own process, so its rate and concurrency limits are separate from the daemon's.
 
 ## Sources and keys
 
 | Source (id) | Needs | Returns |
 |---|---|---|
-| Delivery test context (`delivery`) | nothing | the linked Address test's findings, next to the OSINT result |
+| Delivery test context (`delivery`) | nothing | the linked Address test's inputs and verdict counts, next to the OSINT result |
 | Gravatar (`gravatar`) | nothing | whether a public avatar exists for the address, and the image |
 | RDAP domain registration (`rdap`) | nothing | the domain's registrar and technical registration facts; registrant details are never shown |
-| GitHub public-email profile (`github`) | nothing | profiles that publish this exact address as their public email |
+| GitHub public-email profile (`github`) | nothing | profiles whose public email field GitHub matched to this address: candidates |
 | OpenPGP key (`openpgp`) | nothing | whether a published, owner-verified key exists for the address |
 | Have I Been Pwned (`hibp`) | a paid HIBP API key | the breaches the address appears in (name, date, data classes, link) |
 | Web search (`search`) | a Brave Search API key | search snippets that mention the address: candidates only |
@@ -126,11 +137,16 @@ HIBP has two modes (`osint_hibp_mode`):
   `gravatar.com`, asking for an avatar at rating G, 256 px. A 404 answer means
   there is no avatar at that rating (one may exist at a higher, more mature rating). No
   Gravatar profile data is queried.
-- **RDAP**: only the **domain** (never the full address), sent to the registry's
-  RDAP server found through the IANA bootstrap file. Registrar and technical
+- **RDAP**: only the **domain** (never the full address). The bootstrap file is
+  fetched from `data.iana.org`, and the domain is then sent to whichever registry
+  RDAP server that file names for the domain's TLD (many different registries,
+  including country-code operators; the host is validated, public-address-only and
+  HTTPS-only). A TLD with no RDAP service is reported as inconclusive. Registrar and technical
   facts only; registrant details are never shown.
-- **GitHub**: the full address, sent to `api.github.com`. It matches only
-  profiles that publish this exact address as their public email. The
+- **GitHub**: the full address, sent to `api.github.com`. GitHub matches it
+  against the public email field of profiles; the search answer does not include
+  the email and MSFE-NG does not check it, so the profiles are candidates, at
+  most three are shown, and a note says when GitHub reports more. The
   unauthenticated limit is 10 requests per minute.
 - **OpenPGP**: the full address, sent to `keys.openpgp.org`. Only the presence of
   a published, owner-verified key is reported; the key is not parsed or stored.
@@ -144,7 +160,8 @@ HIBP has two modes (`osint_hibp_mode`):
   assertion, never proof. It is unticked by default and chosen per run.
 - the **fixture** source (only with `MSFE_NG_OSINT_FIXTURE`) receives nothing.
 
-Outbound lookups go only to the fixed hosts above, over HTTPS, without
+Outbound lookups go only to the hosts above (for RDAP, `data.iana.org` and the
+registry host the bootstrap file names), over HTTPS, without
 following redirects, and only to public addresses (the process doing the lookup,
 the daemon or the CLI, checks the address it actually connects to). Nothing else
 leaves the server.
@@ -155,8 +172,11 @@ The **Investigate address** buttons (the magnifying glass in the Messages list
 and queue, the buttons in the message and queue details, and the button on an
 Address test result) only open the OSINT view with the address filled in; nothing
 runs until you press **Run**. When opened from an Address test result, the view
-links that run, and the **Delivery test context** card shows that report's
-findings next to the public-information results. Reading it makes no outside
+links that run, and the **Delivery test context** card shows that run's inputs
+(address, sending IP, DKIM selector, log days, server audit) and its verdict
+counts per scope (fail, warn, unknown, pass, not applicable) next to the
+public-information results. Its **Run Address test** button starts a new Address
+test for the address. Reading it makes no outside
 request.
 
 ## What is deliberately not included
@@ -182,7 +202,9 @@ avatars. Avatars are removed together with their report.
 - A provider failure (timeout, refused key, rate limit, bad answer) shows in
   *Source coverage* and makes the run partial. It never affects the Delivery
   tab's other views or mail flow.
-- HIBP answers are capped at 100 findings per source.
+- Each source is capped: HIBP 100 findings, Web search 10 results, GitHub 3
+  profiles; an avatar is at most 256 KiB. Capped sources say so in their detail.
+- The RDAP answer's registrant details are never shown; a limitation says so.
 - HIBP's public search may omit findings from breaches it flags as sensitive
   or retired, so a missing breach is not proof of absence.
 - Range mode has no per-incident detail.

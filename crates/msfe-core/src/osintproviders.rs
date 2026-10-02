@@ -415,7 +415,7 @@ pub(crate) fn clean_text(s: &str, max: usize) -> String {
         .filter_map(|c| {
             if c.is_whitespace() {
                 Some(' ')
-            } else if c.is_control() {
+            } else if c.is_control() || is_format_char(c) {
                 None
             } else {
                 Some(c)
@@ -433,6 +433,24 @@ pub(crate) fn clean_text(s: &str, max: usize) -> String {
     cut.truncate(cut.trim_end().len());
     cut.push('\u{2026}');
     cut
+}
+
+/// An external URL we are willing to show: http(s), at most 2000 characters,
+/// and no whitespace, control or invisible formatting characters.
+fn shown_url(u: &str) -> bool {
+    u.chars().count() <= 2000
+        && crate::osinthtml::safe_url(u)
+        && !u
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || is_format_char(c))
+}
+
+/// Unicode format characters that enable visual spoofing (bidi controls,
+/// zero-width characters, word joiners, the byte-order mark).
+fn is_format_char(c: char) -> bool {
+    matches!(c,
+        '\u{061C}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
+        | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
 }
 
 fn str_of<'a>(j: &'a Json, key: &str) -> Option<&'a str> {
@@ -1022,6 +1040,14 @@ fn rdap_base_for(services: &Services, domain: &str) -> Option<(String, String)> 
     validate_rdap_base(urls.first()?)
 }
 
+/// Whether the IANA bootstrap lists any RDAP service for the domain's TLD.
+fn rdap_lists_tld(services: &Services, domain: &str) -> bool {
+    let tld = domain.rsplit('.').next().unwrap_or("");
+    services
+        .iter()
+        .any(|(tlds, _)| tlds.iter().any(|t| t.eq_ignore_ascii_case(tld)))
+}
+
 fn rdap_date(s: &str) -> Option<(String, u64)> {
     let d = s.get(..10)?;
     breach_date(Some(d))
@@ -1175,6 +1201,9 @@ fn rdap_finding(
     if redact_note {
         limitations.push(REDACTION_LIMIT.into());
     }
+    if registrant_details {
+        limitations.push("Registrant details are not shown by MSFE-NG.".into());
+    }
     let url = format!("{base}domain/{domain}");
     Ok((
         Finding {
@@ -1185,7 +1214,7 @@ fn rdap_finding(
             observed_at: now,
             event_at,
             source_id: RDAP_ID.into(),
-            source_url: crate::osinthtml::safe_url(&url).then_some(url),
+            source_url: shown_url(&url).then_some(url),
             title: format!("Registration: {name}"),
             evidence: if parts.is_empty() {
                 "The registry published no registrar or technical details.".into()
@@ -1280,6 +1309,13 @@ fn rdap(q: &QueryCtx) -> Outcome {
     };
     let tld = domain.rsplit('.').next().unwrap_or("");
     let Some((host, prefix)) = rdap_base_for(&services, &domain) else {
+        if !rdap_lists_tld(&services, &domain) {
+            return outcome(
+                RDAP_ID,
+                SourceState::Inconclusive,
+                "this registry offers no RDAP service",
+            );
+        }
         return outcome(
             RDAP_ID,
             SourceState::Failed,
@@ -1399,14 +1435,15 @@ fn search_findings(body: &[u8], now: u64) -> Result<(Vec<Finding>, bool), String
         let Some(url) = str_of(r, "url") else {
             continue;
         };
-        if !crate::osinthtml::safe_url(url) || seen.contains(&url) {
+        let key = url.trim_end_matches('/');
+        if !shown_url(url) || seen.contains(&key) {
             continue;
         }
         if out.len() >= SEARCH_MAX_RESULTS {
             capped = true;
             break;
         }
-        seen.push(url);
+        seen.push(key);
         let title = clean_text(str_of(r, "title").unwrap_or(""), 120);
         let snippet = clean_text(str_of(r, "description").unwrap_or(""), 300);
         out.push(Finding {
@@ -1735,7 +1772,7 @@ fn github_info() -> Info {
     Info {
         id: GITHUB_ID,
         name: "GitHub public-email profile",
-        disclosure: "the full address is sent to api.github.com; only profiles that publish this exact address are matched".into(),
+        disclosure: "the full address is sent to api.github.com; GitHub matches it against the public email field of profiles, and the results are candidates".into(),
         configured: true,
     }
 }
@@ -1773,7 +1810,7 @@ fn github_findings(body: &[u8], now: u64) -> Result<Vec<Finding>, String> {
             parts.push(format!("Bio: {bio}."));
         }
         let evidence = if parts.is_empty() {
-            "The profile publishes this address as its public email.".to_string()
+            "GitHub matched this address against the profile's public email field.".to_string()
         } else {
             parts.join(" ")
         };
@@ -1799,7 +1836,19 @@ fn github_findings(body: &[u8], now: u64) -> Result<Vec<Finding>, String> {
     if out.is_empty() && !items.is_empty() {
         return Err("unexpected answer".into());
     }
+    if let Some(note) = github_more_note(&j, out.len()) {
+        for f in &mut out {
+            f.limitations.push(note.clone());
+        }
+    }
     Ok(out)
+}
+
+/// "Showing the first 3 of N profiles" when GitHub reports more matches than
+/// are shown.
+fn github_more_note(j: &Json, shown: usize) -> Option<String> {
+    let total = j.get("total_count").and_then(|t| t.as_i64())?;
+    (total > shown as i64).then(|| format!("Showing the first {shown} of {total} profiles."))
 }
 
 fn github(q: &QueryCtx) -> Outcome {
@@ -1845,13 +1894,16 @@ fn github(q: &QueryCtx) -> Outcome {
             Ok(f) if f.is_empty() => outcome(
                 GITHUB_ID,
                 SourceState::NoMatch,
-                "no GitHub profile publishes this address",
+                "GitHub found no profile whose public email field matches this address",
             ),
             Ok(f) => Outcome {
                 source: status(
                     GITHUB_ID,
                     SourceState::Matched,
-                    &format!("{} profile(s)", f.len()),
+                    &match f.first().and_then(|x| x.limitations.get(2)) {
+                        Some(note) => format!("{} profile(s). {note}", f.len()),
+                        None => format!("{} profile(s)", f.len()),
+                    },
                 ),
                 findings: f,
                 assets: Vec::new(),
@@ -2437,6 +2489,39 @@ mod tests {
     }
 
     #[test]
+    fn clean_text_drops_invisible_spoofing_characters() {
+        assert_eq!(
+            clean_text(
+                "abc\u{202E}cod.exe\u{202C} a\u{200B}b\u{FEFF}c\u{2066}d\u{061C}e",
+                100
+            ),
+            "abccod.exe abcde"
+        );
+    }
+
+    #[test]
+    fn shown_url_caps_length_and_rejects_hidden_characters() {
+        assert!(shown_url("https://example.org/x"));
+        assert!(!shown_url("https://example.org/a b"));
+        assert!(!shown_url("https://example.org/a\u{202E}b"));
+        assert!(!shown_url("https://example.org/a\u{0}b"));
+        assert!(!shown_url("javascript:alert(1)"));
+        assert!(shown_url(&format!("https://e.org/{}", "a".repeat(1980))));
+        assert!(!shown_url(&format!("https://e.org/{}", "a".repeat(2000))));
+    }
+
+    #[test]
+    fn search_dedups_urls_ignoring_a_trailing_slash_and_drops_hidden_ones() {
+        let body = r#"{"web":{"results":[
+          {"url":"https://e.org/p","title":"a","description":"x"},
+          {"url":"https://e.org/p/","title":"b","description":"y"},
+          {"url":"https://e.org/q\u202Ez","title":"c","description":"z"}]}}"#;
+        let (fs, _) = search_findings(body.as_bytes(), 1).unwrap();
+        assert_eq!(fs.len(), 1);
+        assert_eq!(fs[0].source_url.as_deref(), Some("https://e.org/p"));
+    }
+
+    #[test]
     fn clean_text_truncates_on_char_boundaries() {
         let big = "x".repeat(5 * 1024);
         let t = clean_text(&big, 200);
@@ -2537,6 +2622,10 @@ mod tests {
         assert_eq!(f.confidence, Confidence::High);
         assert_eq!(f.confidence_reason, "published by the domain's registry");
         assert_eq!(f.title, "Registration: EXAMPLE.ORG");
+        assert!(f
+            .limitations
+            .iter()
+            .any(|l| l == "Registrant details are not shown by MSFE-NG."));
         assert_eq!(f.event_at, Some(808_358_400));
         assert!(
             f.evidence.contains("Registrar: Reg alert(1)Ltd"),
@@ -2740,12 +2829,6 @@ mod tests {
             ),
             (
                 "200 OK",
-                BOOTSTRAP,
-                "nobody@example.zz",
-                "no usable RDAP server for .zz",
-            ),
-            (
-                "200 OK",
                 r#"{"services":[[["org"],["http://rdap.example.net/"]]]}"#,
                 "nobody@example.org",
                 "no usable RDAP server for .org",
@@ -2760,6 +2843,17 @@ mod tests {
             assert!(o.source.detail.contains(want), "{}", o.source.detail);
             assert!(!o.source.detail.contains("nobody"));
         }
+    }
+
+    #[test]
+    fn rdap_tld_without_a_bootstrap_service_is_inconclusive_not_failed() {
+        let _g = RDAP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (bport, _bh) = serve(http("200 OK", BOOTSTRAP));
+        set_rdap_env(bport, None);
+        let o = run_rdap("nobody@example.zz");
+        clear_rdap_env();
+        assert_eq!(o.source.state, SourceState::Inconclusive);
+        assert_eq!(o.source.detail, "this registry offers no RDAP service");
     }
 
     #[test]
@@ -3298,7 +3392,7 @@ mod tests {
     fn github_sample() -> String {
         let long_bio = "b".repeat(5000);
         format!(
-            r#"{{"total_count":3,"items":[
+            r#"{{"total_count":2,"items":[
             {{"login":"octo-cat","html_url":"https://evil.example/phish","name":"Octo <i>Cat</i>","bio":"<script>alert(1)</script>Hi {long_bio}","avatar_url":"https://avatars.example/u/1"}},
             {{"login":"bad/login","html_url":"https://github.com/bad","name":"Bad"}},
             {{"login":"{}","html_url":"https://github.com/x"}},
@@ -3338,6 +3432,17 @@ mod tests {
         assert!(github_findings(br#"{"total_count":0,"items":[]}"#, 1)
             .unwrap()
             .is_empty());
+        // More matches than shown are said so.
+        let more = github_findings(
+            br#"{"total_count":57,"items":[{"login":"a1"},{"login":"b2"},{"login":"c3"}]}"#,
+            1,
+        )
+        .unwrap();
+        assert_eq!(more.len(), 3);
+        assert!(more.iter().all(|f| f
+            .limitations
+            .iter()
+            .any(|l| l == "Showing the first 3 of 57 profiles.")));
         assert!(github_findings(b"x", 1).is_err());
         assert!(github_findings(br#"{"total_count":1}"#, 1).is_err());
         // Items present but none with a usable login is not a clean "no match".
@@ -3402,10 +3507,9 @@ mod tests {
             assert!(low.contains("x-github-api-version: 2022-11-28"), "{head}");
             assert!(!low.contains("authorization"), "{head}");
             if want == SourceState::NoMatch {
-                assert!(o
-                    .source
-                    .detail
-                    .contains("no GitHub profile publishes this address"));
+                assert!(o.source.detail.contains(
+                    "GitHub found no profile whose public email field matches this address"
+                ));
             }
             if want == SourceState::Matched {
                 assert_eq!(o.findings.len(), 2);
@@ -3477,7 +3581,8 @@ mod tests {
         let p = list.iter().find(|p| p.id == "openpgp").unwrap();
         assert!(g.configured && p.configured);
         assert!(g.disclosure.contains("api.github.com"));
-        assert!(g.disclosure.contains("exact address"));
+        assert!(g.disclosure.contains("public email field"));
+        assert!(!g.disclosure.contains("exact address"));
         assert!(p
             .disclosure
             .contains("full address is sent to keys.openpgp.org"));

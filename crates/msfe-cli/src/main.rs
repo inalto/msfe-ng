@@ -3007,6 +3007,18 @@ fn osint_exit(s: msfe_core::osint::RunState) -> u8 {
     }
 }
 
+/// Sources a CLI run uses when `--providers` is not given: the configured
+/// ones, minus `delivery` (the CLI never links a Delivery run, so it would
+/// always be "not requested" and make every run partial) and `hunter` (paid
+/// and probes the recipient's mail server, so it is opt-in per run).
+fn osint_default_sources(infos: &[msfe_core::osintproviders::Info]) -> Vec<String> {
+    infos
+        .iter()
+        .filter(|p| p.configured && p.id != "delivery" && p.id != "hunter")
+        .map(|p| p.id.to_string())
+        .collect()
+}
+
 fn cmd_delivery_osint(rest: &[String]) -> ExitCode {
     use msfe_core::json::Json;
     use msfe_core::osint::RunState;
@@ -3076,10 +3088,7 @@ fn cmd_delivery_osint(rest: &[String]) -> ExitCode {
         }
     }
     if !given {
-        provs = osintrun::providers(&cfg)
-            .iter()
-            .map(|p| p.id.to_string())
-            .collect();
+        provs = osint_default_sources(&osintrun::providers(&cfg));
     }
     let force = rest.iter().any(|a| a == "--force");
     let inputs = match osintrun::parse_inputs(addr, &provs, force, None) {
@@ -3092,7 +3101,7 @@ fn cmd_delivery_osint(rest: &[String]) -> ExitCode {
     let id = match osintrun::start(&cfg, inputs) {
         Ok(StartOk::Started(id) | StartOk::Cached(id)) => id,
         Err(StartError::Disabled) => {
-            eprintln!("msfe-ng: OSINT is switched off (set osint_enabled = true in config.toml)");
+            eprintln!("msfe-ng: OSINT is switched off (tick OSINT lookups in the OSINT providers card of the Config tab, or set osint_enabled = true in config.toml)");
             return ExitCode::from(3);
         }
         Err(e) => {
@@ -3905,6 +3914,63 @@ mod tests {
             rejected_flag("delivery", Some("osint"), &a(&["--nonsense"])),
             Some("--nonsense")
         );
+    }
+
+    fn info(id: &'static str, configured: bool) -> msfe_core::osintproviders::Info {
+        msfe_core::osintproviders::Info {
+            id,
+            name: id,
+            disclosure: String::new(),
+            configured,
+        }
+    }
+
+    #[test]
+    fn osint_default_sources_skip_delivery_hunter_and_unconfigured() {
+        let all = [
+            info("delivery", true),
+            info("gravatar", true),
+            info("hibp", false),
+            info("search", true),
+            info("hunter", true),
+            info("fixture", true),
+        ];
+        assert_eq!(
+            osint_default_sources(&all),
+            vec!["gravatar", "search", "fixture"]
+        );
+    }
+
+    #[test]
+    fn a_default_osint_run_can_exit_zero() {
+        use msfe_core::osintrun::{self, StartOk};
+        let dir = std::env::temp_dir().join(format!("msfe-cli-osint-{}", std::process::id()));
+        std::env::set_var("MSFE_NG_OSINT_DIR", &dir);
+        std::env::set_var("MSFE_NG_OSINT_FIXTURE", "1");
+        let cfg = Config {
+            osint_enabled: true,
+            ..Config::default()
+        };
+        // Only the sources that never touch the network: the fixture stands in
+        // for the keyless ones, and delivery/hunter must not be in the list.
+        let provs: Vec<String> = osint_default_sources(&osintrun::providers(&cfg))
+            .into_iter()
+            .filter(|p| p == "fixture")
+            .collect();
+        assert_eq!(provs, vec!["fixture"]);
+        let inputs = osintrun::parse_inputs("a@example.org", &provs, true, None).unwrap();
+        let id = match osintrun::start(&cfg, inputs) {
+            Ok(StartOk::Started(id) | StartOk::Cached(id)) => id,
+            other => panic!("{other:?}"),
+        };
+        let r = loop {
+            match osintrun::snapshot(&id) {
+                Some(r) if r.state != msfe_core::osint::RunState::Running => break r,
+                _ => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        };
+        assert_eq!(osint_exit(r.state), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -2793,7 +2793,7 @@ async function renderOsint(v){
       const fs=(r.findings||[]).filter(f=>f.group===g);
       if(!fs.length)return;
       const c=el('div',{class:'card'},el('h2',{},title));
-      if(g==='context'){const ob=el('button',{class:'act',style:'margin-bottom:.3rem'},'Open Address test');ob.onclick=()=>deliveryTestFor(r.address);c.append(ob);}
+      if(g==='context'&&fs.some(f=>f.source_id==='delivery')){const ob=el('button',{class:'act',style:'margin-bottom:.3rem'},'Run Address test');ob.onclick=()=>deliveryTestFor(r.address);c.append(ob);}
       fs.forEach(f=>{
         const row=el('div',{style:'margin:.5rem 0'});
         row.append(el('div',{},el('b',{},f.title)));
@@ -4659,12 +4659,32 @@ async function renderConfig(){
   oSearch.dataset.okey='osint_search_key';oSearch.dataset.secret='1';
   const oValid=el('input',{type:'password',placeholder:cconf.osint_validation_set?'(configured — leave empty to keep)':'Hunter API key','autocomplete':'off',spellcheck:'false'});
   oValid.dataset.okey='osint_validation_key';oValid.dataset.secret='1';
+  // The three key rows: label text, placeholder and Clear button follow whether
+  // a key is saved, and are refreshed from /api/config after a save or a clear.
+  const keyRows=[];
+  const keyRow=(base,title,input,placeholder,setKey)=>{
+    const txt=el('span',{},base);
+    const row={txt,input,base,placeholder,setKey,clear:null};
+    keyRows.push(row);
+    return Object.assign(el('label',{class:'field',title},txt,input),{});
+  };
   ogrid.append(
     el('label',{class:'field'},oOn,' OSINT lookups '+(cconf.osint_enabled?'(on)':'(off)')),
-    el('label',{class:'field',title:'Create a key in your Have I Been Pwned account. Letters, digits, - and _ only.'},'HIBP API key'+(cconf.osint_hibp_set?' (configured)':''),oKey),
+    keyRow('HIBP API key','Create a key in your Have I Been Pwned account. Letters, digits, - and _ only.',oKey,'Have I Been Pwned API key','osint_hibp_set'),
     el('label',{class:'field'},'HIBP lookup mode',oMode),
-    el('label',{class:'field',title:'Brave Search API subscription token. Sends the full address in quotes to Brave Search. Letters, digits, - and _ only.'},'Search key (Brave Search API)'+(cconf.osint_search_set?' (configured)':''),oSearch),
-    el('label',{class:'field',title:'Hunter API key. Sends the full address to Hunter and uses your account’s paid quota. Letters, digits, - and _ only.'},'Validation key (Hunter)'+(cconf.osint_validation_set?' (configured)':''),oValid));
+    keyRow('Search key (Brave Search API)','Brave Search API subscription token. Sends the full address in quotes to Brave Search. Letters, digits, - and _ only.',oSearch,'Brave Search API key','osint_search_set'),
+    keyRow('Validation key (Hunter)','Hunter API key. Sends the full address to Hunter and uses your account’s paid quota. Letters, digits, - and _ only.',oValid,'Hunter API key','osint_validation_set'));
+  const refreshKeys=async()=>{
+    const fresh=await api('/api/config');
+    if(!fresh||fresh.error)return;
+    keyRows.forEach(r=>{
+      const set=!!fresh[r.setKey];
+      r.txt.textContent=r.base+(set?' (configured)':'');
+      r.input.placeholder=set?'(configured — leave empty to keep)':r.placeholder;
+      r.input.value='';
+      if(r.clear)r.clear.disabled=!set;
+    });
+  };
   const oSave=el('button',{class:'act'},'Save OSINT settings');
   oSave.onclick=async()=>{
     const changes={};
@@ -4674,20 +4694,23 @@ async function renderConfig(){
     });
     const r=await api('/api/service/conf/apply',{method:'POST',body:{which:'msfe',changes}});
     toast(r&&r.ok?`${r.applied} setting(s) saved`:(r&&r.error)||'Save failed');
+    if(r&&r.ok)await refreshKeys();
   };
-  const mkClear=(label,what,key,isSet)=>{
+  const mkClear=(label,what,key,isSet,rowIdx)=>{
     const b=el('button',{class:'act plain'},label);
     b.disabled=!isSet;
+    keyRows[rowIdx].clear=b;
     b.onclick=async()=>{
       if(!confirm('Remove the '+what+' API key?'))return;
       const r=await api('/api/service/conf/apply',{method:'POST',body:{which:'msfe',changes:{[key]:''}}});
       toast(r&&r.ok?'Key cleared':(r&&r.error)||'Clear failed');
+      if(r&&r.ok)await refreshKeys();
     };
     return b;
   };
-  const oClear=mkClear('Clear key','Have I Been Pwned','osint_hibp_key',cconf.osint_hibp_set);
-  const oClearS=mkClear('Clear search key','Brave Search','osint_search_key',cconf.osint_search_set);
-  const oClearV=mkClear('Clear validation key','Hunter','osint_validation_key',cconf.osint_validation_set);
+  const oClear=mkClear('Clear key','Have I Been Pwned','osint_hibp_key',cconf.osint_hibp_set,0);
+  const oClearS=mkClear('Clear search key','Brave Search','osint_search_key',cconf.osint_search_set,1);
+  const oClearV=mkClear('Clear validation key','Hunter','osint_validation_key',cconf.osint_validation_set,2);
   oc.append(ogrid,el('div',{class:'ctl'},oSave,oClear,oClearS,oClearV));
 
   // DMARC report mailbox: where the domains' rua= reports arrive (IMAP);

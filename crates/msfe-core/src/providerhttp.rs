@@ -373,6 +373,17 @@ pub fn fetch(req: &Request) -> Result<Response, HttpError> {
             "request path must start with / and hold only unreserved characters, % and /".into(),
         ));
     }
+    // A bootstrap-chosen registry host must never carry a credential.
+    if req.provider.starts_with("rdap")
+        && req
+            .headers
+            .iter()
+            .any(|(k, _)| !k.eq_ignore_ascii_case("accept"))
+    {
+        return Err(HttpError::Refused(
+            "RDAP requests may carry only an Accept header".into(),
+        ));
+    }
     let mut query = String::new();
     for (k, v) in &req.query {
         if !query.is_empty() {
@@ -676,6 +687,20 @@ mod tests {
         r.host = "127.0.0.1".into();
         assert!(matches!(fetch(&r), Err(HttpError::Refused(_))));
         r.host = "localhost".into();
+        assert!(matches!(fetch(&r), Err(HttpError::Refused(_))));
+    }
+
+    #[test]
+    fn rdap_requests_refuse_any_header_but_accept() {
+        let mut r = req("rdap_registry", "/x");
+        r.host = "rdap.example.net".into();
+        r.headers = vec![("authorization", "Bearer secret".to_string())];
+        assert!(matches!(fetch(&r), Err(HttpError::Refused(_))));
+        r.provider = "rdap-bootstrap";
+        r.headers = vec![
+            ("accept", "application/json".to_string()),
+            ("X-Key", "k".into()),
+        ];
         assert!(matches!(fetch(&r), Err(HttpError::Refused(_))));
     }
 
