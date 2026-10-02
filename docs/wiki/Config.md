@@ -239,9 +239,13 @@ optional **Have I Been Pwned API key** (`osint_hibp_key`) and the lookup mode
 (`osint_hibp_mode`): *direct* sends the full address to HIBP, *range* sends only a
 6-character hash prefix and needs the Pro/High RPM plan. The key is a secret: it is
 never shown again once saved (the label says *configured*), an empty field keeps it,
-and **Clear key** removes it. Only letters, digits, `-` and `_` are accepted. The
-key is stored in `config.toml`, which is readable by root and by the `mail` group (the
-MailScanner logging plugin needs it). Like the AbuseIPDB and Telegram secrets it is also
+and **Clear key** removes it. Only letters, digits, `-` and `_` are accepted. The card
+also takes a **Search key (Brave Search API)** (`osint_search_key`; the full address is
+sent in quotes to Brave Search) and a **Validation key (Hunter)** (`osint_validation_key`;
+the full address is sent to Hunter and uses the account's paid quota), each with its own
+**Clear** button and the same rules. The
+keys are stored in `config.toml`, which is readable by root and by the `mail` group (the
+MailScanner logging plugin needs it). Like the AbuseIPDB and Telegram secrets they are also
 visible in the Config tab's raw view, history and snapshot exports. The `config.toml` file holds the limits: `osint_runs_per_min`, `osint_max_concurrent`,
 `osint_deadline_secs`, `osint_max_external_queries`, `osint_cache_secs` and
 `osint_retention_hours`; the defaults are listed on the OSINT page.

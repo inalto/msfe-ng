@@ -155,6 +155,11 @@ abuseipdb_key = ""
 # Secret; empty = lookup skipped. Mode: direct | range (hash prefix only).
 osint_hibp_key = ""
 osint_hibp_mode = "direct"
+
+# Brave Search API (OSINT search source) and Hunter (OSINT address validation).
+# Secrets; empty = source skipped. Config -> OSINT providers card.
+osint_search_key = ""
+osint_validation_key = ""
 EOF
     chmod 0640 "$CONFDIR/config.toml"
 fi

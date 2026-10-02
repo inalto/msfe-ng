@@ -122,6 +122,12 @@ pub struct Config {
     pub osint_hibp_key: String,
     /// `direct` (full address sent to HIBP) or `range` (6-char hash prefix).
     pub osint_hibp_mode: String,
+    /// Brave Search API key for the OSINT search source. Secret: never
+    /// exposed via the API (only `osint_search_set`).
+    pub osint_search_key: String,
+    /// Hunter API key for the OSINT address validation source. Secret: never
+    /// exposed via the API (only `osint_validation_set`).
+    pub osint_validation_key: String,
     /// Alert when the delivery queue holds at least this many messages (0 = off).
     pub alert_queue_size: u32,
     /// Alert when the oldest scanning-queue message is at least N minutes old (0 = off).
@@ -223,6 +229,8 @@ impl Default for Config {
             abuseipdb_key: String::new(),
             osint_hibp_key: String::new(),
             osint_hibp_mode: "direct".to_string(),
+            osint_search_key: String::new(),
+            osint_validation_key: String::new(),
             alert_queue_size: 0,
             alert_scan_stuck_mins: 0,
             alert_burst_per_hour: 0,
@@ -365,6 +373,8 @@ impl Config {
                 "telegram_chat_id" => c.telegram_chat_id = v,
                 "abuseipdb_key" => c.abuseipdb_key = v,
                 "osint_hibp_key" => c.osint_hibp_key = v,
+                "osint_search_key" => c.osint_search_key = v,
+                "osint_validation_key" => c.osint_validation_key = v,
                 "osint_hibp_mode" => {
                     c.osint_hibp_mode = if v == "range" { "range" } else { "direct" }.to_string()
                 }
@@ -575,6 +585,15 @@ impl Config {
                 "osint_hibp_mode".into(),
                 Json::str(self.osint_hibp_mode.clone()),
             ),
+            // the search and validation keys are secrets too: only whether set
+            (
+                "osint_search_set".into(),
+                Json::Bool(!self.osint_search_key.trim().is_empty()),
+            ),
+            (
+                "osint_validation_set".into(),
+                Json::Bool(!self.osint_validation_key.trim().is_empty()),
+            ),
             // the AbuseIPDB key is a secret too
             (
                 "abuseipdb_configured".into(),
@@ -711,6 +730,22 @@ mod tests {
             .to_public_json()
             .to_string()
             .contains("\"osint_hibp_set\":false"));
+    }
+
+    #[test]
+    fn search_and_validation_keys_are_never_serialized() {
+        let c = Config::from_toml_str(
+            "osint_search_key = \"SEARCHSECRET1\"\nosint_validation_key = \"VALIDSECRET2\"\n",
+        );
+        assert_eq!(c.osint_search_key, "SEARCHSECRET1");
+        assert_eq!(c.osint_validation_key, "VALIDSECRET2");
+        let j = c.to_public_json().to_string();
+        assert!(!j.contains("SEARCHSECRET1") && !j.contains("VALIDSECRET2"));
+        assert!(j.contains("\"osint_search_set\":true"));
+        assert!(j.contains("\"osint_validation_set\":true"));
+        let d = Config::default().to_public_json().to_string();
+        assert!(d.contains("\"osint_search_set\":false"));
+        assert!(d.contains("\"osint_validation_set\":false"));
     }
 
     #[test]

@@ -2274,12 +2274,20 @@ fn conf_parsed(req: &Request, cfg: &Config, config_file: &Path) -> Response {
 fn osint_setting_error(changes: &[(String, String)]) -> Option<&'static str> {
     for (k, v) in changes {
         match k.as_str() {
-            "osint_hibp_key" => {
+            "osint_hibp_key" | "osint_search_key" | "osint_validation_key" => {
                 let ok = v.len() <= 128
                     && v.bytes()
                         .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
                 if !ok {
-                    return Some("osint_hibp_key must be at most 128 letters, digits, '-' or '_'");
+                    return Some(match k.as_str() {
+                        "osint_search_key" => {
+                            "osint_search_key must be at most 128 letters, digits, '-' or '_'"
+                        }
+                        "osint_validation_key" => {
+                            "osint_validation_key must be at most 128 letters, digits, '-' or '_'"
+                        }
+                        _ => "osint_hibp_key must be at most 128 letters, digits, '-' or '_'",
+                    });
                 }
             }
             "osint_hibp_mode" if v != "direct" && v != "range" => {
@@ -3550,6 +3558,57 @@ mod tests {
         assert_eq!(st, 200, "{body}");
         let c = Config::from_toml_str(&std::fs::read_to_string(&file).unwrap());
         assert_eq!(c.osint_hibp_key, "");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn search_and_validation_keys_are_validated_on_save() {
+        let d = std::env::temp_dir().join(format!("msfe-api-osintkeys-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let file = d.join("config.toml");
+        let orig = "osint_search_key = \"\"\nosint_validation_key = \"\"\n";
+        std::fs::write(&file, orig).unwrap();
+        let cfg = Config {
+            backup_dir: d.join("bak").display().to_string(),
+            ..Default::default()
+        };
+        let apply = |changes: &str| {
+            let body = format!(r#"{{"which":"msfe","changes":{changes}}}"#);
+            send(handle(&post("/api/service/conf/apply", &body), &cfg, &file))
+        };
+        for key in ["osint_search_key", "osint_validation_key"] {
+            for bad in [
+                r"bad\\key",
+                r#"bad\"key"#,
+                r"bad\nkey",
+                "bad.key",
+                "has space",
+            ] {
+                let (st, body) = apply(&format!(r#"{{"{key}":"{bad}"}}"#));
+                assert_eq!(st, 400, "{key} {bad}: {body}");
+                assert!(!body.contains("bad"), "value echoed: {body}");
+                assert_eq!(std::fs::read_to_string(&file).unwrap(), orig, "{key} {bad}");
+            }
+            let long = format!(r#"{{"{key}":"{}"}}"#, "a".repeat(129));
+            assert_eq!(apply(&long).0, 400);
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), orig);
+        }
+        let good = "0123456789abcdef0123456789ABCDEF";
+        let (st, body) = apply(&format!(
+            r#"{{"osint_search_key":"{good}","osint_validation_key":"{good}-_x"}}"#
+        ));
+        assert_eq!(st, 200, "{body}");
+        let c = Config::from_toml_str(&std::fs::read_to_string(&file).unwrap());
+        assert_eq!(c.osint_search_key, good);
+        assert_eq!(c.osint_validation_key, format!("{good}-_x"));
+        let (st, _) = apply(r#"{"osint_search_key":"","osint_validation_key":""}"#);
+        assert_eq!(st, 200);
+        let c = Config::from_toml_str(&std::fs::read_to_string(&file).unwrap());
+        assert_eq!(
+            (c.osint_search_key.as_str(), c.osint_validation_key.as_str()),
+            ("", "")
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 

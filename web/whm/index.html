@@ -4615,7 +4615,7 @@ async function renderConfig(){
   // OSINT providers: on/off switch, Have I Been Pwned key and mode
   const oc=el('div',{class:'card',id:'osint-providers-card'},el('h2',{},'OSINT providers'),
     el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},
-      'OSINT lookups (Delivery tab) query public sources about an address or domain. The Have I Been Pwned key is optional and only enables the breach lookup.'));
+      'OSINT lookups (Delivery tab) query public sources about an address or domain. The keys are optional and each only enables its own source. Have I Been Pwned: the breach lookup. Search (Brave Search API): sends the full address in quotes to Brave Search. Validation (Hunter): sends the full address to Hunter and uses your account’s paid quota.'));
   maint.append(oc);
   const ogrid=el('div',{class:'grid2'});
   const oOn=el('input',{type:'checkbox',...(cconf.osint_enabled?{checked:'checked'}:{})});
@@ -4627,10 +4627,16 @@ async function renderConfig(){
     el('option',{value:'range'},'range — only a 6-character hash prefix sent; needs the Pro/High RPM plan'));
   oMode.value=cconf.osint_hibp_mode==='range'?'range':'direct';
   oMode.dataset.okey='osint_hibp_mode';
+  const oSearch=el('input',{type:'password',placeholder:cconf.osint_search_set?'(configured — leave empty to keep)':'Brave Search API key','autocomplete':'off',spellcheck:'false'});
+  oSearch.dataset.okey='osint_search_key';oSearch.dataset.secret='1';
+  const oValid=el('input',{type:'password',placeholder:cconf.osint_validation_set?'(configured — leave empty to keep)':'Hunter API key','autocomplete':'off',spellcheck:'false'});
+  oValid.dataset.okey='osint_validation_key';oValid.dataset.secret='1';
   ogrid.append(
     el('label',{class:'field'},oOn,' OSINT lookups '+(cconf.osint_enabled?'(on)':'(off)')),
     el('label',{class:'field',title:'Create a key in your Have I Been Pwned account. Letters, digits, - and _ only.'},'HIBP API key'+(cconf.osint_hibp_set?' (configured)':''),oKey),
-    el('label',{class:'field'},'HIBP lookup mode',oMode));
+    el('label',{class:'field'},'HIBP lookup mode',oMode),
+    el('label',{class:'field',title:'Brave Search API subscription token. Sends the full address in quotes to Brave Search. Letters, digits, - and _ only.'},'Search key (Brave Search API)'+(cconf.osint_search_set?' (configured)':''),oSearch),
+    el('label',{class:'field',title:'Hunter API key. Sends the full address to Hunter and uses your account’s paid quota. Letters, digits, - and _ only.'},'Validation key (Hunter)'+(cconf.osint_validation_set?' (configured)':''),oValid));
   const oSave=el('button',{class:'act'},'Save OSINT settings');
   oSave.onclick=async()=>{
     const changes={};
@@ -4641,14 +4647,20 @@ async function renderConfig(){
     const r=await api('/api/service/conf/apply',{method:'POST',body:{which:'msfe',changes}});
     toast(r&&r.ok?`${r.applied} setting(s) saved`:(r&&r.error)||'Save failed');
   };
-  const oClear=el('button',{class:'act plain'},'Clear key');
-  oClear.disabled=!cconf.osint_hibp_set;
-  oClear.onclick=async()=>{
-    if(!confirm('Remove the Have I Been Pwned API key?'))return;
-    const r=await api('/api/service/conf/apply',{method:'POST',body:{which:'msfe',changes:{osint_hibp_key:''}}});
-    toast(r&&r.ok?'Key cleared':(r&&r.error)||'Clear failed');
+  const mkClear=(label,what,key,isSet)=>{
+    const b=el('button',{class:'act plain'},label);
+    b.disabled=!isSet;
+    b.onclick=async()=>{
+      if(!confirm('Remove the '+what+' API key?'))return;
+      const r=await api('/api/service/conf/apply',{method:'POST',body:{which:'msfe',changes:{[key]:''}}});
+      toast(r&&r.ok?'Key cleared':(r&&r.error)||'Clear failed');
+    };
+    return b;
   };
-  oc.append(ogrid,el('div',{class:'ctl'},oSave,oClear));
+  const oClear=mkClear('Clear key','Have I Been Pwned','osint_hibp_key',cconf.osint_hibp_set);
+  const oClearS=mkClear('Clear search key','Brave Search','osint_search_key',cconf.osint_search_set);
+  const oClearV=mkClear('Clear validation key','Hunter','osint_validation_key',cconf.osint_validation_set);
+  oc.append(ogrid,el('div',{class:'ctl'},oSave,oClear,oClearS,oClearV));
 
   // DMARC report mailbox: where the domains' rua= reports arrive (IMAP);
   // `msfe-ng dmarc fetch` reads it hourly and Delivery → DMARC reports shows them
