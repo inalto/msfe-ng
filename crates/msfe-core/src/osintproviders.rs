@@ -60,6 +60,8 @@ pub fn infos(cfg: &Config) -> Vec<Info> {
         rdap_info(),
         search_info(cfg),
         hunter_info(cfg),
+        github_info(),
+        pgp_info(),
         delivery_info(),
     ];
     if fixture_enabled() {
@@ -79,6 +81,8 @@ pub fn is_known(id: &str) -> bool {
         || id == "rdap"
         || id == SEARCH_ID
         || id == HUNTER_ID
+        || id == GITHUB_ID
+        || id == PGP_ID
         || id == DELIVERY_ID
         || (id == "fixture" && fixture_enabled())
 }
@@ -91,6 +95,8 @@ pub fn run(id: &str, q: &QueryCtx) -> Outcome {
         "rdap" => rdap(q),
         SEARCH_ID => search(q),
         HUNTER_ID => hunter(q),
+        GITHUB_ID => github(q),
+        PGP_ID => openpgp(q),
         DELIVERY_ID => delivery(q),
         other => Outcome {
             source: SourceStatus {
@@ -1718,6 +1724,265 @@ fn hunter(q: &QueryCtx) -> Outcome {
     }
 }
 
+// ---- GitHub public-email profiles ------------------------------------------
+
+const GITHUB_ID: &str = "github";
+const GITHUB_HOST: &str = "api.github.com";
+const GITHUB_MAX_BODY: usize = 256 * 1024;
+const GITHUB_MAX_PROFILES: usize = 3;
+
+fn github_info() -> Info {
+    Info {
+        id: GITHUB_ID,
+        name: "GitHub public-email profile",
+        disclosure: "the full address is sent to api.github.com; only profiles that publish this exact address are matched".into(),
+        configured: true,
+    }
+}
+
+/// GitHub logins: ASCII letters, digits and hyphens, 1 to 39 characters.
+fn valid_github_login(s: &str) -> bool {
+    (1..=39).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// At most three profile findings. The profile URL is built here from the
+/// whitelisted login; the API's own URLs and the avatar are never used.
+/// Items present but none usable is an error, not an empty result.
+fn github_findings(body: &[u8], now: u64) -> Result<Vec<Finding>, String> {
+    let text = std::str::from_utf8(body).map_err(|_| "unexpected answer".to_string())?;
+    let j = Json::parse(text).map_err(|_| "unexpected answer".to_string())?;
+    let items = j
+        .get("items")
+        .and_then(|i| i.as_array())
+        .ok_or_else(|| "unexpected answer".to_string())?;
+    let mut out = Vec::new();
+    for it in items {
+        if out.len() >= GITHUB_MAX_PROFILES {
+            break;
+        }
+        let Some(login) = str_of(it, "login").filter(|l| valid_github_login(l)) else {
+            continue;
+        };
+        let name = clean_text(str_of(it, "name").unwrap_or(""), 80);
+        let bio = clean_text(str_of(it, "bio").unwrap_or(""), 200);
+        let mut parts = Vec::new();
+        if !name.is_empty() {
+            parts.push(format!("Public name: {name}."));
+        }
+        if !bio.is_empty() {
+            parts.push(format!("Bio: {bio}."));
+        }
+        let evidence = if parts.is_empty() {
+            "The profile publishes this address as its public email.".to_string()
+        } else {
+            parts.join(" ")
+        };
+        out.push(Finding {
+            group: Group::Profile,
+            confidence: Confidence::Medium,
+            confidence_reason: "GitHub matched this address against the profile's public email field; the owner chose to publish it, but that does not prove current control of the mailbox".into(),
+            severity: Severity::Info,
+            observed_at: now,
+            event_at: None,
+            source_id: GITHUB_ID.into(),
+            source_url: Some(format!("https://github.com/{login}")),
+            title: format!("GitHub profile: {login}"),
+            evidence,
+            limitations: vec![
+                "Private emails are not searchable this way.".into(),
+                "A profile is a candidate association, not a verified identity.".into(),
+            ],
+            asset_id: None,
+            asset_mime: None,
+        });
+    }
+    if out.is_empty() && !items.is_empty() {
+        return Err("unexpected answer".into());
+    }
+    Ok(out)
+}
+
+fn github(q: &QueryCtx) -> Outcome {
+    let remaining = q.deadline.saturating_duration_since(Instant::now());
+    if q.stop() || remaining.is_zero() {
+        return outcome(
+            GITHUB_ID,
+            SourceState::Inconclusive,
+            "stopped before this source ran",
+        );
+    }
+    let addr = q.address.trim();
+    let req = Request {
+        provider: "github",
+        host: GITHUB_HOST.to_string(),
+        path: "/search/users".to_string(),
+        query: vec![
+            ("q", format!("{addr} in:email")),
+            ("per_page", GITHUB_MAX_PROFILES.to_string()),
+        ],
+        headers: vec![
+            ("accept", "application/vnd.github+json".to_string()),
+            ("x-github-api-version", "2022-11-28".to_string()),
+        ],
+        timeout: remaining.min(Duration::from_secs(10)),
+        max_body: GITHUB_MAX_BODY,
+    };
+    let resp = match providerhttp::fetch(&req) {
+        Ok(r) => r,
+        Err(HttpError::Timeout) => return outcome(GITHUB_ID, SourceState::Failed, "timed out"),
+        Err(e) => {
+            let t = providerhttp::redact(&e.to_string(), &[addr]);
+            return outcome(GITHUB_ID, SourceState::Failed, &t);
+        }
+    };
+    match resp.status {
+        200 => match github_findings(&resp.body, now_secs()) {
+            Err(_) => outcome(
+                GITHUB_ID,
+                SourceState::Failed,
+                "unexpected answer from GitHub",
+            ),
+            Ok(f) if f.is_empty() => outcome(
+                GITHUB_ID,
+                SourceState::NoMatch,
+                "no GitHub profile publishes this address",
+            ),
+            Ok(f) => Outcome {
+                source: status(
+                    GITHUB_ID,
+                    SourceState::Matched,
+                    &format!("{} profile(s)", f.len()),
+                ),
+                findings: f,
+                assets: Vec::new(),
+            },
+        },
+        403 | 429 => rate_limited(
+            GITHUB_ID,
+            resp.retry_after,
+            "GitHub rate limit reached (10 searches a minute without a token)",
+        ),
+        422 => outcome(GITHUB_ID, SourceState::Failed, "GitHub rejected the search"),
+        n => outcome(
+            GITHUB_ID,
+            SourceState::Failed,
+            &format!("GitHub answered HTTP {n}"),
+        ),
+    }
+}
+
+// ---- OpenPGP key presence (keys.openpgp.org) ---------------------------------
+
+const PGP_ID: &str = "openpgp";
+const PGP_HOST: &str = "keys.openpgp.org";
+const PGP_MAX_BODY: usize = 256 * 1024;
+const PGP_ARMOR: &[u8] = b"-----BEGIN PGP PUBLIC KEY BLOCK-----";
+
+fn pgp_info() -> Info {
+    Info {
+        id: PGP_ID,
+        name: "OpenPGP key (keys.openpgp.org)",
+        disclosure: "the full address is sent to keys.openpgp.org".into(),
+        configured: true,
+    }
+}
+
+/// Only the presence and size of the armored key are used; it is never parsed
+/// or stored.
+fn openpgp(q: &QueryCtx) -> Outcome {
+    let remaining = q.deadline.saturating_duration_since(Instant::now());
+    if q.stop() || remaining.is_zero() {
+        return outcome(
+            PGP_ID,
+            SourceState::Inconclusive,
+            "stopped before this source ran",
+        );
+    }
+    let addr = q.address.trim();
+    let enc = providerhttp::pct_encode(addr);
+    let req = Request {
+        provider: "openpgp",
+        host: PGP_HOST.to_string(),
+        path: format!("/vks/v1/by-email/{enc}"),
+        query: Vec::new(),
+        headers: vec![("accept", "application/pgp-keys".to_string())],
+        timeout: remaining.min(Duration::from_secs(10)),
+        max_body: PGP_MAX_BODY,
+    };
+    let resp = match providerhttp::fetch(&req) {
+        Ok(r) => r,
+        Err(HttpError::Timeout) => return outcome(PGP_ID, SourceState::Failed, "timed out"),
+        Err(HttpError::TooLarge) => {
+            return outcome(
+                PGP_ID,
+                SourceState::Failed,
+                "the answer was larger than the 256 KiB limit",
+            )
+        }
+        Err(e) => {
+            let t = providerhttp::redact(&e.to_string(), &[addr]);
+            return outcome(PGP_ID, SourceState::Failed, &t);
+        }
+    };
+    match resp.status {
+        200 => {
+            if !resp.body.starts_with(PGP_ARMOR) {
+                return outcome(
+                    PGP_ID,
+                    SourceState::Failed,
+                    "unexpected answer from keys.openpgp.org",
+                );
+            }
+            let n = resp.body.len();
+            let f = Finding {
+                group: Group::Profile,
+                confidence: Confidence::Medium,
+                confidence_reason: "keys.openpgp.org publishes an address only after its owner confirmed it by email, so this shows historical control of the mailbox".into(),
+                severity: Severity::Info,
+                observed_at: now_secs(),
+                event_at: None,
+                source_id: PGP_ID.into(),
+                source_url: Some(format!("https://keys.openpgp.org/search?q={enc}")),
+                title: "Public OpenPGP key published".into(),
+                evidence: format!(
+                    "A key for this address is published on keys.openpgp.org ({n} bytes, armored). The key is not parsed or stored."
+                ),
+                limitations: vec![
+                    "Expiry and revocation are not checked here.".into(),
+                    "Historical control is not current control or legal identity.".into(),
+                ],
+                asset_id: None,
+                asset_mime: None,
+            };
+            Outcome {
+                source: status(PGP_ID, SourceState::Matched, "1 published key"),
+                findings: vec![f],
+                assets: Vec::new(),
+            }
+        }
+        404 => outcome(
+            PGP_ID,
+            SourceState::NoMatch,
+            "no key is published for this address on keys.openpgp.org",
+        ),
+        429 => rate_limited(
+            PGP_ID,
+            resp.retry_after,
+            "keys.openpgp.org rate limit reached",
+        ),
+        400 => outcome(
+            PGP_ID,
+            SourceState::Failed,
+            "keys.openpgp.org rejected the address",
+        ),
+        n => outcome(
+            PGP_ID,
+            SourceState::Failed,
+            &format!("keys.openpgp.org answered HTTP {n}"),
+        ),
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod testutil {
     use std::io::{Read, Write};
@@ -3023,5 +3288,203 @@ mod tests {
                 .configured
         );
         assert!(is_known("hunter"));
+    }
+
+    // ---- github and openpgp ----------------------------------------------
+
+    static GITHUB_LOCK: Mutex<()> = Mutex::new(());
+    static PGP_LOCK: Mutex<()> = Mutex::new(());
+
+    fn github_sample() -> String {
+        let long_bio = "b".repeat(5000);
+        format!(
+            r#"{{"total_count":3,"items":[
+            {{"login":"octo-cat","html_url":"https://evil.example/phish","name":"Octo <i>Cat</i>","bio":"<script>alert(1)</script>Hi {long_bio}","avatar_url":"https://avatars.example/u/1"}},
+            {{"login":"bad/login","html_url":"https://github.com/bad","name":"Bad"}},
+            {{"login":"{}","html_url":"https://github.com/x"}},
+            {{"login":"plain1","html_url":"javascript:alert(1)"}}]}}"#,
+            "l".repeat(40)
+        )
+    }
+
+    #[test]
+    fn github_builds_our_own_profile_url_and_drops_bad_logins() {
+        let fs = github_findings(github_sample().as_bytes(), 9).unwrap();
+        assert_eq!(fs.len(), 2);
+        let f = &fs[0];
+        assert_eq!(f.group, Group::Profile);
+        assert_eq!(f.confidence, Confidence::Medium);
+        assert!(f.confidence_reason.contains("public email field"));
+        assert_eq!(f.title, "GitHub profile: octo-cat");
+        assert_eq!(f.source_url.as_deref(), Some("https://github.com/octo-cat"));
+        assert!(
+            f.evidence.starts_with("Public name: Octo Cat. Bio: "),
+            "{}",
+            f.evidence
+        );
+        assert!(!f.evidence.contains('<') && !f.evidence.contains("evil"));
+        assert!(
+            f.evidence.chars().count() < 80 + 200 + 40,
+            "{}",
+            f.evidence.len()
+        );
+        assert!(f.evidence.ends_with('\u{2026}') || f.evidence.ends_with("\u{2026}."));
+        assert!(f.asset_id.is_none() && f.limitations.len() == 2);
+        assert_eq!(fs[1].title, "GitHub profile: plain1");
+        assert_eq!(
+            fs[1].source_url.as_deref(),
+            Some("https://github.com/plain1")
+        );
+        assert!(github_findings(br#"{"total_count":0,"items":[]}"#, 1)
+            .unwrap()
+            .is_empty());
+        assert!(github_findings(b"x", 1).is_err());
+        assert!(github_findings(br#"{"total_count":1}"#, 1).is_err());
+        // Items present but none with a usable login is not a clean "no match".
+        assert!(github_findings(br#"{"items":[{"login":"a/b"}]}"#, 1).is_err());
+    }
+
+    #[test]
+    fn github_end_to_end_status_mapping_and_request() {
+        let _g = GITHUB_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let sample = github_sample();
+        let cases: Vec<(String, SourceState, Option<u64>)> = vec![
+            (http("200 OK", &sample), SourceState::Matched, None),
+            (
+                http("200 OK", r#"{"total_count":0,"items":[]}"#),
+                SourceState::NoMatch,
+                None,
+            ),
+            (http("403 Forbidden", ""), SourceState::RateLimited, Some(7)),
+            (
+                "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+                SourceState::RateLimited,
+                None,
+            ),
+            (
+                http("429 Too Many Requests", ""),
+                SourceState::RateLimited,
+                Some(7),
+            ),
+            (
+                http("422 Unprocessable Entity", ""),
+                SourceState::Failed,
+                None,
+            ),
+            (
+                http("503 Service Unavailable", ""),
+                SourceState::Failed,
+                None,
+            ),
+        ]
+        .into_iter()
+        .map(|(r, s, ra)| (String::from_utf8(r).unwrap(), s, ra))
+        .collect();
+        for (reply, want, retry) in cases {
+            let (port, h) = serve(reply.clone().into_bytes());
+            let _e = EnvGuard::set("MSFE_NG_OSINT_BASE_GITHUB", port);
+            let o = run_with("github", &Config::default(), "a+b@example.org");
+            let head = h.join().unwrap();
+            assert_eq!(o.source.state, want, "{reply}: {}", o.source.detail);
+            assert_eq!(o.source.retry_after, retry, "{reply}");
+            let line = head.lines().next().unwrap();
+            assert!(line.starts_with("GET /search/users?q="), "{line}");
+            assert!(line.contains("a%2Bb%40example.org%20in%3Aemail"), "{line}");
+            assert!(line.contains("per_page=3"), "{line}");
+            let low = head.to_ascii_lowercase();
+            assert!(
+                low.contains("accept: application/vnd.github+json"),
+                "{head}"
+            );
+            assert!(low.contains("x-github-api-version: 2022-11-28"), "{head}");
+            assert!(!low.contains("authorization"), "{head}");
+            if want == SourceState::NoMatch {
+                assert!(o
+                    .source
+                    .detail
+                    .contains("no GitHub profile publishes this address"));
+            }
+            if want == SourceState::Matched {
+                assert_eq!(o.findings.len(), 2);
+            }
+        }
+    }
+
+    const PGP_KEY: &str = "-----BEGIN PGP PUBLIC KEY BLOCK-----\n\nmDMEZsecretkeymaterialZZZZ\n-----END PGP PUBLIC KEY BLOCK-----\n";
+
+    #[test]
+    fn openpgp_end_to_end_never_keeps_the_key() {
+        let _g = PGP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cases: Vec<(&str, &str, SourceState)> = vec![
+            ("200 OK", PGP_KEY, SourceState::Matched),
+            ("200 OK", "<html>captive portal</html>", SourceState::Failed),
+            ("404 Not Found", "", SourceState::NoMatch),
+            ("429 Too Many Requests", "", SourceState::RateLimited),
+            ("400 Bad Request", "", SourceState::Failed),
+            ("503 Service Unavailable", "", SourceState::Failed),
+        ];
+        for (status, body, want) in cases {
+            let (port, h) = serve(http(status, body));
+            let _e = EnvGuard::set("MSFE_NG_OSINT_BASE_OPENPGP", port);
+            let o = run_with("openpgp", &Config::default(), "a+b@example.org");
+            let head = h.join().unwrap();
+            assert_eq!(o.source.state, want, "{status}: {}", o.source.detail);
+            let line = head.lines().next().unwrap();
+            assert!(
+                line.starts_with("GET /vks/v1/by-email/a%2Bb%40example.org "),
+                "{line}"
+            );
+            assert!(
+                head.to_ascii_lowercase()
+                    .contains("accept: application/pgp-keys"),
+                "{head}"
+            );
+            if status.starts_with("429") {
+                assert_eq!(o.source.retry_after, Some(7));
+            }
+            if want == SourceState::Matched {
+                assert_eq!(o.findings.len(), 1);
+                let f = &o.findings[0];
+                assert_eq!(f.group, Group::Profile);
+                assert_eq!(f.confidence, Confidence::Medium);
+                assert_eq!(f.title, "Public OpenPGP key published");
+                assert!(
+                    f.evidence
+                        .contains(&format!("({} bytes, armored)", PGP_KEY.len())),
+                    "{}",
+                    f.evidence
+                );
+                assert_eq!(
+                    f.source_url.as_deref(),
+                    Some("https://keys.openpgp.org/search?q=a%2Bb%40example.org")
+                );
+                let all = format!("{f:?} {:?}", o.source);
+                assert!(!all.contains("secretkeymaterial") && !all.contains("BEGIN PGP"));
+                assert_eq!(f.limitations.len(), 2);
+            } else {
+                assert!(o.findings.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn github_and_openpgp_are_keyless_known_and_disclose_the_address() {
+        let list = infos(&Config::default());
+        let g = list.iter().find(|p| p.id == "github").unwrap();
+        let p = list.iter().find(|p| p.id == "openpgp").unwrap();
+        assert!(g.configured && p.configured);
+        assert!(g.disclosure.contains("api.github.com"));
+        assert!(g.disclosure.contains("exact address"));
+        assert!(p
+            .disclosure
+            .contains("full address is sent to keys.openpgp.org"));
+        assert!(is_known("github") && is_known("openpgp"));
+        let ok = crate::osintrun::parse_inputs(
+            "a@example.org",
+            &["github".to_string(), "openpgp".to_string()],
+            false,
+            None,
+        );
+        assert!(ok.is_ok());
     }
 }
