@@ -24,7 +24,7 @@
 - HIBP range mode: only the 6-character SHA-1 prefix is sent; non-matching rows are discarded immediately and never stored.
 - A breach finding never changes mail filtering or the CLI exit code.
 - Defaults unchanged from phase 1 except new settings: `osint_hibp_key = ""`, `osint_hibp_mode = "direct"`.
-- No server names (ncc, gauss, erdos, …) in commits, docs, code or comments (public repo).
+- No server names (the user's production hostnames) in commits, docs, code or comments (public repo).
 - Commit trailer: `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`.
 - If a Tailwind class is added, run `npm run build` in `web/` and commit `web/whm/app.css` and `web/user/app.css`.
 
@@ -1142,7 +1142,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
   - `Config.md`: the OSINT providers card (key, mode, Clear key, the enabled checkbox) and the fact that the key is stored in `config.toml` (root-readable, included in snapshots, visible in the Config tab's raw view — say so plainly).
   - `CLI.md`: `delivery osint providers` now prints `configured`; `osint_hibp_key`/`osint_hibp_mode` rows.
   - No server names anywhere.
-- [ ] **Step 2: Final gates** (paste results in the report): `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace`; `(cd web && npm run build && git diff --exit-code whm/app.css user/app.css)`; `node --check` on the extracted `<script>` blocks of `web/whm/index.html` and `web/user/index.html` as CI does; `grep -rniE "ncc|gauss|erdos" docs/wiki/OSINT.md crates/msfe-core/src/osint*.rs crates/msfe-core/src/providerhttp.rs crates/msfe-ngd/src/osint_api.rs` prints nothing; `git grep -n "hibp_key" -- ':!crates/msfe-core/src/config.rs' ':!web/whm/index.html' ':!packaging/install.sh' ':!docs'` shows the key only where intended (adapters read it from `Config`; nothing logs it).
+- [ ] **Step 2: Final gates** (paste results in the report): `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace`; `(cd web && npm run build && git diff --exit-code whm/app.css user/app.css)`; `node --check` on the extracted `<script>` blocks of `web/whm/index.html` and `web/user/index.html` as CI does; a `grep -rniE` over docs/wiki/OSINT.md crates/msfe-core/src/osint*.rs crates/msfe-core/src/providerhttp.rs crates/msfe-ngd/src/osint_api.rs for the user\'s production hostnames listed in the project memory prints nothing; `git grep -n "hibp_key" -- ':!crates/msfe-core/src/config.rs' ':!web/whm/index.html' ':!packaging/install.sh' ':!docs'` shows the key only where intended (adapters read it from `Config`; nothing logs it).
 - [ ] **Step 3: Commit**
 
 ```bash

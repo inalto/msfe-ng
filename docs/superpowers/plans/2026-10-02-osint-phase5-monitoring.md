@@ -26,7 +26,7 @@
 - At most `MAX_PER_PASS = 2` monitors run per `msfe-ng monitor` pass and a guard (`kv osintmon_running` timestamp, 10-minute stale limit) prevents overlapping passes.
 - History retention `osint_history_days` (default 90) and at most 100 runs per monitor, pruned in housekeeping; stored reports contain no avatar bytes and `asset_id`/`asset_mime` are stripped before storing (assets expire).
 - Admin (root) only; no `/api/user/` route. Alert text goes only to the already-configured Telegram destination.
-- No server names (ncc, gauss, erdos, …) in commits, docs, code or comments. Commit trailer: `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`.
+- No server names (the user's production hostnames) in commits, docs, code or comments. Commit trailer: `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`.
 - If a Tailwind class is added, `npm run build` in `web/` and commit `web/whm/app.css` and `web/user/app.css`.
 
 ## Review Focus
@@ -222,7 +222,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 **Files:** Modify `docs/wiki/OSINT.md`, `CLI.md`, `Config.md`, `Home.md`.
 
 - [ ] **Step 1: Docs** (true to the code): what monitoring does and its opt-in nature (daily at most; needs the database and migration 0006: `msfe-ng db-migrate`, applied automatically on upgrade); the three tables; history retention (`osint_history_days`, 100 runs per monitor, reports stored without avatars; the "reports are only files for 24 h" statement in OSINT.md must now say that monitor runs are the exception); the monthly budget (`osint_monitor_budget`, units = sources that issued a request, reserved then settled, cap behaviour and the single monthly alert); change semantics (first run baseline, stable identities, what alerts and what does not, "no longer listed" and recoveries are history only, providers that go failed/restricted); alert separation and content (Telegram only, no Delivery mixing; the alert names the address and up to 5 titles — mention this is personal data sent to Telegram); retries/duplicates policy; removal/disable semantics; limits (`osint_max_monitors` default 10, at most 2 runs per 5-minute pass, one pass at a time); CLI `delivery osint monitor …` and the API summary; Config keys table; privacy and provider-terms note (recurring lookups multiply what each provider sees; check each provider's terms for monitoring use). No server names.
-- [ ] **Step 2: Final gates** (paste results): `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace`; `(cd web && npm run build) && git diff --exit-code web/whm/app.css web/user/app.css`; `node --check` of the extracted script blocks; `grep -rniE "ncc|gauss|erdos" docs/wiki/OSINT.md crates/msfe-core/src/osint*.rs crates/msfe-ngd/src/osint_api.rs db/migrations/0006_osint_monitors.sql` prints nothing; `shellcheck`/`perl -c` untouched.
+- [ ] **Step 2: Final gates** (paste results): `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace`; `(cd web && npm run build) && git diff --exit-code web/whm/app.css web/user/app.css`; `node --check` of the extracted script blocks; a `grep -rniE` over docs/wiki/OSINT.md crates/msfe-core/src/osint*.rs crates/msfe-ngd/src/osint_api.rs db/migrations/0006_osint_monitors.sql for the user\'s production hostnames listed in the project memory prints nothing; `shellcheck`/`perl -c` untouched.
 - [ ] **Step 3: Commit**
 
 ```bash
