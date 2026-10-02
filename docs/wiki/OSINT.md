@@ -71,6 +71,9 @@ can use it.
 | `osint_max_external_queries` | 8 | most outside lookups one run may make (1-20) |
 | `osint_cache_secs` | 3600 | a repeat of the same lookup inside this time reuses the earlier report; *Fresh lookup* bypasses it |
 | `osint_retention_hours` | 24 | how long a report and its avatar are kept (1-720) |
+| `osint_max_monitors` | 10 | monitors that may exist (1-100); see [Monitoring an address](#monitoring-an-address) |
+| `osint_history_days` | 90 | how long stored monitor runs are kept (1-730) |
+| `osint_monitor_budget` | 300 | provider units per calendar month for all monitors (0 = unlimited, up to 100000) |
 
 Only configured outside sources use the per-run query budget. A source whose key
 is missing is reported as **not configured** without spending any of it (and makes
@@ -217,13 +220,190 @@ avatars. Avatars are removed together with their report.
 
 ## Reports and export
 
-Each run is stored as a report under `/var/cache/msfe-ng/osint` (directory mode
+Each interactive run is stored as a report under `/var/cache/msfe-ng/osint` (directory mode
 `0700`, files `0600`) and deleted after `osint_retention_hours` (24 h by
 default); the same applies to avatars. Expired items are swept when the daemon
 starts, by `msfe-ng housekeeping` (run daily by cron), and by
 `delivery osint sweep`. Only the normalised findings and minimal evidence are
 kept, never raw provider replies. A report can be downloaded as JSON or as a standalone HTML
-page. The view works without the database.
+page. The view works without the database. The one exception to the 24-hour rule
+is a **monitor run**, which is stored in the database and kept longer, see
+[Monitoring an address](#monitoring-an-address).
+
+## Monitoring an address
+
+A **monitor** re-runs the lookup for one address on a schedule and tells you on
+Telegram when something new shows up. It is **opt-in** and checks only the
+addresses you add. Nothing is watched until you create a monitor, and the whole
+feature stays silent (no error, no lookup) when `osint_enabled` is false, when no
+database is configured, or when the migration has not been applied
+(`msfe-ng db-migrate`; it is applied automatically on upgrade).
+
+- **Schedule.** Interval 24 h, 48 h or 7 days (any value is clamped to 1440-10080
+  minutes, so a monitor runs at most daily). The scheduled pass rides the existing
+  5-minute `msfe-ng monitor` cron (step 5 of that pass); there is no separate
+  timer. A pass runs at most **2** monitors, oldest last run first, and only one pass
+  runs at a time (a second one answers "previous pass still running"; a pass that
+  died is considered stale after 10 minutes). Monitors still due are picked up on
+  the next 5-minute pass.
+- **Sources.** The source set you tick is stored with the monitor when it is
+  created and is what every run uses. `delivery` can never be monitored, and
+  `hunter` (paid quota) is included only if you name it. Each run is a fresh
+  lookup, never served from the interactive cache. Adding the same address again
+  updates its sources and interval and resumes it.
+- **Limit.** At most `osint_max_monitors` monitors (default 10).
+- **Admin only.** Monitors, their history and the API are for the WHM admin.
+
+### What is stored
+
+Migration `0006_osint_monitors.sql` adds three tables:
+
+| Table | Holds |
+|---|---|
+| `osint_monitors` | the address, the approved source set, the interval, enabled or paused, the last run time and a one-line summary |
+| `osint_runs` | one row per stored run: time, duration, state, counts and the report (normalised findings and minimal evidence, **without avatars**) |
+| `osint_usage` | the provider units charged per calendar month, one row per run |
+
+Monitor runs are the exception to "reports are only files for 24 h": they are
+kept for `osint_history_days` (default 90) and at most 100 per monitor, pruned by
+the daily `msfe-ng housekeeping`. The latest run of each monitor is always kept,
+because it is the comparison baseline. Usage rows are kept for 400 days.
+Opening a stored run shows it like any report; its HTML export is a download.
+
+### Monthly budget
+
+Every run spends provider quota, so a monthly cap applies to all monitors
+together: `osint_monitor_budget` units per calendar month (UTC), default **300**,
+**0 = unlimited**. A unit is one of the monitor's configured sources (a source
+without its key is not counted). The units are **reserved before the run** and
+**settled afterwards** to the sources that actually took part (not "not
+configured" or "not requested"), so a run that did less than planned gives the rest
+back. A **failed or timed-out run is charged** in full, because providers may
+already have been queried. A run that never started (busy, rate limited, too many
+runs, invalid input) is not charged.
+
+When the next monitor would push the month over the cap it is skipped, and stays
+due. One **budget alert per month** is sent for that, and only when Telegram is
+configured at that moment; if it is not, none is sent that month. Monitoring
+resumes next month or when you raise the cap.
+
+### What counts as a change
+
+- **The first run is a baseline** and never alerts. Neither does a run whose
+  baseline was pruned.
+- A finding is identified by its source, its group and its URL (normalised:
+  lower-case scheme and host, no fragment, no trailing slash) or, with no URL, its
+  title. Observation time, evidence, confidence and severity do not make a
+  finding "new".
+- A finding that is **new** and in the group exposure, profile, reference or domain
+  is alerted. Hunter's validation verdicts and context findings are recorded in
+  the history but **never alerted**.
+- A finding that is **no longer listed** and a source that **recovers** are history
+  only: no alert. A source that did not answer this time never makes its earlier
+  findings "gone".
+- A source that answered before (matched or no match) and is now **failed or
+  restricted** raises one *source problem* alert. Rate limited, inconclusive and
+  not configured never alert.
+
+### Alerts
+
+Alerts go to Telegram only (`telegram_bot_token`, `telegram_chat_id`) and are
+separate from the Delivery alerts: they have their own keys and texts and never
+appear in a Delivery message. A *new items* message names the **address**, the
+**host** and up to **5 titles** (with "...and n more"); a *source problem* message
+names the address, the host and the source. **This is personal data about the
+address, sent to Telegram.** Evidence and links are not included. Use a chat you
+control and that fits your data-protection obligations.
+
+No duplicates, no lost alerts: a monitor keeps a baseline pointer to the run it
+last compared against. It advances only when every alert it needed was sent (or
+Telegram is not configured). A failed send, or a change held back by the cooldown,
+leaves the baseline in place so the change is raised again on the next run. Each
+monitor and each kind (new items, source problem) has its own cooldown
+`alert_cooldown_mins` (default 60), recorded only after a send succeeded.
+
+### Failures, removal and disabling
+
+- Busy, rate limited or too many OSINT runs: nothing was started, nothing is
+  charged, and the monitor is tried again on the next pass.
+- A run that fails or times out waits a full interval before the next try, is
+  charged and stores no report; an invalid one (for example a stored address that
+  no longer validates) also waits a full interval, but is not charged.
+- A run that cannot be stored is charged and waits a full interval.
+- **Remove** deletes the monitor with its runs, usage rows and alert keys.
+  **Disable** (pause) keeps the history. A run in flight when its monitor is
+  removed or disabled **stores nothing and alerts nothing**, and its reservation is
+  released.
+
+### From the shell
+
+```
+msfe-ng delivery osint monitor list [--json]
+msfe-ng delivery osint monitor add <address> [--sources a,b] [--interval-mins n]
+msfe-ng delivery osint monitor remove <id|address>
+msfe-ng delivery osint monitor enable <id>
+msfe-ng delivery osint monitor disable <id>
+msfe-ng delivery osint monitor run [--dry-run] [--id n]
+msfe-ng delivery osint monitor history <id> [--json]
+```
+
+`add` without `--sources` takes the configured sources except `delivery` and
+`hunter`; the interval defaults to 1440 minutes. `run` makes a pass now (with
+`--id n` that monitor is made due first; `--dry-run` only lists what is due) and is
+subject to the same 2-per-pass, budget and one-pass-at-a-time rules; `remove` takes
+an id or the exact address.
+
+| Exit | Meaning |
+|---|---|
+| 0 | done |
+| 1 | the database is unavailable or the migration is missing, the monitor limit is reached, or no such monitor |
+| 2 | usage error |
+| 3 | invalid input (address, sources, interval) |
+
+### In the WHM view
+
+The **Monitors** card of the OSINT view lists the monitors with their sources,
+interval, last run and result. It shows the month's budget use and whether Telegram
+is configured; the add form has the address, an interval and the sources (the same
+defaults as the Run form, Hunter unticked). Each row has *run now*, *history*
+(each stored run can be opened in the view, avatars are not kept, or downloaded as
+HTML), *pause*/*resume* and *remove*. Opening the card queries no provider.
+
+### API
+
+Admin only, under `/api/delivery/osint/monitors`:
+
+| Request | Meaning |
+|---|---|
+| `GET` | the monitors, the limit, the month's budget (`cap`, `used`, `period`), whether Telegram is configured and whether OSINT is on |
+| `POST` `{address, sources[], interval_mins}` | add (201); 403 when OSINT is off; 400 for a bad address, source list or the monitor limit |
+| `DELETE ?id=` or `POST /remove {id}` | remove (404 when unknown) |
+| `POST /enable {id, enabled}` | pause or resume |
+| `POST /run {id}` | make it due and start a pass (202); 403 when OSINT is off, 409 when paused or a pass is already running |
+| `GET /runs?id=&limit=` | the stored runs (limit 1-200, default 50) |
+| `GET /report?run=[&format=html]` | one stored report, as JSON or an HTML download |
+
+Without the database or the migration these answer 503 with a hint; an SQL
+error on a write is a 500 with a fixed message.
+
+### Privacy and provider terms
+
+Monitoring multiplies what each provider sees: the same address is sent again every
+day or week, and the providers (and your history table) hold that data for longer
+than a one-off lookup. Check each provider's terms for **monitoring and
+automated use**, and your own data-protection obligations: how long you keep the
+history (`osint_history_days`), your lawful basis for watching a person's
+address, and informing the person where the law requires it. Add only addresses
+you have a reason to watch.
+
+### Testing, stated plainly
+
+The monitor logic (change detection, budget, alerts, retry, cooldown, removal in
+flight) is unit-tested with fakes. The SQL and the scheduler were exercised against
+a private scratch MariaDB with the fixture provider. Telegram sending was exercised
+only through the existing sender and a fake in the tests. No real provider keys
+were used for monitoring, so real provider behaviour over repeated runs is
+untested.
 
 ## From the shell
 

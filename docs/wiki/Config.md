@@ -248,4 +248,7 @@ keys are stored in `config.toml`, which is readable by root and by the `mail` gr
 MailScanner logging plugin needs it). Like the AbuseIPDB and Telegram secrets they are also
 visible in the Config tab's raw view, history and snapshot exports. The `config.toml` file holds the limits: `osint_runs_per_min`, `osint_max_concurrent`,
 `osint_deadline_secs`, `osint_max_external_queries`, `osint_cache_secs` and
-`osint_retention_hours`; the defaults are listed on the OSINT page.
+`osint_retention_hours`. Scheduled checks add `osint_max_monitors` (10),
+`osint_history_days` (90) and `osint_monitor_budget` (300 provider units a month,
+0 = unlimited); the defaults are listed on the OSINT page, and the alerts use the
+Telegram settings and `alert_cooldown_mins`.

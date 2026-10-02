@@ -67,6 +67,15 @@ msfe-ng dmarc import <file>... [--json]   store DMARC report files (.xml, .xml.g
 msfe-ng dmarc <status [--json] | test | prune>   last fetch and stored totals | IMAP login check | drop rows past retention
 ```
 
+Example, watching one address (needs `osint_enabled` and the database; the first run at the next 5-minute `msfe-ng monitor` pass is a baseline and never alerts; the exit codes are 0 done, 1 database/limit/no such monitor, 2 usage, 3 invalid input):
+
+```
+msfe-ng delivery osint monitor add alice@example.org --sources gravatar,hibp --interval-mins 2880
+msfe-ng delivery osint monitor list
+msfe-ng delivery osint monitor run --id 3
+msfe-ng delivery osint monitor history 3
+```
+
 Environment: `MSFE_NG_SOCKET` (daemon socket), `MSFE_NG_CONFIG` (config file),
 `MSFE_NG_MIGRATIONS` (migrations dir), `MSFE_NG_DMARC_LOCK` (the DMARC fetch
 lock file, default `/run/msfe-ng-dmarc.lock`).
@@ -87,7 +96,7 @@ Seeded by the installer with comments; editable from the [Config](Config) tab.
 | AbuseIPDB | `abuseipdb_key` (manual reports from the client-IP view and `msfe-ng report`; secret) |
 | DMARC reports | `dmarc_imap_host`, `dmarc_imap_port`, `dmarc_imap_tls`, `dmarc_imap_verify`, `dmarc_imap_user`, `dmarc_imap_pass` (secret), `dmarc_imap_folder`, `dmarc_delete_imported`, `dmarc_retention_days`, `dmarc_alerts`, `dmarc_alert_min_messages` — see [DMARC reports](DMARC-reports) |
 | Delivery test | `delivery_runs_per_min`, `delivery_cache_secs`, `delivery_log_days`, `delivery_max_monitors`, `delivery_helo` |
-| OSINT | `osint_enabled` (false), `osint_hibp_key` (secret), `osint_hibp_mode` (`direct`/`range`), `osint_search_key` (secret), `osint_validation_key` (secret), `osint_runs_per_min`, `osint_max_concurrent`, `osint_deadline_secs`, `osint_max_external_queries`, `osint_cache_secs`, `osint_retention_hours` — see [OSINT](OSINT) |
+| OSINT | `osint_enabled` (false), `osint_hibp_key` (secret), `osint_hibp_mode` (`direct`/`range`), `osint_search_key` (secret), `osint_validation_key` (secret), `osint_runs_per_min`, `osint_max_concurrent`, `osint_deadline_secs`, `osint_max_external_queries`, `osint_cache_secs`, `osint_retention_hours`, `osint_max_monitors`, `osint_history_days`, `osint_monitor_budget` — see [OSINT](OSINT) |
 
 `mailscanner_conf` is seeded with the engine's conf found at install time
 (`/etc/MailScanner/MailScanner.conf`, or ConfigServer's
