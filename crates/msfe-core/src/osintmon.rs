@@ -1035,9 +1035,10 @@ pub fn diff_reports(prev: &OsintReport, cur: &OsintReport) -> Delta {
 /// earlier findings count as known, so a provider that missed a run (rate
 /// limited, failed, not configured, ...) does not re-announce every old item
 /// when it recovers. A finding is "new" only when its source answered in the
-/// baseline (or in a bridging run); a genuinely new item that first shows up
-/// exactly at a recovery with nothing to bridge from is picked up on the next
-/// run, once the source has answered twice.
+/// baseline (or in a bridging run). A genuinely new item that first shows up
+/// exactly when a source answers for the first time, with nothing to bridge
+/// from, does not alert: the pointer advances and the item becomes part of the
+/// baseline (a source's first answer is its baseline).
 pub fn diff_reports_with(prev: &OsintReport, cur: &OsintReport, older: &[OsintReport]) -> Delta {
     let mut d = Delta::default();
     let mut base: Vec<Finding> = prev.findings.clone();
@@ -1336,31 +1337,27 @@ fn runner_skip_note(addr: &str, s: &RunSkip) -> String {
 
 /// The run to compare against: the baseline pointer when it names a run of
 /// this monitor, else the run before this one; `None` makes this run the
-/// new baseline.
-fn baseline_report(store: &dyn Store, m: &Monitor, run_id: u32) -> Option<OsintReport> {
+/// new baseline. The baseline run's id comes with it.
+fn baseline_report(store: &dyn Store, m: &Monitor, run_id: u32) -> Option<(u32, OsintReport)> {
     let by_pointer = store
         .kv_get(&format!("osint_base_{}", m.id))
         .and_then(|v| v.trim().parse::<u32>().ok())
         .filter(|id| *id != run_id)
-        .and_then(|id| store.run_by_id(id).ok().flatten())
-        .filter(|(mon, _)| *mon == m.id)
-        .map(|(_, r)| r);
-    by_pointer.or_else(|| {
-        store
-            .previous_run(m.id, run_id)
-            .ok()
-            .flatten()
-            .map(|(_, r)| r)
-    })
+        .and_then(|id| Some((id, store.run_by_id(id).ok().flatten()?)))
+        .filter(|(_, (mon, _))| *mon == m.id)
+        .map(|(id, (_, r))| (id, r));
+    by_pointer.or_else(|| store.previous_run(m.id, run_id).ok().flatten())
 }
 
-/// Earlier runs (newest first, at most the last 10) that can vouch for a
+/// Runs older than the baseline run (newest first, at most the last 10; never
+/// the runs between the baseline and this one, which exist only while the
+/// baseline is held back and may hold an undelivered finding) that can vouch for a
 /// source the baseline run did not hear from; empty (and no reads) when every
 /// source that answered now also answered in the baseline.
 fn bridging_runs(
     store: &dyn Store,
     m: &Monitor,
-    run_id: u32,
+    base_id: u32,
     prev: &OsintReport,
     cur: &OsintReport,
 ) -> Vec<OsintReport> {
@@ -1376,7 +1373,7 @@ fn bridging_runs(
     }
     let rows = store.runs(m.id, 10).unwrap_or_default();
     rows.iter()
-        .filter(|r| r.id < run_id)
+        .filter(|r| r.id < base_id)
         .filter_map(|r| store.run_report(r.id).ok().flatten())
         .collect()
 }
@@ -1549,13 +1546,13 @@ pub fn run_due_with(
             }
         };
         let pointer = format!("osint_base_{}", m.id);
-        let Some(prev) = baseline_report(store, &m, run_id) else {
+        let Some((base_id, prev)) = baseline_report(store, &m, run_id) else {
             let _ = store.kv_set(&pointer, &run_id.to_string());
             notes.push(format!("osint monitor {addr}: {summary} — baseline stored"));
             continue;
         };
         notes.push(format!("osint monitor {addr}: {summary}"));
-        let older = bridging_runs(store, &m, run_id, &prev, &report);
+        let older = bridging_runs(store, &m, base_id, &prev, &report);
         let delta = diff_reports_with(&prev, &report, &older);
         let texts = alert_texts(&host, &addr, &delta);
         // false when a needed alert was held back or failed to send: the
@@ -2790,6 +2787,35 @@ mod sched_tests {
         r.push(Ok(rpt(st(SourceState::Matched), &urls)));
         pass(&s, &r, &n);
         assert_eq!(new_item_alerts(&n), 0, "{:?}", n.sent.borrow());
+    }
+
+    #[test]
+    fn a_held_back_baseline_does_not_bridge_from_newer_runs() {
+        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+        mon(&s, "a@x.org", &["gravatar"]);
+        let (a, c) = ("https://e.org/a", "https://e.org/cc");
+        r.push(Ok(rpt(st(SourceState::Matched), &[a])));
+        pass(&s, &r, &n);
+        assert_eq!(ptr(&s, 1).as_deref(), Some("1"));
+        r.push(Ok(rpt(st(SourceState::RateLimited), &[])));
+        pass(&s, &r, &n);
+        assert_eq!(ptr(&s, 1).as_deref(), Some("2"));
+        // C appears; the send fails, so the baseline stays at run 2
+        n.fail.set(true);
+        r.push(Ok(rpt(st(SourceState::Matched), &[a, c])));
+        pass(&s, &r, &n);
+        assert_eq!(new_item_alerts(&n), 0);
+        assert_eq!(ptr(&s, 1).as_deref(), Some("2"));
+        // the retry must still announce C exactly once
+        n.fail.set(false);
+        r.push(Ok(rpt(st(SourceState::Matched), &[a, c])));
+        pass(&s, &r, &n);
+        assert_eq!(new_item_alerts(&n), 1, "{:?}", n.sent.borrow());
+        assert_eq!(ptr(&s, 1).as_deref(), Some("4"));
+        r.push(Ok(rpt(st(SourceState::Matched), &[a, c])));
+        pass(&s, &r, &n);
+        assert_eq!(new_item_alerts(&n), 1);
+        assert_eq!(ptr(&s, 1).as_deref(), Some("5"));
     }
 
     #[test]

@@ -3065,9 +3065,6 @@ fn parse_monitor_args(rest: &[String]) -> MonitorArgs {
     a
 }
 
-/// Validate `monitor add` input: the address, the source set (the configured
-/// default when none is named; `hunter` only when named) and the interval
-/// (clamped to the daily minimum). The error is a message for exit code 3.
 /// The stored form of a monitor address: the same normalisation the API
 /// applies (domain lower-cased, trailing dot stripped).
 fn monitor_address(address: &str) -> Result<String, String> {
@@ -3075,6 +3072,9 @@ fn monitor_address(address: &str) -> Result<String, String> {
     Ok(format!("{local}@{domain}"))
 }
 
+/// Validate `monitor add` input: the address, the source set (the configured
+/// default when none is named; `hunter` only when named) and the interval
+/// (clamped to the daily minimum). The error is a message for exit code 3.
 fn monitor_add_input(
     cfg: &Config,
     infos: &[msfe_core::osintproviders::Info],
