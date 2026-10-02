@@ -1,0 +1,1281 @@
+//! OSINT monitors: an address checked on a schedule with the source set
+//! approved when it was added. This is the data layer: the `Store` the
+//! scheduler and the API code against, its MySQL implementation (every
+//! statement is built by a pure function and every dynamic value goes
+//! through `db::quote` or is an integer formatted here) and an in-memory
+//! store for tests.
+
+use crate::config::Config;
+use crate::db;
+use crate::json::Json;
+use crate::osint::{OsintReport, SourceState};
+
+pub const MIN_INTERVAL_MINS: u32 = 1440;
+pub const MAX_INTERVAL_MINS: u32 = 10080;
+pub const DEFAULT_INTERVAL_MINS: u32 = 1440;
+/// Runs kept per monitor.
+pub const KEEP_RUNS: usize = 100;
+/// Monitors run per `msfe-ng monitor` pass.
+pub const MAX_PER_PASS: usize = 2;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Monitor {
+    pub id: u32,
+    pub address: String,
+    pub owner: String,
+    pub sources: Vec<String>,
+    pub interval_mins: u32,
+    pub enabled: bool,
+    pub created_at: u64,
+    pub last_run_at: u64,
+    pub last_summary: String,
+}
+
+impl Monitor {
+    pub fn due(&self, now: u64) -> bool {
+        self.enabled && now.saturating_sub(self.last_run_at) >= self.interval_mins as u64 * 60
+    }
+    pub fn to_json(&self) -> Json {
+        Json::Object(vec![
+            ("id".into(), Json::Int(self.id as i64)),
+            ("address".into(), Json::str(&self.address)),
+            ("owner".into(), Json::str(&self.owner)),
+            (
+                "sources".into(),
+                Json::Array(self.sources.iter().map(Json::str).collect()),
+            ),
+            ("interval_mins".into(), Json::Int(self.interval_mins as i64)),
+            ("enabled".into(), Json::Bool(self.enabled)),
+            ("created_at".into(), Json::Int(self.created_at as i64)),
+            ("last_run_at".into(), Json::Int(self.last_run_at as i64)),
+            ("last_summary".into(), Json::str(&self.last_summary)),
+            ("due".into(), Json::Bool(self.due(crate::osint::now_secs()))),
+        ])
+    }
+}
+
+/// One stored run (the report itself is fetched separately).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunRow {
+    pub id: u32,
+    pub monitor_id: u32,
+    pub started_at: u64,
+    pub duration_ms: u32,
+    pub state: String,
+    pub n_findings: u32,
+    pub n_sources_ok: u32,
+    pub n_sources_bad: u32,
+}
+
+impl RunRow {
+    pub fn to_json(&self) -> Json {
+        Json::Object(vec![
+            ("id".into(), Json::Int(self.id as i64)),
+            ("monitor_id".into(), Json::Int(self.monitor_id as i64)),
+            ("started_at".into(), Json::Int(self.started_at as i64)),
+            ("duration_ms".into(), Json::Int(self.duration_ms as i64)),
+            ("state".into(), Json::str(&self.state)),
+            ("findings".into(), Json::Int(self.n_findings as i64)),
+            ("sources_ok".into(), Json::Int(self.n_sources_ok as i64)),
+            ("sources_bad".into(), Json::Int(self.n_sources_bad as i64)),
+        ])
+    }
+}
+
+// ---- pure helpers -----------------------------------------------------------
+
+pub fn clamp_interval(mins: u32) -> u32 {
+    if mins < MIN_INTERVAL_MINS {
+        MIN_INTERVAL_MINS
+    } else {
+        mins.min(MAX_INTERVAL_MINS)
+    }
+}
+
+/// The approved source set of a new monitor: known ids only, never
+/// `delivery`, de-duplicated in input order, at least one. `hunter` is kept
+/// only because the caller named it (nothing is added here).
+pub fn validate_sources(input: &[String], _cfg: &Config) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    for s in input {
+        let id = s.trim();
+        if id == crate::osintproviders::DELIVERY_ID {
+            return Err("the delivery test cannot be monitored here".into());
+        }
+        if !valid_id(id) || !crate::osintproviders::is_known(id) {
+            return Err(format!(
+                "unknown source \"{}\"",
+                id.chars().take(40).collect::<String>()
+            ));
+        }
+        if !out.iter().any(|o| o == id) {
+            out.push(id.to_string());
+        }
+    }
+    if out.is_empty() {
+        return Err("choose at least one source".into());
+    }
+    Ok(out)
+}
+
+fn valid_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 32
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// The sources column, read defensively: only well-formed ids survive.
+pub fn parse_sources(col: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for p in col.split(',') {
+        let p = p.trim();
+        if valid_id(p) && !out.iter().any(|o| o == p) {
+            out.push(p.to_string());
+        }
+    }
+    out
+}
+
+/// `YYYYMM` of a Unix timestamp (UTC): the metering period.
+pub fn period_for(unix_secs: u64) -> String {
+    let d = crate::civil::Date::from_unix(unix_secs);
+    format!("{:04}{:02}", d.y, d.m)
+}
+
+/// Stored reports carry no avatar references (the assets expire).
+pub fn strip_assets(r: &mut OsintReport) {
+    for f in &mut r.findings {
+        f.asset_id = None;
+        f.asset_mime = None;
+    }
+}
+
+/// The `mysql` client connects with a 3-byte UTF-8 charset, which rejects
+/// characters beyond the BMP (emoji in a profile name, say). In JSON text
+/// they are written as `\\uD83D\\uDE00` escapes instead, which parse back
+/// to the same character.
+pub fn bmp_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if (c as u32) > 0xFFFF {
+            let mut b = [0u16; 2];
+            for u in c.encode_utf16(&mut b) {
+                out.push_str(&format!("\\u{u:04x}"));
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Plain text for a column: characters beyond the BMP become U+FFFD.
+pub fn bmp_only(s: &str) -> String {
+    s.chars()
+        .map(|c| if (c as u32) > 0xFFFF { '\u{fffd}' } else { c })
+        .collect()
+}
+
+fn valid_period(p: &str) -> bool {
+    p.len() == 6 && p.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn valid_run_key(r: &str) -> bool {
+    !r.is_empty()
+        && r.len() <= 32
+        && r.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+fn source_counts(r: &OsintReport) -> (u32, u32) {
+    let mut ok = 0;
+    let mut bad = 0;
+    for s in &r.sources {
+        match s.state {
+            SourceState::Matched | SourceState::NoMatch | SourceState::Inconclusive => ok += 1,
+            SourceState::Failed | SourceState::Restricted | SourceState::RateLimited => bad += 1,
+            _ => {}
+        }
+    }
+    (ok, bad)
+}
+
+// ---- SQL builders -------------------------------------------------------------
+
+const COLS: &str =
+    "id, address, owner, sources, interval_mins, enabled, created_at, last_run_at, last_summary";
+
+pub fn sql_select_monitors(owner: Option<&str>) -> String {
+    let filter = owner
+        .map(|o| format!(" WHERE owner = {}", db::quote(o)))
+        .unwrap_or_default();
+    format!("SELECT {COLS} FROM osint_monitors{filter} ORDER BY address, owner")
+}
+
+pub fn sql_select_monitor(id: u32) -> String {
+    format!("SELECT {COLS} FROM osint_monitors WHERE id = {id}")
+}
+
+pub fn sql_insert_monitor(
+    address: &str,
+    owner: &str,
+    sources: &[String],
+    interval_mins: u32,
+    now: u64,
+) -> String {
+    format!(
+        "INSERT INTO osint_monitors (address, owner, sources, interval_mins, enabled, created_at) VALUES ({}, {}, {}, {interval_mins}, 1, {now}) \
+         ON DUPLICATE KEY UPDATE sources = VALUES(sources), interval_mins = VALUES(interval_mins), enabled = 1;\n",
+        db::quote(address),
+        db::quote(owner),
+        db::quote(&sources.join(","))
+    )
+}
+
+pub fn sql_set_enabled(id: u32, enabled: bool) -> String {
+    format!(
+        "UPDATE osint_monitors SET enabled = {} WHERE id = {id};\n",
+        enabled as u8
+    )
+}
+
+pub fn sql_touch_last_run(id: u32, when: u64) -> String {
+    format!("UPDATE osint_monitors SET last_run_at = {when} WHERE id = {id};\n")
+}
+
+/// Removing a monitor removes its runs, its usage rows and its kv keys
+/// (`osint_base_<id>`, `alert_osint_<id>_*`; the `_` are escaped for LIKE).
+pub fn sql_remove(id: u32) -> String {
+    format!(
+        "DELETE FROM osint_runs WHERE monitor_id = {id};\n\
+         DELETE FROM osint_usage WHERE monitor_id = {id};\n\
+         DELETE FROM msfe_config WHERE scope = 'global' AND scope_id = '' AND (ckey = 'osint_base_{id}' OR ckey LIKE 'alert\\\\_osint\\\\_{id}\\\\_%');\n\
+         DELETE FROM osint_monitors WHERE id = {id};\n"
+    )
+}
+
+pub fn sql_trim_runs(monitor_id: u32) -> String {
+    format!(
+        "DELETE FROM osint_runs WHERE monitor_id = {monitor_id} AND id NOT IN (SELECT id FROM (SELECT id FROM osint_runs WHERE monitor_id = {monitor_id} ORDER BY id DESC LIMIT {KEEP_RUNS}) AS keep);\n"
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn sql_store_run(
+    monitor_id: u32,
+    report_json: &str,
+    started_at: u64,
+    duration_ms: u32,
+    state: &str,
+    n_findings: u32,
+    n_ok: u32,
+    n_bad: u32,
+    last_run_at: u64,
+    summary: &str,
+) -> String {
+    format!(
+        "INSERT INTO osint_runs (monitor_id, started_at, duration_ms, state, n_findings, n_sources_ok, n_sources_bad, report) VALUES ({monitor_id}, {started_at}, {duration_ms}, {}, {n_findings}, {n_ok}, {n_bad}, {});\n\
+         UPDATE osint_monitors SET last_run_at = {last_run_at}, last_summary = {} WHERE id = {monitor_id};\n{}",
+        db::quote(state),
+        db::quote(report_json),
+        db::quote(summary),
+        sql_trim_runs(monitor_id)
+    )
+}
+
+pub fn sql_runs(monitor_id: u32, limit: usize) -> String {
+    format!(
+        "SELECT id, monitor_id, started_at, duration_ms, state, n_findings, n_sources_ok, n_sources_bad FROM osint_runs WHERE monitor_id = {monitor_id} ORDER BY id DESC LIMIT {}",
+        limit.clamp(1, 1000)
+    )
+}
+
+pub fn sql_latest_run_id(monitor_id: u32) -> String {
+    format!("SELECT id FROM osint_runs WHERE monitor_id = {monitor_id} ORDER BY id DESC LIMIT 1")
+}
+
+pub fn sql_run_report(run_id: u32) -> String {
+    format!("SELECT report FROM osint_runs WHERE id = {run_id}")
+}
+
+pub fn sql_run_by_id(run_id: u32) -> String {
+    format!("SELECT monitor_id, report FROM osint_runs WHERE id = {run_id}")
+}
+
+pub fn sql_previous_run(monitor_id: u32, before_run_id: u32) -> String {
+    format!("SELECT id, report FROM osint_runs WHERE monitor_id = {monitor_id} AND id < {before_run_id} ORDER BY id DESC LIMIT 1")
+}
+
+pub fn sql_usage_month(period: &str) -> String {
+    format!(
+        "SELECT COALESCE(SUM(COALESCE(final_units, reserved)), 0) FROM osint_usage WHERE period = {}",
+        db::quote(period)
+    )
+}
+
+pub fn sql_usage_reserve(
+    monitor_id: u32,
+    period: &str,
+    units: u32,
+    run_id: &str,
+    now: u64,
+) -> String {
+    format!(
+        "INSERT INTO osint_usage (monitor_id, period, reserved, run_id, created_at) VALUES ({monitor_id}, {}, {units}, {}, {now});\n",
+        db::quote(period),
+        db::quote(run_id)
+    )
+}
+
+pub fn sql_usage_settle(run_id: &str, final_units: u32) -> String {
+    format!(
+        "UPDATE osint_usage SET final_units = {final_units} WHERE run_id = {};\n",
+        db::quote(run_id)
+    )
+}
+
+pub fn sql_usage_release(run_id: &str) -> String {
+    format!(
+        "DELETE FROM osint_usage WHERE run_id = {};\n",
+        db::quote(run_id)
+    )
+}
+
+/// Retention: runs older than `days` go, except each monitor's latest run
+/// (the comparison baseline); usage rows are kept for 400 days.
+pub fn sql_prune(now: u64, days: u32) -> String {
+    let cutoff = now.saturating_sub(days as u64 * 86_400);
+    let usage_cutoff = now.saturating_sub(400 * 86_400);
+    format!(
+        "DELETE FROM osint_runs WHERE started_at < {cutoff} AND id NOT IN (SELECT mx FROM (SELECT MAX(id) AS mx FROM osint_runs GROUP BY monitor_id) AS latest);\n\
+         DELETE FROM osint_usage WHERE created_at < {usage_cutoff};\n"
+    )
+}
+
+// ---- the store ---------------------------------------------------------------------
+
+pub trait Store {
+    fn list(&self, owner: Option<&str>) -> Result<Vec<Monitor>, String>;
+    fn get(&self, id: u32) -> Result<Option<Monitor>, String>;
+    /// Add a monitor; an existing one for the same address (case-sensitive)
+    /// and owner is updated (sources, interval, enabled) instead. The cap
+    /// `max` applies to new monitors only.
+    fn add(
+        &self,
+        address: &str,
+        owner: &str,
+        sources: &[String],
+        interval_mins: u32,
+        max: u32,
+    ) -> Result<Monitor, String>;
+    fn remove(&self, id: u32) -> Result<bool, String>;
+    fn set_enabled(&self, id: u32, enabled: bool) -> Result<(), String>;
+    fn store_run(
+        &self,
+        monitor_id: u32,
+        report: &OsintReport,
+        duration_ms: u32,
+        summary: &str,
+    ) -> Result<u32, String>;
+    fn runs(&self, monitor_id: u32, limit: usize) -> Result<Vec<RunRow>, String>;
+    fn run_report(&self, run_id: u32) -> Result<Option<OsintReport>, String>;
+    /// The run with the next-lower id of the same monitor: `(run id, report)`.
+    fn previous_run(
+        &self,
+        monitor_id: u32,
+        before_run_id: u32,
+    ) -> Result<Option<(u32, OsintReport)>, String>;
+    /// A run by id: `(monitor id, report)`.
+    fn run_by_id(&self, id: u32) -> Result<Option<(u32, OsintReport)>, String>;
+    fn usage_month(&self, period: &str) -> Result<u32, String>;
+    /// Reserve units for a run; a second reservation for the same `run_id` is an error.
+    fn usage_reserve(
+        &self,
+        monitor_id: u32,
+        period: &str,
+        units: u32,
+        run_id: &str,
+    ) -> Result<(), String>;
+    fn usage_settle(&self, run_id: &str, final_units: u32) -> Result<(), String>;
+    fn usage_release(&self, run_id: &str) -> Result<(), String>;
+    fn kv_get(&self, key: &str) -> Option<String>;
+    fn kv_set(&self, key: &str, value: &str) -> Result<(), String>;
+    fn touch_last_run(&self, id: u32, when: u64) -> Result<(), String>;
+    fn prune(&self, days: u32) -> Result<(), String>;
+}
+
+fn parse_report(text: &str) -> Option<OsintReport> {
+    Json::parse(text)
+        .ok()
+        .and_then(|j| OsintReport::from_json(&j).ok())
+}
+
+fn io(e: std::io::Error) -> String {
+    e.to_string()
+}
+
+fn row_to_monitor(r: &[String]) -> Option<Monitor> {
+    Some(Monitor {
+        id: r.first()?.parse().ok()?,
+        address: r.get(1)?.clone(),
+        owner: r.get(2)?.clone(),
+        sources: parse_sources(r.get(3)?),
+        interval_mins: r
+            .get(4)?
+            .parse()
+            .map(clamp_interval)
+            .unwrap_or(DEFAULT_INTERVAL_MINS),
+        enabled: r.get(5).map(|v| v == "1").unwrap_or(true),
+        created_at: r.get(6)?.parse().unwrap_or(0),
+        last_run_at: r.get(7)?.parse().unwrap_or(0),
+        last_summary: r.get(8).cloned().unwrap_or_default(),
+    })
+}
+
+fn limit_error(max: u32) -> String {
+    format!("the limit of {max} monitors is reached (osint_max_monitors)")
+}
+
+pub struct MysqlStore<'a> {
+    pub cfg: &'a Config,
+}
+
+impl<'a> MysqlStore<'a> {
+    pub fn new(cfg: &'a Config) -> Self {
+        MysqlStore { cfg }
+    }
+}
+
+impl Store for MysqlStore<'_> {
+    fn list(&self, owner: Option<&str>) -> Result<Vec<Monitor>, String> {
+        let rows = db::query(self.cfg, &sql_select_monitors(owner)).map_err(io)?;
+        Ok(rows.iter().filter_map(|r| row_to_monitor(r)).collect())
+    }
+
+    fn get(&self, id: u32) -> Result<Option<Monitor>, String> {
+        let rows = db::query(self.cfg, &sql_select_monitor(id)).map_err(io)?;
+        Ok(rows.first().and_then(|r| row_to_monitor(r)))
+    }
+
+    fn add(
+        &self,
+        address: &str,
+        owner: &str,
+        sources: &[String],
+        interval_mins: u32,
+        max: u32,
+    ) -> Result<Monitor, String> {
+        let interval = clamp_interval(interval_mins);
+        let existing = self.list(None)?;
+        let found = |m: &&Monitor| m.address == address && m.owner == owner;
+        if existing.iter().find(found).is_none() && existing.len() >= max as usize {
+            return Err(limit_error(max));
+        }
+        let sql = sql_insert_monitor(address, owner, sources, interval, crate::osint::now_secs());
+        db::exec_stdin(self.cfg, &sql).map_err(io)?;
+        self.list(None)?
+            .into_iter()
+            .find(|m| m.address == address && m.owner == owner)
+            .ok_or_else(|| "the monitor was not stored".to_string())
+    }
+
+    fn remove(&self, id: u32) -> Result<bool, String> {
+        let before = self.get(id)?;
+        db::exec_stdin(self.cfg, &sql_remove(id)).map_err(io)?;
+        Ok(before.is_some())
+    }
+
+    fn set_enabled(&self, id: u32, enabled: bool) -> Result<(), String> {
+        db::exec_stdin(self.cfg, &sql_set_enabled(id, enabled)).map_err(io)
+    }
+
+    fn store_run(
+        &self,
+        monitor_id: u32,
+        report: &OsintReport,
+        duration_ms: u32,
+        summary: &str,
+    ) -> Result<u32, String> {
+        let mut r = report.clone();
+        strip_assets(&mut r);
+        let (ok, bad) = source_counts(&r);
+        let sql = sql_store_run(
+            monitor_id,
+            &bmp_escape(&r.to_json().to_string()),
+            r.started,
+            duration_ms,
+            r.state.as_str(),
+            r.findings.len() as u32,
+            ok,
+            bad,
+            r.finished.unwrap_or(r.started),
+            &bmp_only(summary),
+        );
+        db::exec_stdin(self.cfg, &sql).map_err(io)?;
+        let rows = db::query(self.cfg, &sql_latest_run_id(monitor_id)).map_err(io)?;
+        rows.first()
+            .and_then(|r| r.first())
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| "the run was not stored".to_string())
+    }
+
+    fn runs(&self, monitor_id: u32, limit: usize) -> Result<Vec<RunRow>, String> {
+        let rows = db::query(self.cfg, &sql_runs(monitor_id, limit)).map_err(io)?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                Some(RunRow {
+                    id: r.first()?.parse().ok()?,
+                    monitor_id: r.get(1)?.parse().ok()?,
+                    started_at: r.get(2)?.parse().ok()?,
+                    duration_ms: r.get(3)?.parse().unwrap_or(0),
+                    state: r.get(4)?.clone(),
+                    n_findings: r.get(5)?.parse().unwrap_or(0),
+                    n_sources_ok: r.get(6)?.parse().unwrap_or(0),
+                    n_sources_bad: r.get(7)?.parse().unwrap_or(0),
+                })
+            })
+            .collect())
+    }
+
+    fn run_report(&self, run_id: u32) -> Result<Option<OsintReport>, String> {
+        let rows = db::query(self.cfg, &sql_run_report(run_id)).map_err(io)?;
+        Ok(rows
+            .first()
+            .and_then(|r| r.first())
+            .and_then(|t| parse_report(t)))
+    }
+
+    fn previous_run(
+        &self,
+        monitor_id: u32,
+        before_run_id: u32,
+    ) -> Result<Option<(u32, OsintReport)>, String> {
+        let rows = db::query(self.cfg, &sql_previous_run(monitor_id, before_run_id)).map_err(io)?;
+        Ok(rows
+            .first()
+            .and_then(|r| Some((r.first()?.parse().ok()?, parse_report(r.get(1)?)?))))
+    }
+
+    fn run_by_id(&self, id: u32) -> Result<Option<(u32, OsintReport)>, String> {
+        let rows = db::query(self.cfg, &sql_run_by_id(id)).map_err(io)?;
+        Ok(rows
+            .first()
+            .and_then(|r| Some((r.first()?.parse().ok()?, parse_report(r.get(1)?)?))))
+    }
+
+    fn usage_month(&self, period: &str) -> Result<u32, String> {
+        if !valid_period(period) {
+            return Err("invalid period".into());
+        }
+        let rows = db::query(self.cfg, &sql_usage_month(period)).map_err(io)?;
+        Ok(rows
+            .first()
+            .and_then(|r| r.first())
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(|n| n.min(u32::MAX as u64) as u32)
+            .unwrap_or(0))
+    }
+
+    fn usage_reserve(
+        &self,
+        monitor_id: u32,
+        period: &str,
+        units: u32,
+        run_id: &str,
+    ) -> Result<(), String> {
+        if !valid_period(period) || !valid_run_key(run_id) {
+            return Err("invalid usage key".into());
+        }
+        let sql = sql_usage_reserve(monitor_id, period, units, run_id, crate::osint::now_secs());
+        db::exec_stdin(self.cfg, &sql).map_err(io)
+    }
+
+    fn usage_settle(&self, run_id: &str, final_units: u32) -> Result<(), String> {
+        db::exec_stdin(self.cfg, &sql_usage_settle(run_id, final_units)).map_err(io)
+    }
+
+    fn usage_release(&self, run_id: &str) -> Result<(), String> {
+        db::exec_stdin(self.cfg, &sql_usage_release(run_id)).map_err(io)
+    }
+
+    fn kv_get(&self, key: &str) -> Option<String> {
+        db::kv_get(self.cfg, key)
+    }
+
+    fn kv_set(&self, key: &str, value: &str) -> Result<(), String> {
+        db::kv_set(self.cfg, key, value).map_err(io)
+    }
+
+    fn touch_last_run(&self, id: u32, when: u64) -> Result<(), String> {
+        db::exec_stdin(self.cfg, &sql_touch_last_run(id, when)).map_err(io)
+    }
+
+    fn prune(&self, days: u32) -> Result<(), String> {
+        db::exec_stdin(self.cfg, &sql_prune(crate::osint::now_secs(), days)).map_err(io)
+    }
+}
+
+// ---- in-memory store for tests -----------------------------------------------------------
+
+#[cfg(test)]
+#[derive(Default)]
+pub struct FakeState {
+    pub monitors: Vec<Monitor>,
+    /// (run id, monitor id, row, report json)
+    pub runs: Vec<(RunRow, String)>,
+    /// (monitor id, period, reserved, final, run key)
+    pub usage: Vec<(u32, String, u32, Option<u32>, String)>,
+    pub kv: std::collections::BTreeMap<String, String>,
+    next_monitor: u32,
+    next_run: u32,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub struct FakeStore {
+    pub st: std::cell::RefCell<FakeState>,
+}
+
+#[cfg(test)]
+impl FakeStore {
+    /// The kv keys that belong to monitor `id` (exact: id 5 is not 55).
+    pub fn remove_keys(&self, id: u32) {
+        let base = format!("osint_base_{id}");
+        let alert = format!("alert_osint_{id}_");
+        self.st
+            .borrow_mut()
+            .kv
+            .retain(|k, _| *k != base && !k.starts_with(&alert));
+    }
+}
+
+#[cfg(test)]
+impl Store for FakeStore {
+    fn list(&self, owner: Option<&str>) -> Result<Vec<Monitor>, String> {
+        let mut v: Vec<Monitor> = self
+            .st
+            .borrow()
+            .monitors
+            .iter()
+            .filter(|m| owner.map(|o| m.owner == o).unwrap_or(true))
+            .cloned()
+            .collect();
+        v.sort_by(|a, b| (&a.address, &a.owner).cmp(&(&b.address, &b.owner)));
+        Ok(v)
+    }
+    fn get(&self, id: u32) -> Result<Option<Monitor>, String> {
+        Ok(self
+            .st
+            .borrow()
+            .monitors
+            .iter()
+            .find(|m| m.id == id)
+            .cloned())
+    }
+    fn add(
+        &self,
+        address: &str,
+        owner: &str,
+        sources: &[String],
+        interval_mins: u32,
+        max: u32,
+    ) -> Result<Monitor, String> {
+        let mut s = self.st.borrow_mut();
+        let interval = clamp_interval(interval_mins);
+        if let Some(m) = s
+            .monitors
+            .iter_mut()
+            .find(|m| m.address == address && m.owner == owner)
+        {
+            m.sources = sources.to_vec();
+            m.interval_mins = interval;
+            m.enabled = true;
+            return Ok(m.clone());
+        }
+        if s.monitors.len() >= max as usize {
+            return Err(limit_error(max));
+        }
+        s.next_monitor += 1;
+        let m = Monitor {
+            id: s.next_monitor,
+            address: address.into(),
+            owner: owner.into(),
+            sources: sources.to_vec(),
+            interval_mins: interval,
+            enabled: true,
+            created_at: crate::osint::now_secs(),
+            last_run_at: 0,
+            last_summary: String::new(),
+        };
+        s.monitors.push(m.clone());
+        Ok(m)
+    }
+    fn remove(&self, id: u32) -> Result<bool, String> {
+        let existed = self.get(id)?.is_some();
+        {
+            let mut s = self.st.borrow_mut();
+            s.runs.retain(|(r, _)| r.monitor_id != id);
+            s.usage.retain(|u| u.0 != id);
+            s.monitors.retain(|m| m.id != id);
+        }
+        self.remove_keys(id);
+        Ok(existed)
+    }
+    fn set_enabled(&self, id: u32, enabled: bool) -> Result<(), String> {
+        if let Some(m) = self
+            .st
+            .borrow_mut()
+            .monitors
+            .iter_mut()
+            .find(|m| m.id == id)
+        {
+            m.enabled = enabled;
+        }
+        Ok(())
+    }
+    fn store_run(
+        &self,
+        monitor_id: u32,
+        report: &OsintReport,
+        duration_ms: u32,
+        summary: &str,
+    ) -> Result<u32, String> {
+        let mut r = report.clone();
+        strip_assets(&mut r);
+        let (ok, bad) = source_counts(&r);
+        let mut s = self.st.borrow_mut();
+        s.next_run += 1;
+        let id = s.next_run;
+        s.runs.push((
+            RunRow {
+                id,
+                monitor_id,
+                started_at: r.started,
+                duration_ms,
+                state: r.state.as_str().to_string(),
+                n_findings: r.findings.len() as u32,
+                n_sources_ok: ok,
+                n_sources_bad: bad,
+            },
+            r.to_json().to_string(),
+        ));
+        if let Some(m) = s.monitors.iter_mut().find(|m| m.id == monitor_id) {
+            m.last_run_at = r.finished.unwrap_or(r.started);
+            m.last_summary = summary.to_string();
+        }
+        let mine: Vec<u32> = s
+            .runs
+            .iter()
+            .filter(|(r, _)| r.monitor_id == monitor_id)
+            .map(|(r, _)| r.id)
+            .collect();
+        if mine.len() > KEEP_RUNS {
+            let cut = mine[mine.len() - KEEP_RUNS];
+            s.runs
+                .retain(|(r, _)| r.monitor_id != monitor_id || r.id >= cut);
+        }
+        Ok(id)
+    }
+    fn runs(&self, monitor_id: u32, limit: usize) -> Result<Vec<RunRow>, String> {
+        let mut v: Vec<RunRow> = self
+            .st
+            .borrow()
+            .runs
+            .iter()
+            .filter(|(r, _)| r.monitor_id == monitor_id)
+            .map(|(r, _)| r.clone())
+            .collect();
+        v.sort_by_key(|b| std::cmp::Reverse(b.id));
+        v.truncate(limit.clamp(1, 1000));
+        Ok(v)
+    }
+    fn run_report(&self, run_id: u32) -> Result<Option<OsintReport>, String> {
+        Ok(self
+            .st
+            .borrow()
+            .runs
+            .iter()
+            .find(|(r, _)| r.id == run_id)
+            .and_then(|(_, j)| parse_report(j)))
+    }
+    fn previous_run(
+        &self,
+        monitor_id: u32,
+        before_run_id: u32,
+    ) -> Result<Option<(u32, OsintReport)>, String> {
+        let s = self.st.borrow();
+        Ok(s.runs
+            .iter()
+            .filter(|(r, _)| r.monitor_id == monitor_id && r.id < before_run_id)
+            .max_by_key(|(r, _)| r.id)
+            .and_then(|(r, j)| Some((r.id, parse_report(j)?))))
+    }
+    fn run_by_id(&self, id: u32) -> Result<Option<(u32, OsintReport)>, String> {
+        let s = self.st.borrow();
+        Ok(s.runs
+            .iter()
+            .find(|(r, _)| r.id == id)
+            .and_then(|(r, j)| Some((r.monitor_id, parse_report(j)?))))
+    }
+    fn usage_month(&self, period: &str) -> Result<u32, String> {
+        if !valid_period(period) {
+            return Err("invalid period".into());
+        }
+        Ok(self
+            .st
+            .borrow()
+            .usage
+            .iter()
+            .filter(|u| u.1 == period)
+            .map(|u| u.3.unwrap_or(u.2))
+            .sum())
+    }
+    fn usage_reserve(
+        &self,
+        monitor_id: u32,
+        period: &str,
+        units: u32,
+        run_id: &str,
+    ) -> Result<(), String> {
+        if !valid_period(period) || !valid_run_key(run_id) {
+            return Err("invalid usage key".into());
+        }
+        let mut s = self.st.borrow_mut();
+        if s.usage.iter().any(|u| u.4 == run_id) {
+            return Err("duplicate run id".into());
+        }
+        s.usage
+            .push((monitor_id, period.into(), units, None, run_id.into()));
+        Ok(())
+    }
+    fn usage_settle(&self, run_id: &str, final_units: u32) -> Result<(), String> {
+        for u in self.st.borrow_mut().usage.iter_mut() {
+            if u.4 == run_id {
+                u.3 = Some(final_units);
+            }
+        }
+        Ok(())
+    }
+    fn usage_release(&self, run_id: &str) -> Result<(), String> {
+        self.st.borrow_mut().usage.retain(|u| u.4 != run_id);
+        Ok(())
+    }
+    fn kv_get(&self, key: &str) -> Option<String> {
+        self.st.borrow().kv.get(key).cloned()
+    }
+    fn kv_set(&self, key: &str, value: &str) -> Result<(), String> {
+        self.st.borrow_mut().kv.insert(key.into(), value.into());
+        Ok(())
+    }
+    fn touch_last_run(&self, id: u32, when: u64) -> Result<(), String> {
+        if let Some(m) = self
+            .st
+            .borrow_mut()
+            .monitors
+            .iter_mut()
+            .find(|m| m.id == id)
+        {
+            m.last_run_at = when;
+        }
+        Ok(())
+    }
+    fn prune(&self, days: u32) -> Result<(), String> {
+        let cutoff = crate::osint::now_secs().saturating_sub(days as u64 * 86_400);
+        let mut s = self.st.borrow_mut();
+        let latest: Vec<u32> = s
+            .monitors
+            .iter()
+            .filter_map(|m| {
+                s.runs
+                    .iter()
+                    .filter(|(r, _)| r.monitor_id == m.id)
+                    .map(|(r, _)| r.id)
+                    .max()
+            })
+            .collect();
+        s.runs
+            .retain(|(r, _)| r.started_at >= cutoff || latest.contains(&r.id));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::osint::{
+        Confidence, Finding, Group, OsintReport, RunState, Severity, SourceState, SourceStatus,
+    };
+
+    fn finding(url: &str) -> Finding {
+        Finding {
+            group: Group::Exposure,
+            confidence: Confidence::Medium,
+            confidence_reason: "r".into(),
+            severity: Severity::Info,
+            observed_at: 105,
+            event_at: None,
+            source_id: "fixture".into(),
+            source_url: Some(url.into()),
+            title: "t \"q\" 'x' \\ \n é".into(),
+            evidence: "e".into(),
+            limitations: vec![],
+            asset_id: Some("0123456789abcdef".into()),
+            asset_mime: Some("image/png".into()),
+        }
+    }
+
+    fn report(started: u64) -> OsintReport {
+        OsintReport {
+            run_id: "0123456789abcdef".into(),
+            address: "user@example.org".into(),
+            started,
+            finished: Some(started + 3),
+            state: RunState::Partial,
+            cached: false,
+            planned: vec!["fixture".into()],
+            sources: vec![
+                SourceStatus {
+                    id: "a".into(),
+                    state: SourceState::Matched,
+                    retry_after: None,
+                    detail: String::new(),
+                },
+                SourceStatus {
+                    id: "b".into(),
+                    state: SourceState::Failed,
+                    retry_after: None,
+                    detail: String::new(),
+                },
+                SourceStatus {
+                    id: "c".into(),
+                    state: SourceState::NotConfigured,
+                    retry_after: None,
+                    detail: String::new(),
+                },
+            ],
+            findings: vec![finding("https://example.org/x")],
+            delivery_run_id: None,
+            limitations: vec![],
+        }
+    }
+
+    fn srcs(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn interval_clamps() {
+        assert_eq!(clamp_interval(0), 1440);
+        assert_eq!(clamp_interval(100), 1440);
+        assert_eq!(clamp_interval(2880), 2880);
+        assert_eq!(clamp_interval(20000), 10080);
+    }
+
+    #[test]
+    fn due_needs_enabled_and_the_interval() {
+        let mut m = Monitor {
+            id: 1,
+            address: "a@x.org".into(),
+            owner: String::new(),
+            sources: srcs(&["rdap"]),
+            interval_mins: 1440,
+            enabled: true,
+            created_at: 0,
+            last_run_at: 1000,
+            last_summary: String::new(),
+        };
+        assert!(!m.due(1000 + 86_400 - 1));
+        assert!(m.due(1000 + 86_400));
+        assert!(!m.due(0)); // a clock before the last run never underflows
+        m.enabled = false;
+        assert!(!m.due(1_000_000));
+        assert!(m.to_json().to_string().contains("\"due\":false"));
+    }
+
+    #[test]
+    fn sources_are_validated() {
+        let cfg = Config::default();
+        assert_eq!(
+            validate_sources(&srcs(&["rdap", "gravatar", "rdap"]), &cfg).unwrap(),
+            srcs(&["rdap", "gravatar"])
+        );
+        assert!(validate_sources(&[], &cfg).is_err());
+        assert!(validate_sources(&srcs(&["rdap", "nope"]), &cfg).is_err());
+        assert!(validate_sources(&srcs(&["rdap", "delivery"]), &cfg).is_err());
+        assert!(validate_sources(&srcs(&["rdap,x"]), &cfg).is_err());
+        let with = validate_sources(&srcs(&["rdap", "hunter"]), &cfg).unwrap();
+        assert!(with.contains(&"hunter".to_string()));
+        let without = validate_sources(&srcs(&["rdap"]), &cfg).unwrap();
+        assert!(!without.contains(&"hunter".to_string()));
+    }
+
+    #[test]
+    fn sources_column_is_parsed_defensively() {
+        assert_eq!(parse_sources("rdap,gravatar"), srcs(&["rdap", "gravatar"]));
+        assert_eq!(
+            parse_sources(" rdap,,Bad Id,gravatar;x,pgp_1 "),
+            srcs(&["rdap", "pgp_1"])
+        );
+        assert!(parse_sources("").is_empty());
+    }
+
+    #[test]
+    fn period_is_year_and_month() {
+        assert_eq!(period_for(0), "197001");
+        assert_eq!(period_for(1_798_761_600 - 1), "202612"); // 2026-12-31 23:59:59
+        assert_eq!(period_for(1_798_761_600), "202701"); // 2027-01-01
+    }
+
+    #[test]
+    fn astral_characters_are_escaped_for_a_utf8mb3_connection() {
+        assert_eq!(
+            bmp_escape("a\u{e9}\u{65e5}\u{1F600}"),
+            "a\u{e9}\u{65e5}\\ud83d\\ude00"
+        );
+        assert_eq!(bmp_only("a\u{1F600}b"), "a\u{fffd}b");
+        // an escaped report parses back to the same text
+        let mut r = report(1);
+        r.findings[0].title = "x \u{1F600} y".into();
+        let esc = bmp_escape(&r.to_json().to_string());
+        assert!(esc.is_ascii() || !esc.chars().any(|c| c as u32 > 0xFFFF));
+        let back = parse_report(&esc).unwrap();
+        assert_eq!(back.findings[0].title, "x \u{1F600} y");
+    }
+
+    #[test]
+    fn strip_assets_clears_both_fields() {
+        let mut r = report(1);
+        strip_assets(&mut r);
+        assert!(r.findings[0].asset_id.is_none() && r.findings[0].asset_mime.is_none());
+    }
+
+    #[test]
+    fn sql_insert_is_exact_and_escapes() {
+        assert_eq!(
+            sql_insert_monitor("a@x.org", "", &srcs(&["rdap", "gravatar"]), 1440, 1000),
+            "INSERT INTO osint_monitors (address, owner, sources, interval_mins, enabled, created_at) VALUES ('a@x.org', '', 'rdap,gravatar', 1440, 1, 1000) \
+             ON DUPLICATE KEY UPDATE sources = VALUES(sources), interval_mins = VALUES(interval_mins), enabled = 1;\n"
+        );
+        let s = sql_insert_monitor("o'b\\c\nd@x.org", "ow'n", &srcs(&["rdap"]), 1440, 1);
+        assert!(s.contains("VALUES ('o''b\\\\c\nd@x.org', 'ow''n', 'rdap'"));
+        assert!(!s.contains("o'b"));
+    }
+
+    #[test]
+    fn sql_select_filters_by_owner() {
+        let all = sql_select_monitors(None);
+        assert!(all.starts_with("SELECT id, address, owner, sources,"));
+        assert!(all.ends_with("FROM osint_monitors ORDER BY address, owner"));
+        assert!(sql_select_monitors(Some("o'x")).contains("WHERE owner = 'o''x'"));
+    }
+
+    #[test]
+    fn sql_trim_keeps_the_newest_hundred() {
+        assert_eq!(
+            sql_trim_runs(7),
+            "DELETE FROM osint_runs WHERE monitor_id = 7 AND id NOT IN (SELECT id FROM (SELECT id FROM osint_runs WHERE monitor_id = 7 ORDER BY id DESC LIMIT 100) AS keep);\n"
+        );
+    }
+
+    #[test]
+    fn sql_remove_cascades_to_runs_usage_and_keys() {
+        assert_eq!(
+            sql_remove(7),
+            "DELETE FROM osint_runs WHERE monitor_id = 7;\n\
+             DELETE FROM osint_usage WHERE monitor_id = 7;\n\
+             DELETE FROM msfe_config WHERE scope = 'global' AND scope_id = '' AND (ckey = 'osint_base_7' OR ckey LIKE 'alert\\\\_osint\\\\_7\\\\_%');\n\
+             DELETE FROM osint_monitors WHERE id = 7;\n"
+        );
+    }
+
+    #[test]
+    fn sql_store_run_inserts_updates_and_trims() {
+        let s = sql_store_run(
+            7,
+            "{\"a\":\"it's\"}",
+            100,
+            3000,
+            "partial",
+            2,
+            1,
+            1,
+            103,
+            "2 findings 'x'",
+        );
+        assert!(s.starts_with("INSERT INTO osint_runs (monitor_id, started_at, duration_ms, state, n_findings, n_sources_ok, n_sources_bad, report) VALUES (7, 100, 3000, 'partial', 2, 1, 1, '{\"a\":\"it''s\"}');\n"));
+        assert!(s.contains("UPDATE osint_monitors SET last_run_at = 103, last_summary = '2 findings ''x''' WHERE id = 7;\n"));
+        assert!(s.ends_with(&sql_trim_runs(7)));
+    }
+
+    #[test]
+    fn sql_usage_statements() {
+        assert_eq!(
+            sql_usage_reserve(3, "202610", 8, "abc'd", 55),
+            "INSERT INTO osint_usage (monitor_id, period, reserved, run_id, created_at) VALUES (3, '202610', 8, 'abc''d', 55);\n"
+        );
+        assert_eq!(
+            sql_usage_settle("abc", 5),
+            "UPDATE osint_usage SET final_units = 5 WHERE run_id = 'abc';\n"
+        );
+        assert_eq!(
+            sql_usage_release("abc"),
+            "DELETE FROM osint_usage WHERE run_id = 'abc';\n"
+        );
+        assert_eq!(
+            sql_usage_month("202610"),
+            "SELECT COALESCE(SUM(COALESCE(final_units, reserved)), 0) FROM osint_usage WHERE period = '202610'"
+        );
+    }
+
+    #[test]
+    fn sql_prune_spares_each_monitors_latest_run() {
+        let s = sql_prune(10_000_000, 90);
+        assert!(s.contains("started_at < 2224000"));
+        assert!(s.contains("SELECT MAX(id) AS mx FROM osint_runs GROUP BY monitor_id"));
+        assert!(s.contains("DELETE FROM osint_usage WHERE created_at <"));
+    }
+
+    #[test]
+    fn usage_ids_are_validated() {
+        let st = FakeStore::default();
+        assert!(st.usage_reserve(1, "2026", 1, "r").is_err());
+        assert!(st.usage_reserve(1, "202610", 1, "").is_err());
+        assert!(st.usage_reserve(1, "202610", 1, "a'b").is_err());
+        assert!(st.usage_month("x").is_err());
+    }
+
+    fn add(st: &FakeStore, a: &str, max: u32) -> Result<Monitor, String> {
+        st.add(a, "", &srcs(&["rdap"]), 1440, max)
+    }
+
+    #[test]
+    fn fake_addresses_are_case_sensitive_and_capped() {
+        let st = FakeStore::default();
+        let a = add(&st, "A@x.org", 2).unwrap();
+        let b = add(&st, "a@x.org", 2).unwrap();
+        assert_ne!(a.id, b.id);
+        assert_eq!(st.list(None).unwrap().len(), 2);
+        let e = add(&st, "c@x.org", 2).unwrap_err();
+        assert_eq!(e, "the limit of 2 monitors is reached (osint_max_monitors)");
+        // re-adding an existing address is an update, not a new row, and is not capped
+        let again = st
+            .add("A@x.org", "", &srcs(&["gravatar"]), 2880, 2)
+            .unwrap();
+        assert_eq!(again.id, a.id);
+        assert_eq!(again.sources, srcs(&["gravatar"]));
+        assert_eq!(again.interval_mins, 2880);
+        assert_eq!(st.list(None).unwrap().len(), 2);
+        // owners are separate identities; list filters by owner
+        st.add("A@x.org", "bob", &srcs(&["rdap"]), 1440, 9).unwrap();
+        assert_eq!(st.list(Some("bob")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn fake_store_run_strips_assets_and_trims() {
+        let st = FakeStore::default();
+        let m = add(&st, "a@x.org", 5).unwrap();
+        let mut last = 0;
+        for i in 0..(KEEP_RUNS as u64 + 5) {
+            last = st
+                .store_run(m.id, &report(1000 + i), 10, &format!("s{i}"))
+                .unwrap();
+        }
+        let runs = st.runs(m.id, 1000).unwrap();
+        assert_eq!(runs.len(), KEEP_RUNS);
+        assert_eq!(runs[0].id, last); // newest first
+        assert_eq!(runs[0].n_findings, 1);
+        assert_eq!((runs[0].n_sources_ok, runs[0].n_sources_bad), (1, 1));
+        assert_eq!(runs[0].state, "partial");
+        assert_eq!(st.runs(m.id, 3).unwrap().len(), 3);
+        let r = st.run_report(last).unwrap().unwrap();
+        assert!(r.findings[0].asset_id.is_none() && r.findings[0].asset_mime.is_none());
+        assert_eq!(st.get(m.id).unwrap().unwrap().last_summary, "s104");
+        assert!(st.run_report(999_999).unwrap().is_none());
+    }
+
+    #[test]
+    fn fake_previous_run_is_the_next_lower_id_of_the_same_monitor() {
+        let st = FakeStore::default();
+        let a = add(&st, "a@x.org", 5).unwrap();
+        let b = add(&st, "b@x.org", 5).unwrap();
+        let a1 = st.store_run(a.id, &report(10), 1, "").unwrap();
+        let _b1 = st.store_run(b.id, &report(11), 1, "").unwrap();
+        let a2 = st.store_run(a.id, &report(12), 1, "").unwrap();
+        assert_eq!(st.previous_run(a.id, a2).unwrap().unwrap().0, a1);
+        assert!(st.previous_run(a.id, a1).unwrap().is_none());
+        assert!(st.previous_run(b.id, a2).unwrap().unwrap().0 != a1);
+        let (mid, rep) = st.run_by_id(a2).unwrap().unwrap();
+        assert_eq!((mid, rep.started), (a.id, 12));
+        assert!(st.run_by_id(424242).unwrap().is_none());
+    }
+
+    #[test]
+    fn fake_remove_cascades() {
+        let st = FakeStore::default();
+        let a = add(&st, "a@x.org", 5).unwrap();
+        let b = add(&st, "b@x.org", 5).unwrap();
+        st.store_run(a.id, &report(10), 1, "").unwrap();
+        st.store_run(b.id, &report(10), 1, "").unwrap();
+        st.usage_reserve(a.id, "202610", 8, "ra").unwrap();
+        st.usage_reserve(b.id, "202610", 4, "rb").unwrap();
+        st.kv_set(&format!("osint_base_{}", a.id), "1").unwrap();
+        st.kv_set(&format!("alert_osint_{}_new", a.id), "1")
+            .unwrap();
+        st.kv_set(&format!("osint_base_{}", b.id), "1").unwrap();
+        st.kv_set("other", "1").unwrap();
+        assert!(st.remove(a.id).unwrap());
+        assert!(!st.remove(a.id).unwrap());
+        assert!(st.get(a.id).unwrap().is_none());
+        assert!(st.runs(a.id, 10).unwrap().is_empty());
+        assert_eq!(st.usage_month("202610").unwrap(), 4);
+        assert!(st.kv_get(&format!("osint_base_{}", a.id)).is_none());
+        assert!(st.kv_get(&format!("alert_osint_{}_new", a.id)).is_none());
+        assert!(st.kv_get(&format!("osint_base_{}", b.id)).is_some());
+        assert!(st.kv_get("other").is_some());
+        assert_eq!(st.runs(b.id, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn fake_remove_does_not_touch_ids_sharing_a_prefix() {
+        let st = FakeStore::default();
+        st.kv_set("osint_base_5", "1").unwrap();
+        st.kv_set("osint_base_55", "1").unwrap();
+        st.kv_set("alert_osint_55_new", "1").unwrap();
+        st.remove_keys(5);
+        assert!(st.kv_get("osint_base_5").is_none());
+        assert!(st.kv_get("osint_base_55").is_some());
+        assert!(st.kv_get("alert_osint_55_new").is_some());
+    }
+
+    #[test]
+    fn fake_usage_counts_reserved_until_settled() {
+        let st = FakeStore::default();
+        st.usage_reserve(1, "202610", 8, "r1").unwrap();
+        st.usage_reserve(1, "202610", 8, "r2").unwrap();
+        st.usage_reserve(1, "202609", 100, "r3").unwrap();
+        assert_eq!(st.usage_month("202610").unwrap(), 16);
+        assert!(st.usage_reserve(1, "202610", 8, "r1").is_err()); // idempotent key = error
+        st.usage_settle("r1", 3).unwrap();
+        assert_eq!(st.usage_month("202610").unwrap(), 11);
+        st.usage_release("r2").unwrap();
+        assert_eq!(st.usage_month("202610").unwrap(), 3);
+        st.usage_settle("r1", 0).unwrap();
+        assert_eq!(st.usage_month("202610").unwrap(), 0);
+        assert_eq!(st.usage_month("202611").unwrap(), 0);
+    }
+
+    #[test]
+    fn fake_enable_touch_and_kv() {
+        let st = FakeStore::default();
+        let m = add(&st, "a@x.org", 5).unwrap();
+        st.set_enabled(m.id, false).unwrap();
+        assert!(!st.get(m.id).unwrap().unwrap().enabled);
+        st.touch_last_run(m.id, 777).unwrap();
+        assert_eq!(st.get(m.id).unwrap().unwrap().last_run_at, 777);
+        assert_eq!(st.kv_get("k"), None);
+        st.kv_set("k", "v").unwrap();
+        assert_eq!(st.kv_get("k").as_deref(), Some("v"));
+    }
+}

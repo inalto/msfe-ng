@@ -253,6 +253,22 @@ impl Parser<'_> {
                             )
                             .map_err(|_| "bad \\u hex")?;
                             self.i += 4;
+                            let mut code = code;
+                            // a high surrogate followed by \uDC00..DFFF is one character
+                            if (0xD800..0xDC00).contains(&code)
+                                && self.b.get(self.i..self.i + 2) == Some(b"\\u")
+                            {
+                                let low = self
+                                    .b
+                                    .get(self.i + 2..self.i + 6)
+                                    .and_then(|h| std::str::from_utf8(h).ok())
+                                    .and_then(|h| u32::from_str_radix(h, 16).ok())
+                                    .filter(|l| (0xDC00..0xE000).contains(l));
+                                if let Some(low) = low {
+                                    code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+                                    self.i += 6;
+                                }
+                            }
                             s.push(char::from_u32(code).unwrap_or('\u{fffd}'));
                         }
                         _ => return Err("bad escape".into()),
@@ -321,6 +337,15 @@ impl Parser<'_> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn surrogate_pairs_decode_to_one_character() {
+        let j = super::Json::parse(r#""a\ud83d\ude00b""#).unwrap();
+        assert_eq!(j.as_str(), Some("a\u{1F600}b"));
+        // a lone surrogate is still replaced, not an error
+        let j = super::Json::parse(r#""\ud83dx""#).unwrap();
+        assert_eq!(j.as_str(), Some("\u{fffd}x"));
+    }
+
     use super::*;
 
     #[test]

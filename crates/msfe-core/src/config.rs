@@ -53,6 +53,12 @@ pub struct Config {
     pub osint_max_external_queries: u32,
     pub osint_cache_secs: u64,
     pub osint_retention_hours: u64,
+    /// Monitored addresses allowed (Delivery → OSINT monitors).
+    pub osint_max_monitors: u32,
+    /// Days of monitor history kept.
+    pub osint_history_days: u32,
+    /// Provider units per calendar month scheduled monitors may use; 0 = no cap.
+    pub osint_monitor_budget: u32,
     /// Days of Exim logs the server audit scans by default (1–7).
     pub delivery_log_days: u32,
     pub delivery_max_monitors: u32,
@@ -197,6 +203,9 @@ impl Default for Config {
             osint_max_external_queries: 8,
             osint_cache_secs: 3600,
             osint_retention_hours: 24,
+            osint_max_monitors: 10,
+            osint_history_days: 90,
+            osint_monitor_budget: 300,
             delivery_log_days: 2,
             delivery_max_monitors: 20,
             delivery_helo: String::new(),
@@ -337,6 +346,15 @@ impl Config {
                     c.osint_max_external_queries = v.parse().unwrap_or(8).clamp(1, 20)
                 }
                 "osint_cache_secs" => c.osint_cache_secs = v.parse().unwrap_or(3600),
+                "osint_max_monitors" => {
+                    c.osint_max_monitors = v.parse().unwrap_or(10).clamp(1, 100)
+                }
+                "osint_history_days" => {
+                    c.osint_history_days = v.parse().unwrap_or(90).clamp(1, 730)
+                }
+                "osint_monitor_budget" => {
+                    c.osint_monitor_budget = v.parse().unwrap_or(300).clamp(0, 100_000)
+                }
                 "osint_retention_hours" => {
                     c.osint_retention_hours = v.parse().unwrap_or(24).clamp(1, 720)
                 }
@@ -475,6 +493,18 @@ impl Config {
             (
                 "osint_retention_hours".into(),
                 Json::Int(self.osint_retention_hours as i64),
+            ),
+            (
+                "osint_max_monitors".into(),
+                Json::Int(self.osint_max_monitors as i64),
+            ),
+            (
+                "osint_history_days".into(),
+                Json::Int(self.osint_history_days as i64),
+            ),
+            (
+                "osint_monitor_budget".into(),
+                Json::Int(self.osint_monitor_budget as i64),
             ),
             (
                 "delivery_log_days".into(),
@@ -693,6 +723,47 @@ mod tests {
         assert!(c.osint_enabled);
         assert_eq!(c.osint_runs_per_min, 30);
         assert_eq!(c.osint_deadline_secs, 5);
+    }
+
+    #[test]
+    fn osint_monitor_keys_default_and_clamp() {
+        let d = Config::default();
+        assert_eq!(
+            (
+                d.osint_max_monitors,
+                d.osint_history_days,
+                d.osint_monitor_budget
+            ),
+            (10, 90, 300)
+        );
+        let c = Config::from_toml_str(
+            "osint_max_monitors = 0\nosint_history_days = 9999\nosint_monitor_budget = 0\n",
+        );
+        assert_eq!(
+            (
+                c.osint_max_monitors,
+                c.osint_history_days,
+                c.osint_monitor_budget
+            ),
+            (1, 730, 0)
+        );
+        let c = Config::from_toml_str(
+            "osint_max_monitors = 500\nosint_history_days = 0\nosint_monitor_budget = 999999\n",
+        );
+        assert_eq!(
+            (
+                c.osint_max_monitors,
+                c.osint_history_days,
+                c.osint_monitor_budget
+            ),
+            (100, 1, 100_000)
+        );
+        let c = Config::from_toml_str("osint_max_monitors = \"x\"\n");
+        assert_eq!(c.osint_max_monitors, 10);
+        let j = Config::default().to_public_json().to_string();
+        assert!(j.contains("\"osint_max_monitors\":10"));
+        assert!(j.contains("\"osint_history_days\":90"));
+        assert!(j.contains("\"osint_monitor_budget\":300"));
     }
 
     #[test]
