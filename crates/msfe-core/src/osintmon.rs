@@ -960,6 +960,33 @@ pub struct Delta {
     pub recovered: Vec<SourceRef>,
 }
 
+/// A URL as the key sees it: scheme and host in lower case, no fragment, no
+/// trailing slash on the path; path and query keep their case. Text that is
+/// not a `scheme://` URL is returned unchanged.
+fn normalise_url(u: &str) -> String {
+    let Some((scheme, rest)) = u.split_once("://") else {
+        return u.to_string();
+    };
+    let rest = rest.split('#').next().unwrap_or("");
+    let auth_end = rest.find(['/', '?']).unwrap_or(rest.len());
+    let (auth, tail) = rest.split_at(auth_end);
+    let (path, query) = match tail.find('?') {
+        Some(i) => tail.split_at(i),
+        None => (tail, ""),
+    };
+    let auth = match auth.rsplit_once('@') {
+        Some((user, host)) => format!("{user}@{}", host.to_ascii_lowercase()),
+        None => auth.to_ascii_lowercase(),
+    };
+    format!(
+        "{}://{}{}{}",
+        scheme.to_ascii_lowercase(),
+        auth,
+        path.trim_end_matches('/'),
+        query
+    )
+}
+
 /// Stable identity of a finding: never the observation time, evidence,
 /// confidence or severity.
 pub fn finding_key(f: &Finding) -> String {
@@ -967,7 +994,10 @@ pub fn finding_key(f: &Finding) -> String {
         "{}|{}|{}",
         f.source_id,
         f.group.as_str(),
-        f.source_url.clone().unwrap_or_else(|| f.title.clone())
+        f.source_url
+            .as_deref()
+            .map(normalise_url)
+            .unwrap_or_else(|| f.title.clone())
     )
 }
 
@@ -1079,7 +1109,7 @@ const MAX_ALERT_LINES: usize = 5;
 fn alertable(g: &Group) -> bool {
     matches!(
         g,
-        Group::Exposure | Group::Profile | Group::Reference | Group::Domain | Group::Validation
+        Group::Exposure | Group::Profile | Group::Reference | Group::Domain
     )
 }
 
@@ -1694,6 +1724,34 @@ mod change_tests {
     }
 
     #[test]
+    fn urls_are_normalised_in_the_key() {
+        let k = |u: &str| finding_key(&f("hibp", Group::Exposure, Some(u), "t"));
+        let base = k("https://example.org/Path/x");
+        assert_eq!(k("HTTPS://Example.ORG/Path/x/"), base);
+        assert_eq!(k("https://example.org/Path/x#frag"), base);
+        assert_eq!(k("https://example.org/Path/x/#frag"), base);
+        assert_ne!(k("https://example.org/path/x"), base);
+        assert_ne!(k("https://example.org/Path/y"), base);
+        assert_ne!(k("https://example.org/Path/x?q=1"), base);
+        assert_eq!(
+            k("https://example.org/a?Q=1/"),
+            k("https://example.org/a?Q=1/")
+        );
+        // a root path stays a root path; non-URLs are left alone
+        assert_eq!(k("https://Example.org/"), k("https://example.org"));
+        assert_eq!(k("u1"), "hibp|exposure|u1");
+        let a = rep(
+            &ok(),
+            vec![f("hibp", Group::Exposure, Some("https://e.org/x/"), "t")],
+        );
+        let b = rep(
+            &ok(),
+            vec![f("hibp", Group::Exposure, Some("https://E.org/x#top"), "t")],
+        );
+        assert!(diff_reports(&a, &b).new_findings.is_empty());
+    }
+
+    #[test]
     fn no_url_keyed_by_title_and_duplicates_collapse() {
         let a = rep(&ok(), vec![f("hibp", Group::Profile, None, "one")]);
         let b = rep(
@@ -1829,7 +1887,9 @@ mod change_tests {
         // context and unknown groups never alert
         assert!(alert_texts("h", "a@x.org", &delta_new(2, Group::Context)).is_empty());
         assert!(alert_texts("h", "a@x.org", &delta_new(2, Group::Unknown("z".into()))).is_empty());
-        for g in [Group::Reference, Group::Domain, Group::Validation] {
+        // a validation verdict is history only
+        assert!(alert_texts("h", "a@x.org", &delta_new(2, Group::Validation)).is_empty());
+        for g in [Group::Reference, Group::Domain] {
             assert_eq!(alert_texts("h", "a@x.org", &delta_new(1, g)).len(), 1);
         }
     }
