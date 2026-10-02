@@ -52,7 +52,7 @@ fn fixture_enabled() -> bool {
 }
 
 pub fn infos(cfg: &Config) -> Vec<Info> {
-    let mut v = vec![hibp_info(cfg), gravatar_info()];
+    let mut v = vec![hibp_info(cfg), gravatar_info(), rdap_info()];
     if fixture_enabled() {
         v.push(Info {
             id: "fixture",
@@ -65,7 +65,7 @@ pub fn infos(cfg: &Config) -> Vec<Info> {
 }
 
 pub fn is_known(id: &str) -> bool {
-    id == "hibp" || id == "gravatar" || (id == "fixture" && fixture_enabled())
+    id == "hibp" || id == "gravatar" || id == "rdap" || (id == "fixture" && fixture_enabled())
 }
 
 pub fn run(id: &str, q: &QueryCtx) -> Outcome {
@@ -73,6 +73,7 @@ pub fn run(id: &str, q: &QueryCtx) -> Outcome {
         "fixture" => fixture(q),
         "hibp" => hibp(q),
         "gravatar" => gravatar(q),
+        "rdap" => rdap(q),
         other => Outcome {
             source: SourceStatus {
                 id: other.to_string(),
@@ -256,9 +257,70 @@ fn hibp_info(cfg: &Config) -> Info {
     }
 }
 
-/// Plain text only: control characters dropped, length bounded.
-fn clean_text(s: &str, max: usize) -> String {
-    s.chars().filter(|c| !c.is_control()).take(max).collect()
+/// Plain text only: markup removed (everything between `<` and `>`, and an
+/// unclosed `<` to the end), the five basic entities decoded once, control
+/// characters dropped, whitespace collapsed, and the result at most `max`
+/// characters long (cut on a character boundary, ending in `\u{2026}`).
+pub(crate) fn clean_text(s: &str, max: usize) -> String {
+    let mut stripped = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if in_tag => {}
+            _ => stripped.push(c),
+        }
+    }
+    let mut decoded = String::with_capacity(stripped.len());
+    let mut rest = stripped.as_str();
+    while let Some(i) = rest.find('&') {
+        decoded.push_str(&rest[..i]);
+        rest = &rest[i..];
+        let mut hit = false;
+        for (ent, ch) in [
+            ("&amp;", '&'),
+            ("&lt;", '<'),
+            ("&gt;", '>'),
+            ("&quot;", '"'),
+            ("&#39;", '\''),
+        ] {
+            if let Some(r) = rest.strip_prefix(ent) {
+                decoded.push(ch);
+                rest = r;
+                hit = true;
+                break;
+            }
+        }
+        if !hit {
+            decoded.push('&');
+            rest = &rest[1..];
+        }
+    }
+    decoded.push_str(rest);
+    let spaced: String = decoded
+        .chars()
+        .filter_map(|c| {
+            if c.is_whitespace() {
+                Some(' ')
+            } else if c.is_control() {
+                None
+            } else {
+                Some(c)
+            }
+        })
+        .collect();
+    let collapsed = spaced.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= max {
+        return collapsed;
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let mut cut: String = collapsed.chars().take(max - 1).collect();
+    cut.truncate(cut.trim_end().len());
+    cut.push('\u{2026}');
+    cut
 }
 
 fn str_of<'a>(j: &'a Json, key: &str) -> Option<&'a str> {
@@ -722,6 +784,463 @@ fn gravatar(q: &QueryCtx) -> Outcome {
     }
 }
 
+// ---- RDAP domain context ------------------------------------------------
+
+const RDAP_ID: &str = "rdap";
+const BOOTSTRAP_HOST: &str = "data.iana.org";
+const BOOTSTRAP_PATH: &str = "/rdap/dns.json";
+const RDAP_MAX_BODY: usize = 512 * 1024;
+const BOOTSTRAP_TTL: Duration = Duration::from_secs(24 * 3600);
+const REDACTION_LIMIT: &str =
+    "Registrant details are redacted by the registry; no owner identity is shown.";
+
+type Services = Vec<(Vec<String>, Vec<String>)>;
+
+static BOOTSTRAP_CACHE: std::sync::Mutex<Option<(Instant, Services)>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn clear_bootstrap_cache() {
+    *BOOTSTRAP_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+#[cfg(test)]
+fn age_bootstrap_cache(by: Duration) {
+    if let Some((t, _)) = BOOTSTRAP_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+    {
+        *t = t.checked_sub(by).unwrap_or(*t);
+    }
+}
+
+fn rdap_info() -> Info {
+    Info {
+        id: RDAP_ID,
+        name: "RDAP domain registration",
+        disclosure: "the domain of the address (not the full address) is sent to the registry's RDAP server (found through the IANA bootstrap file)".into(),
+        configured: true,
+    }
+}
+
+/// RDAP needs no credentials: the only header ever sent is `Accept`. Nothing
+/// secret is passed to this function, so no registry host taken from the
+/// bootstrap can ever be paired with one.
+fn rdap_request(
+    provider: &'static str,
+    host: &str,
+    path: String,
+    accept: &str,
+    timeout: Duration,
+) -> Request {
+    Request {
+        provider,
+        host: host.to_string(),
+        path,
+        query: Vec::new(),
+        headers: vec![("accept", accept.to_string())],
+        timeout,
+        max_body: RDAP_MAX_BODY,
+    }
+}
+
+/// `{"services":[[["com","net"],["https://…/"]],…]}`; any other shape is an error.
+fn parse_bootstrap(body: &[u8]) -> Result<Services, String> {
+    let bad = || "unexpected bootstrap answer".to_string();
+    let text = std::str::from_utf8(body).map_err(|_| bad())?;
+    let doc = Json::parse(text).map_err(|_| bad())?;
+    let Some(Json::Array(services)) = doc.get("services") else {
+        return Err(bad());
+    };
+    let strings = |j: &Json| -> Result<Vec<String>, String> {
+        match j {
+            Json::Array(a) => a
+                .iter()
+                .map(|x| x.as_str().map(str::to_string).ok_or_else(bad))
+                .collect(),
+            _ => Err(bad()),
+        }
+    };
+    let mut out = Vec::new();
+    for s in services {
+        let Json::Array(pair) = s else {
+            return Err(bad());
+        };
+        if pair.len() != 2 {
+            return Err(bad());
+        }
+        out.push((strings(&pair[0])?, strings(&pair[1])?));
+    }
+    Ok(out)
+}
+
+/// `https://<host>[/<path>]` with a lower-case public host and nothing else:
+/// no port, userinfo, query or fragment, and a plain path. Returns the host
+/// and the path prefix (starting and ending with `/`).
+fn validate_rdap_base(url: &str) -> Option<(String, String)> {
+    let rest = url.strip_prefix("https://")?;
+    let (host, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/"),
+    };
+    if !providerhttp::valid_public_hostname(host) {
+        return None;
+    }
+    if !path
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-'))
+        || path.split('/').any(|seg| seg == "..")
+    {
+        return None;
+    }
+    let mut prefix = path.to_string();
+    if !prefix.ends_with('/') {
+        prefix.push('/');
+    }
+    Some((host.to_string(), prefix))
+}
+
+/// The registry server for a domain: the service listing the last label of
+/// the domain, its first URL.
+fn rdap_base_for(services: &Services, domain: &str) -> Option<(String, String)> {
+    let tld = domain.rsplit('.').next()?.to_ascii_lowercase();
+    let (_, urls) = services
+        .iter()
+        .find(|(tlds, _)| tlds.iter().any(|t| t.eq_ignore_ascii_case(&tld)))?;
+    validate_rdap_base(urls.first()?)
+}
+
+fn rdap_date(s: &str) -> Option<(String, u64)> {
+    let d = s.get(..10)?;
+    breach_date(Some(d))
+}
+
+fn vcard_fn(entity: &Json) -> Option<String> {
+    let Some(Json::Array(card)) = entity.get("vcardArray") else {
+        return None;
+    };
+    let Some(Json::Array(props)) = card.get(1) else {
+        return None;
+    };
+    for p in props {
+        let Json::Array(p) = p else { continue };
+        if p.first().and_then(|n| n.as_str()) == Some("fn") {
+            let v = clean_text(p.get(3)?.as_str()?, 200);
+            return (!v.is_empty()).then_some(v);
+        }
+    }
+    None
+}
+
+fn has_role(entity: &Json, role: &str) -> bool {
+    matches!(entity.get("roles"), Some(Json::Array(r)) if r.iter().any(|x| x.as_str().is_some_and(|x| x.eq_ignore_ascii_case(role))))
+}
+
+fn mentions_redaction(s: &str) -> bool {
+    let l = s.to_ascii_lowercase();
+    l.contains("redacted") || l.contains("privacy")
+}
+
+/// Builds the one summary finding. Returns it with whether the registry
+/// redacted the registrant. Registrant personal data is never read into the
+/// output: only the registrar and technical facts are shown.
+fn rdap_finding(
+    body: &[u8],
+    domain: &str,
+    base: &str,
+    now: u64,
+) -> Result<(Finding, bool), String> {
+    let text = std::str::from_utf8(body).map_err(|_| "unexpected answer".to_string())?;
+    let doc = match Json::parse(text) {
+        Ok(d @ Json::Object(_)) => d,
+        _ => return Err("unexpected answer".into()),
+    };
+    let name = str_of(&doc, "ldhName")
+        .map(|n| clean_text(n, 200))
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| domain.to_string());
+    let mut parts: Vec<String> = Vec::new();
+    let entities: &[Json] = doc
+        .get("entities")
+        .and_then(|e| e.as_array())
+        .unwrap_or(&[]);
+    if let Some(r) = entities
+        .iter()
+        .filter(|e| has_role(e, "registrar"))
+        .find_map(vcard_fn)
+    {
+        parts.push(format!("Registrar: {r}."));
+    }
+    let mut event_at = None;
+    let events: &[Json] = doc.get("events").and_then(|e| e.as_array()).unwrap_or(&[]);
+    for (action, label) in [
+        ("registration", "Registered"),
+        ("last changed", "Last changed"),
+        ("expiration", "Expires"),
+    ] {
+        let found = events.iter().find_map(|e| {
+            if !str_of(e, "eventAction").is_some_and(|a| a.eq_ignore_ascii_case(action)) {
+                return None;
+            }
+            rdap_date(str_of(e, "eventDate")?)
+        });
+        if let Some((d, t)) = found {
+            parts.push(format!("{label}: {d}."));
+            if action == "registration" {
+                event_at = Some(t);
+            }
+        }
+    }
+    let mut redacted = false;
+    let statuses: Vec<String> = doc
+        .get("status")
+        .and_then(|s| s.as_array())
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|s| s.as_str())
+        .map(|s| clean_text(s, 200))
+        .filter(|s| !s.is_empty())
+        .collect();
+    if statuses.iter().any(|s| mentions_redaction(s)) {
+        redacted = true;
+    }
+    if !statuses.is_empty() {
+        parts.push(format!(
+            "Status: {}.",
+            statuses
+                .iter()
+                .take(8)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    let ns: Vec<String> = doc
+        .get("nameservers")
+        .and_then(|s| s.as_array())
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|n| str_of(n, "ldhName"))
+        .map(|n| clean_text(n, 200))
+        .filter(|n| !n.is_empty())
+        .take(8)
+        .collect();
+    if !ns.is_empty() {
+        parts.push(format!("Nameservers: {}.", ns.join(", ")));
+    }
+    if let Some(sd) = doc.get("secureDNS") {
+        if let Some(Json::Bool(b)) = sd.get("delegationSigned") {
+            parts.push(format!(
+                "DNSSEC: {}.",
+                if *b { "signed" } else { "not signed" }
+            ));
+        }
+    }
+    // Registrant: only whether details exist is used, never their content.
+    let registrant_details = entities
+        .iter()
+        .filter(|e| has_role(e, "registrant"))
+        .any(|e| vcard_fn(e).is_some_and(|n| !mentions_redaction(&n)));
+    if let Some(Json::Array(rem)) = doc.get("remarks") {
+        for r in rem {
+            let mut texts: Vec<&str> = str_of(r, "title").into_iter().collect();
+            if let Some(Json::Array(d)) = r.get("description") {
+                texts.extend(d.iter().filter_map(|x| x.as_str()));
+            }
+            if texts.iter().any(|t| mentions_redaction(t)) {
+                redacted = true;
+            }
+        }
+    }
+    if doc.get("redacted").is_some() {
+        redacted = true;
+    }
+    let mut limitations = vec![
+        "Registry data describes the domain; it does not show who controls a mailbox at it."
+            .to_string(),
+    ];
+    let redact_note = redacted || !registrant_details;
+    if redact_note {
+        limitations.push(REDACTION_LIMIT.into());
+    }
+    let url = format!("{base}domain/{domain}");
+    Ok((
+        Finding {
+            group: Group::Domain,
+            confidence: Confidence::High,
+            confidence_reason: "published by the domain's registry".into(),
+            severity: Severity::Info,
+            observed_at: now,
+            event_at,
+            source_id: RDAP_ID.into(),
+            source_url: crate::osinthtml::safe_url(&url).then_some(url),
+            title: format!("Registration: {name}"),
+            evidence: if parts.is_empty() {
+                "The registry published no registrar or technical details.".into()
+            } else {
+                parts.join(" ")
+            },
+            limitations,
+            asset_id: None,
+            asset_mime: None,
+        },
+        redact_note,
+    ))
+}
+
+/// The cached bootstrap, or a fresh one. A stale entry is refetched; a
+/// malformed answer is never cached.
+fn rdap_services(timeout: Duration, addr: &str) -> Result<Services, String> {
+    {
+        let c = BOOTSTRAP_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((t, s)) = c.as_ref() {
+            if t.elapsed() < BOOTSTRAP_TTL {
+                return Ok(s.clone());
+            }
+        }
+    }
+    let req = rdap_request(
+        "rdap_bootstrap",
+        BOOTSTRAP_HOST,
+        BOOTSTRAP_PATH.into(),
+        "application/json",
+        timeout,
+    );
+    let resp = providerhttp::fetch(&req).map_err(|e| match e {
+        HttpError::Timeout => "bootstrap request timed out".to_string(),
+        e => providerhttp::redact(&e.to_string(), &[addr]),
+    })?;
+    if resp.status != 200 {
+        return Err(format!("bootstrap answered HTTP {}", resp.status));
+    }
+    let services = parse_bootstrap(&resp.body)?;
+    *BOOTSTRAP_CACHE.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((Instant::now(), services.clone()));
+    Ok(services)
+}
+
+/// The registry request. It takes the validated host and path prefix of a
+/// bootstrap-selected base; the only way to reach anything else is the
+/// loopback test override for provider `rdap_registry`, applied by
+/// `providerhttp::fetch` (loopback http only), which replaces the origin.
+fn rdap_registry_fetch(
+    host: &str,
+    prefix: &str,
+    domain: &str,
+    timeout: Duration,
+) -> Result<providerhttp::Response, HttpError> {
+    let path = format!("{prefix}domain/{}", providerhttp::pct_encode(domain));
+    let req = rdap_request(
+        "rdap_registry",
+        host,
+        path,
+        "application/rdap+json",
+        timeout,
+    );
+    providerhttp::fetch(&req)
+}
+
+fn rdap(q: &QueryCtx) -> Outcome {
+    let remaining = q.deadline.saturating_duration_since(Instant::now());
+    if q.stop() || remaining.is_zero() {
+        return outcome(
+            RDAP_ID,
+            SourceState::Inconclusive,
+            "stopped before this source ran",
+        );
+    }
+    let addr = q.address.trim();
+    let domain = addr
+        .rsplit_once('@')
+        .map(|(_, d)| d.trim_end_matches('.').to_ascii_lowercase())
+        .unwrap_or_default();
+    if !providerhttp::valid_public_hostname(&domain) {
+        return outcome(
+            RDAP_ID,
+            SourceState::Inconclusive,
+            "the address has no domain this source can look up",
+        );
+    }
+    let timeout = remaining.min(Duration::from_secs(10));
+    let services = match rdap_services(timeout, addr) {
+        Ok(s) => s,
+        Err(e) => return outcome(RDAP_ID, SourceState::Failed, &e),
+    };
+    let tld = domain.rsplit('.').next().unwrap_or("");
+    let Some((host, prefix)) = rdap_base_for(&services, &domain) else {
+        return outcome(
+            RDAP_ID,
+            SourceState::Failed,
+            &format!("no usable RDAP server for .{tld}"),
+        );
+    };
+    let remaining = q.deadline.saturating_duration_since(Instant::now());
+    if q.stop() || remaining.is_zero() {
+        return outcome(
+            RDAP_ID,
+            SourceState::Inconclusive,
+            "stopped before this source ran",
+        );
+    }
+    let resp = match rdap_registry_fetch(
+        &host,
+        &prefix,
+        &domain,
+        remaining.min(Duration::from_secs(10)),
+    ) {
+        Ok(r) => r,
+        Err(HttpError::Timeout) => return outcome(RDAP_ID, SourceState::Failed, "timed out"),
+        Err(e) => {
+            let t = providerhttp::redact(&e.to_string(), &[addr]);
+            return outcome(RDAP_ID, SourceState::Failed, &t);
+        }
+    };
+    match resp.status {
+        200 => match rdap_finding(
+            &resp.body,
+            &domain,
+            &format!("https://{host}{prefix}"),
+            now_secs(),
+        ) {
+            Ok((f, _)) => Outcome {
+                source: status(RDAP_ID, SourceState::Matched, "registration record found"),
+                findings: vec![f],
+                assets: Vec::new(),
+            },
+            Err(_) => outcome(
+                RDAP_ID,
+                SourceState::Failed,
+                "unexpected answer from the registry",
+            ),
+        },
+        404 => outcome(
+            RDAP_ID,
+            SourceState::NoMatch,
+            "no registration found; RDAP answers for registered domains; the address's domain may be a subdomain",
+        ),
+        429 => Outcome {
+            source: SourceStatus {
+                id: RDAP_ID.into(),
+                state: SourceState::RateLimited,
+                retry_after: resp.retry_after,
+                detail: "the registry's rate limit was reached".into(),
+            },
+            findings: Vec::new(),
+            assets: Vec::new(),
+        },
+        400 | 501 => outcome(
+            RDAP_ID,
+            SourceState::Inconclusive,
+            "the registry does not answer this query",
+        ),
+        n => outcome(
+            RDAP_ID,
+            SourceState::Failed,
+            &format!("the registry answered HTTP {n}"),
+        ),
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod testutil {
     use std::io::{Read, Write};
@@ -1138,5 +1657,412 @@ mod tests {
         assert!(i.configured);
         assert!(i.disclosure.contains("SHA-256 hash"));
         assert!(is_known("gravatar"));
+    }
+
+    // ---- RDAP -----------------------------------------------------------
+
+    static RDAP_LOCK: Mutex<()> = Mutex::new(());
+
+    const BOOTSTRAP: &str = r#"{"version":"1.0","services":[[["com","net"],["https://rdap.verisign.com/com/v1/","http://other.example.net/"]],[["org"],["https://rdap.example.net/org/v1/"]],[["uk"],["https://rdap.nominet.example.uk/uk/"]],[["bad"],[]]]}"#;
+
+    const DOMAIN_JSON: &str = r#"{"objectClassName":"domain","ldhName":"EXAMPLE.ORG","status":["client transfer prohibited","active"],"events":[{"eventAction":"registration","eventDate":"1995-08-14T04:00:00Z"},{"eventAction":"last changed","eventDate":"2024-08-14T07:01:38Z"},{"eventAction":"expiration","eventDate":"2025-08-13T04:00:00Z"}],"nameservers":[{"ldhName":"A.IANA-SERVERS.NET"},{"ldhName":"B.IANA-SERVERS.NET"}],"secureDNS":{"delegationSigned":true},"entities":[{"roles":["registrar"],"vcardArray":["vcard",[["version",{},"text","4.0"],["fn",{},"text","Reg <script>alert(1)</script>Ltd\u0007"]]]},{"roles":["registrant"],"vcardArray":["vcard",[["version",{},"text","4.0"],["fn",{},"text","Jane Q. Registrant"],["email",{},"text","jane@registrant.example"]]]}],"remarks":[{"title":"REDACTED FOR PRIVACY","description":["Some data redacted"]}]}"#;
+
+    #[test]
+    fn clean_text_strips_tags_decodes_few_entities_and_controls() {
+        assert_eq!(
+            clean_text("a <b>bold</b> <script>x()</script>y", 100),
+            "a bold x()y"
+        );
+        assert_eq!(
+            clean_text(
+                "Tom &amp; Jerry &lt;3 &quot;q&quot; it&#39;s &nbsp;&copy;",
+                100
+            ),
+            "Tom & Jerry <3 \"q\" it's &nbsp;&copy;"
+        );
+        assert_eq!(clean_text("&amp;lt;", 100), "&lt;", "decoded once only");
+        assert_eq!(clean_text("a\u{7}b\u{0}c\u{1b}[0m", 100), "abc[0m");
+        assert_eq!(clean_text("  a \n\t b\r\n  c  ", 100), "a b c");
+        assert_eq!(clean_text("unclosed <tag", 100), "unclosed");
+        assert_eq!(clean_text("", 10), "");
+        assert_eq!(clean_text("abc", 0), "");
+    }
+
+    #[test]
+    fn clean_text_truncates_on_char_boundaries() {
+        let big = "x".repeat(5 * 1024);
+        let t = clean_text(&big, 200);
+        assert_eq!(t.chars().count(), 200);
+        assert!(t.ends_with('\u{2026}'));
+        let multi = "\u{e9}\u{4e2d}\u{1f600}".repeat(100);
+        for max in [1, 2, 3, 4, 5, 7, 50] {
+            let t = clean_text(&multi, max);
+            assert!(t.chars().count() <= max, "{max}");
+            assert!(t.ends_with('\u{2026}'));
+        }
+        assert_eq!(clean_text("short", 5), "short");
+    }
+
+    #[test]
+    fn bootstrap_parses_and_rejects_malformed_documents() {
+        let s = parse_bootstrap(BOOTSTRAP.as_bytes()).unwrap();
+        assert_eq!(s.len(), 4);
+        assert_eq!(s[0].0, vec!["com".to_string(), "net".to_string()]);
+        assert_eq!(s[0].1.len(), 2);
+        for bad in [
+            "",
+            "null",
+            "{}",
+            "[1]",
+            "{\"services\":3}",
+            "{\"services\":[[1,2]]}",
+            "{\"services\":[[[\"a\"]]]}",
+            "<html>",
+            "{\"services\":[[[\"a\"],[1]]]}",
+        ] {
+            assert!(parse_bootstrap(bad.as_bytes()).is_err(), "{bad}");
+        }
+        assert!(parse_bootstrap(b"{\"services\":[]}").unwrap().is_empty());
+    }
+
+    #[test]
+    fn base_is_chosen_by_the_last_label_and_first_url() {
+        let s = parse_bootstrap(BOOTSTRAP.as_bytes()).unwrap();
+        let b = rdap_base_for(&s, "Example.NET").unwrap();
+        assert_eq!(b, ("rdap.verisign.com".to_string(), "/com/v1/".to_string()));
+        let b = rdap_base_for(&s, "foo.bar.co.uk").unwrap();
+        assert_eq!(b.0, "rdap.nominet.example.uk");
+        assert_eq!(b.1, "/uk/");
+        assert!(rdap_base_for(&s, "example.zz").is_none());
+        assert!(rdap_base_for(&s, "example.bad").is_none(), "empty url list");
+    }
+
+    #[test]
+    fn base_urls_are_accepted_only_when_plain_https_public_hosts() {
+        assert_eq!(
+            validate_rdap_base("https://rdap.example.com/x/v1/"),
+            Some(("rdap.example.com".into(), "/x/v1/".into()))
+        );
+        assert_eq!(
+            validate_rdap_base("https://rdap.example.com"),
+            Some(("rdap.example.com".into(), "/".into()))
+        );
+        assert_eq!(
+            validate_rdap_base("https://rdap.example.com/x"),
+            Some(("rdap.example.com".into(), "/x/".into()))
+        );
+        for bad in [
+            "http://rdap.example.com/",
+            "https://127.0.0.1/",
+            "https://[::1]/",
+            "https://localhost/",
+            "https://rdap.example.com:8080/",
+            "https://user@rdap.example.com/",
+            "https://user:pw@rdap.example.com/",
+            "https://Rdap.Example.COM/",
+            "https://rdap.example.com/?q=1",
+            "https://rdap.example.com/#f",
+            "https://rdap.example.com/a b/",
+            "https://rdap.example.com/%2e%2e/",
+            "https://rdap.example.com/../x/",
+            "https://rdap.example.com/a\\b/",
+            "https://10.0.0.1/",
+            "ftp://rdap.example.com/",
+            "",
+            "https://",
+            "https:///x",
+        ] {
+            assert!(validate_rdap_base(bad).is_none(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn domain_object_becomes_one_registrar_and_technical_finding() {
+        let (f, redacted) = rdap_finding(
+            DOMAIN_JSON.as_bytes(),
+            "example.org",
+            "https://rdap.example.net/org/v1/",
+            5,
+        )
+        .unwrap();
+        assert_eq!(f.group, Group::Domain);
+        assert_eq!(f.confidence, Confidence::High);
+        assert_eq!(f.confidence_reason, "published by the domain's registry");
+        assert_eq!(f.title, "Registration: EXAMPLE.ORG");
+        assert_eq!(f.event_at, Some(808_358_400));
+        assert!(
+            f.evidence.contains("Registrar: Reg alert(1)Ltd"),
+            "{}",
+            f.evidence
+        );
+        assert!(f.evidence.contains("1995-08-14"));
+        assert!(f.evidence.contains("2024-08-14"));
+        assert!(f.evidence.contains("2025-08-13"));
+        assert!(f.evidence.contains("client transfer prohibited"));
+        assert!(f.evidence.contains("A.IANA-SERVERS.NET"));
+        assert!(f.evidence.contains("DNSSEC: signed"));
+        assert!(!f.evidence.contains("Jane") && !f.evidence.contains("registrant.example"));
+        assert!(!f.evidence.contains('<') && !f.evidence.contains('\u{7}'));
+        assert!(redacted);
+        assert!(f
+            .limitations
+            .iter()
+            .any(|l| l
+                == "Registrant details are redacted by the registry; no owner identity is shown."));
+        assert_eq!(
+            f.source_url.as_deref(),
+            Some("https://rdap.example.net/org/v1/domain/example.org")
+        );
+    }
+
+    #[test]
+    fn a_domain_without_registrant_details_gets_the_redaction_limitation_and_unsigned_dnssec() {
+        let body = r#"{"ldhName":"x.example.org","secureDNS":{"delegationSigned":false},"entities":[{"roles":["registrar"],"vcardArray":["vcard",[["fn",{},"text","R"]]]}]}"#;
+        let (f, _) = rdap_finding(
+            body.as_bytes(),
+            "x.example.org",
+            "https://r.example.net/",
+            5,
+        )
+        .unwrap();
+        assert!(f.evidence.contains("DNSSEC: not signed"));
+        assert!(f
+            .limitations
+            .iter()
+            .any(|l| l.contains("redacted by the registry")));
+        assert_eq!(f.event_at, None);
+        let (empty, _) = rdap_finding(b"{}", "q.example.org", "https://r.example.net/", 5).unwrap();
+        assert_eq!(empty.title, "Registration: q.example.org");
+        for bad in ["", "[]", "null", "<html>", "\"x\""] {
+            assert!(rdap_finding(bad.as_bytes(), "a.org", "https://r.example.net/", 1).is_err());
+        }
+    }
+
+    #[test]
+    fn lists_are_capped_and_strings_are_bounded() {
+        let ns: Vec<String> = (0..20)
+            .map(|i| format!("{{\"ldhName\":\"ns{i}.example.org\"}}"))
+            .collect();
+        let st: Vec<String> = (0..20).map(|i| format!("\"status{i}\"")).collect();
+        let body = format!(
+            "{{\"ldhName\":\"{}\",\"nameservers\":[{}],\"status\":[{}]}}",
+            "a".repeat(5000),
+            ns.join(","),
+            st.join(",")
+        );
+        let (f, _) = rdap_finding(body.as_bytes(), "a.org", "https://r.example.net/", 1).unwrap();
+        assert!(f.evidence.contains("ns7.example.org") && !f.evidence.contains("ns8.example.org"));
+        assert!(f.evidence.contains("status7") && !f.evidence.contains("status8"));
+        assert!(f.title.chars().count() <= "Registration: ".len() + 200);
+    }
+
+    #[test]
+    fn rdap_requests_carry_only_an_accept_header() {
+        let r = rdap_request(
+            "rdap_registry",
+            "rdap.example.net",
+            "/org/v1/domain/a.org".into(),
+            "application/rdap+json",
+            Duration::from_secs(5),
+        );
+        let names: Vec<&str> = r.headers.iter().map(|(k, _)| *k).collect();
+        assert_eq!(names, vec!["accept"]);
+        let r = rdap_request(
+            "rdap_bootstrap",
+            BOOTSTRAP_HOST,
+            BOOTSTRAP_PATH.into(),
+            "application/json",
+            Duration::from_secs(5),
+        );
+        let names: Vec<&str> = r.headers.iter().map(|(k, _)| *k).collect();
+        assert_eq!(names, vec!["accept"]);
+        assert_eq!(r.host, "data.iana.org");
+        assert_eq!(r.max_body, 512 * 1024);
+    }
+
+    fn http(status: &str, body: &str) -> Vec<u8> {
+        format!("HTTP/1.1 {status}\r\nRetry-After: 7\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).into_bytes()
+    }
+
+    fn run_rdap(address: &str) -> Outcome {
+        let cfg = Config::default();
+        let cancel = AtomicBool::new(false);
+        let q = QueryCtx {
+            address,
+            cancel: &cancel,
+            deadline: Instant::now() + Duration::from_secs(10),
+            cfg: &cfg,
+        };
+        run("rdap", &q)
+    }
+
+    fn set_rdap_env(boot: u16, reg: Option<u16>) {
+        clear_bootstrap_cache();
+        std::env::set_var(
+            "MSFE_NG_OSINT_BASE_RDAP_BOOTSTRAP",
+            format!("http://127.0.0.1:{boot}"),
+        );
+        if let Some(r) = reg {
+            std::env::set_var(
+                "MSFE_NG_OSINT_BASE_RDAP_REGISTRY",
+                format!("http://127.0.0.1:{r}"),
+            );
+        }
+    }
+
+    fn clear_rdap_env() {
+        std::env::remove_var("MSFE_NG_OSINT_BASE_RDAP_BOOTSTRAP");
+        std::env::remove_var("MSFE_NG_OSINT_BASE_RDAP_REGISTRY");
+        clear_bootstrap_cache();
+    }
+
+    #[test]
+    fn rdap_status_mapping_end_to_end_with_two_stand_ins() {
+        let _g = RDAP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cases: Vec<(&str, SourceState)> = vec![
+            ("200 OK", SourceState::Matched),
+            ("404 Not Found", SourceState::NoMatch),
+            ("429 Too Many Requests", SourceState::RateLimited),
+            ("400 Bad Request", SourceState::Inconclusive),
+            ("501 Not Implemented", SourceState::Inconclusive),
+            ("503 Service Unavailable", SourceState::Failed),
+        ];
+        for (status, want) in cases {
+            let (bport, bh) = serve(http("200 OK", BOOTSTRAP));
+            let body = if status.starts_with("200") {
+                DOMAIN_JSON
+            } else {
+                ""
+            };
+            let (rport, rh) = serve(http(status, body));
+            set_rdap_env(bport, Some(rport));
+            let o = run_rdap("nobody@Example.ORG");
+            clear_rdap_env();
+            let bhead = bh.join().unwrap();
+            let rhead = rh.join().unwrap();
+            assert_eq!(o.source.state, want, "{status}: {}", o.source.detail);
+            assert!(bhead.starts_with("GET /rdap/dns.json "), "{bhead}");
+            assert!(
+                rhead.starts_with("GET /org/v1/domain/example.org "),
+                "{rhead}"
+            );
+            assert!(!rhead.to_ascii_lowercase().contains("nobody"));
+            let low = rhead.to_ascii_lowercase();
+            assert!(low.contains("accept: application/rdap+json"), "{rhead}");
+            for secret in ["authorization", "api-key", "cookie", "token", "key"] {
+                assert!(!low.contains(secret), "{secret}: {rhead}");
+            }
+            if status.starts_with("429") {
+                assert_eq!(o.source.retry_after, Some(7));
+            }
+            if status.starts_with("200") {
+                assert_eq!(o.findings.len(), 1);
+            } else {
+                assert!(o.findings.is_empty());
+            }
+            if status.starts_with("404") {
+                assert!(
+                    o.source.detail.contains("may be a subdomain"),
+                    "{}",
+                    o.source.detail
+                );
+            }
+            if status.starts_with("400") || status.starts_with("501") {
+                assert!(o.source.detail.contains("does not answer this query"));
+            }
+        }
+    }
+
+    #[test]
+    fn rdap_bootstrap_failures_and_unusable_servers_are_failed_not_no_match() {
+        let _g = RDAP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cases: Vec<(&str, &str, &str, &str)> = vec![
+            (
+                "200 OK",
+                "<html>blocked</html>",
+                "nobody@example.org",
+                "unexpected bootstrap answer",
+            ),
+            (
+                "503 Service Unavailable",
+                "",
+                "nobody@example.org",
+                "HTTP 503",
+            ),
+            (
+                "200 OK",
+                BOOTSTRAP,
+                "nobody@example.zz",
+                "no usable RDAP server for .zz",
+            ),
+            (
+                "200 OK",
+                r#"{"services":[[["org"],["http://rdap.example.net/"]]]}"#,
+                "nobody@example.org",
+                "no usable RDAP server for .org",
+            ),
+        ];
+        for (status, body, addr, want) in cases {
+            let (bport, _bh) = serve(http(status, body));
+            set_rdap_env(bport, None);
+            let o = run_rdap(addr);
+            clear_rdap_env();
+            assert_eq!(o.source.state, SourceState::Failed, "{}", o.source.detail);
+            assert!(o.source.detail.contains(want), "{}", o.source.detail);
+            assert!(!o.source.detail.contains("nobody"));
+        }
+    }
+
+    #[test]
+    fn rdap_unusable_addresses_make_no_request() {
+        let _g = RDAP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_rdap_env();
+        for a in ["nodomain", "a@", "a@localhost", "a@127.0.0.1", "a@[::1]"] {
+            let o = run_rdap(a);
+            assert_eq!(
+                o.source.state,
+                SourceState::Inconclusive,
+                "{a}: {}",
+                o.source.detail
+            );
+        }
+    }
+
+    #[test]
+    fn rdap_bootstrap_is_cached_and_a_stale_or_cleared_cache_is_refetched() {
+        let _g = RDAP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (bport, bh) = serve(http("200 OK", BOOTSTRAP));
+        let (r1, _h1) = serve(http("404 Not Found", ""));
+        set_rdap_env(bport, Some(r1));
+        let o = run_rdap("a@example.org");
+        assert_eq!(o.source.state, SourceState::NoMatch);
+        bh.join().unwrap();
+        // the bootstrap stand-in is gone: a second run must come from the cache
+        let (r2, _h2) = serve(http("404 Not Found", ""));
+        std::env::set_var(
+            "MSFE_NG_OSINT_BASE_RDAP_REGISTRY",
+            format!("http://127.0.0.1:{r2}"),
+        );
+        let o = run_rdap("a@example.org");
+        assert_eq!(o.source.state, SourceState::NoMatch, "{}", o.source.detail);
+        // a stale entry is refetched (the dead stand-in then fails the run)
+        age_bootstrap_cache(Duration::from_secs(25 * 3600));
+        let o = run_rdap("a@example.org");
+        assert_eq!(o.source.state, SourceState::Failed, "{}", o.source.detail);
+        clear_rdap_env();
+    }
+
+    #[test]
+    fn rdap_is_known_keyless_and_discloses_only_the_domain() {
+        let i = infos(&Config::default())
+            .into_iter()
+            .find(|p| p.id == "rdap")
+            .unwrap();
+        assert!(i.configured);
+        assert!(i
+            .disclosure
+            .contains("domain of the address (not the full address)"));
+        assert!(i.disclosure.contains("IANA bootstrap"));
+        assert!(is_known("rdap"));
     }
 }
