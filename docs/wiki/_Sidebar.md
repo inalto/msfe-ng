@@ -17,6 +17,7 @@ Admin tabs
 - [Delivery test](Delivery-test)
   - [Account DNS](Account-DNS)
   - [DMARC reports](DMARC-reports)
+  - [OSINT](OSINT)
 - [Quarantine](Quarantine)
 - [Config](Config)
 

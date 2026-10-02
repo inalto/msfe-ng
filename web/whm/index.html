@@ -323,6 +323,12 @@ function deliveryTestLink(addr){
   const icon=strokeIcon('M6 12 3.269 3.125A59.769 59.769 0 0 1 21.485 12 59.768 59.768 0 0 1 3.27 20.875L5.999 12Zm0 0h7.5','dtico');
   return Object.assign(el('a',{class:'dtlink',role:'button','aria-label':'Delivery test for '+a,title:'Run a delivery test for '+a+' (DNS, authentication, mail servers; the server audit when hosted here)'},icon),{onclick:e=>{e.stopPropagation();deliveryTestFor(a);}});
 }
+function osintLink(addr,context){
+  const a=String(addr||'').split(',')[0].trim();
+  if(!a.includes('@'))return el('span',{});
+  const icon=strokeIcon('m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z','dtico');
+  return Object.assign(el('a',{class:'dtlink',role:'button','aria-label':'Investigate '+a,title:'Investigate '+a+' (OSINT: public information about this address; you pick the sources and press Run)'},icon),{onclick:e=>{e.stopPropagation();osintFor(a,context);}});
+}
 function senderLink(addr){
   const a=String(addr||'').trim();
   if(!a||!a.includes('@'))return el('span',{},a);
@@ -1225,7 +1231,7 @@ async function renderMessages(){
         el('td',{},pick),
         el('td',{class:'muted',style:'white-space:nowrap'},m.ts),
         el('td',{class:'num'},m.score||'0'),
-        el('td',{},el('div',{},senderLink(m.from)),el('div',{class:'muted'},m.to,' ',deliveryTestLink(m.to))),
+        el('td',{},el('div',{},senderLink(m.from)),el('div',{class:'muted'},m.to,' ',deliveryTestLink(m.to),' ',osintLink(m.to))),
         el('td',{style:'white-space:nowrap'},m.clientip?ipLink(m.clientip):''),
         el('td',{},m.subject,' ',Object.assign(el('a',{class:'iplink',title:'Block messages like this one and/or ban their source'},'ban rule'),{onclick:e=>{e.stopPropagation();banRuleFromMessage(m);}})),
         el('td',{class:'num'},fmtSize(m.size)),
@@ -2441,8 +2447,8 @@ function queueCard(v,which,title){
           m.frozen?el('span',{class:'badge',style:'background:var(--serious);margin-left:.4rem'},'frozen'):'',
           m.parsed?'':el('span',{class:'badge',style:'background:var(--muted);margin-left:.4rem',title:'spool header could not be parsed — only age and size are known'},'?')),
         scoreCell(m),
-        el('td',{},m.bounce?el('span',{class:'badge',style:'background:var(--ink2)',title:'null envelope sender — a bounce, or spam sent so it can never be bounced back'},'∅ bounce'):el('span',{},m.sender||'—',' ',deliveryTestLink(m.sender||''))),
-        el('td',{title:m.recipients.join(', ')},m.recipients[0]||'—',m.recipients.length>1?el('span',{class:'muted'},' +'+(m.recipients.length-1)):'',' ',deliveryTestLink(m.recipients[0]||'')),
+        el('td',{},m.bounce?el('span',{class:'badge',style:'background:var(--ink2)',title:'null envelope sender — a bounce, or spam sent so it can never be bounced back'},'∅ bounce'):el('span',{},m.sender||'—',' ',deliveryTestLink(m.sender||''),' ',osintLink(m.sender||''))),
+        el('td',{title:m.recipients.join(', ')},m.recipients[0]||'—',m.recipients.length>1?el('span',{class:'muted'},' +'+(m.recipients.length-1)):'',' ',deliveryTestLink(m.recipients[0]||''),' ',osintLink(m.recipients[0]||'')),
         el('td',{style:'max-width:16rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap',title:m.subject||''},m.subject||el('span',{class:'muted'},'—')),
         el('td',{},...['headers','body','log'].map(w=>Object.assign(el('button',{class:'act plain',style:'margin-right:.25rem'},w),{onclick:()=>msgView(m.id,w)}))),
         el('td',{},
@@ -3123,7 +3129,9 @@ async function renderDeliveryTest(v){
   dlHtml.onclick=async()=>{const t=await apiRaw('/api/delivery/report?id='+encodeURIComponent(runId)+'&format=html');if(t.ok)downloadBlob(`delivery-${addr.value.trim()}-${runId}.html`,textBlob(t.text,'text/html'));};
   const openHtml=el('button',{class:'act plain'},'Open report');
   openHtml.onclick=async()=>{const t=await apiRaw('/api/delivery/report?id='+encodeURIComponent(runId)+'&format=html');if(!t.ok)return;const w=window.open('','_blank');if(w){w.document.open();w.document.write(t.text);w.document.close();}};
-  exportBtns.append(dlJson,dlHtml,openHtml);
+  const invBtn=el('button',{class:'act plain',title:'Public information about this address (OSINT); nothing runs until you press Run there'},'Investigate address');
+  invBtn.onclick=()=>osintFor(addr.value.trim(),runId?{delivery_run_id:runId}:null);
+  exportBtns.append(dlJson,dlHtml,openHtml,invBtn);
 
   // ---- diagnostic inbox ----------------------------------------------------
   // A one-time address; whatever arrives is analysed on the next poll and

@@ -10,7 +10,9 @@ delays its greeting).
 
 The rail calls the tab **Delivery**; the pills at the top of it switch between
 this *Address test* and [Account DNS](Account-DNS), which checks SPF, DKIM and
-DMARC for every domain hosted on this server in one scan.
+DMARC for every domain hosted on this server in one scan. A finished test also
+offers **Investigate address**, which opens [OSINT](OSINT) with the address
+filled in (nothing is looked up until you press Run there).
 
 Every check ends in one of five verdicts:
 
