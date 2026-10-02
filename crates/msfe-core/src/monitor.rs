@@ -196,6 +196,14 @@ fn run_with_dirs(cfg: &Config, dry: bool, in_dir: &Path, out_dir: &Path) -> Moni
         notes.push(n);
     }
 
+    // ---- 5. scheduled OSINT checks -------------------------------------------
+    for n in crate::osintmon::run_due(cfg, dry) {
+        if n.contains("alert sent") {
+            alerts_sent += 1;
+        }
+        notes.push(n);
+    }
+
     MonitorReport {
         cleaned,
         spool_repaired,

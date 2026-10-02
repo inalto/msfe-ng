@@ -55,6 +55,7 @@ msfe-ng delivery inbox <install [--dry-run] | uninstall [--dry-run] | status | n
 msfe-ng delivery testmail --from <hosted address> --to <address> [--tag <t>] [--follow <secs>] [--json]   send a real test message and follow it through the Exim log
 msfe-ng delivery osint <address> [--providers a,b] [--json | --html] [--force]   public-information lookup for an address (needs osint_enabled; exit 0 complete, 2 usage, 3 invalid/failed, 4 partial)
 msfe-ng delivery osint <providers [--json] | sweep>   print id, name, `configured`/`not configured` (key set; keyless sources are always configured) and disclosure for each source; delete reports past retention
+msfe-ng delivery osint monitor <list [--json] | add <address> [--sources a,b] [--interval-mins n] | remove <id|address> | enable <id> | disable <id> | run [--dry-run] [--id n] | history <id> [--json]>   scheduled OSINT checks (daily to weekly, a monthly usage budget, Telegram alerts on changes; exit 0 ok, 1 database or limit, 2 usage, 3 invalid input)
 msfe-ng delivery monitor <list [--json] | add <address> [--interval-mins n] [--audit] [--ip ..] [--selector ..] | remove <id|address> | run [--dry-run] [--id n]>   scheduled re-tests (history in MySQL, regressions to Telegram)
 msfe-ng acctdns scan [--user <u>] [--domain <d>] [--all] [--json]   SPF, DKIM and DMARC for every domain hosted here (subdomains with --all; exit 1 on a failure, 3 on a non-cPanel host)
 msfe-ng acctdns fix <domain> <spf|dkim|dmarc> [--record <r>] [--json]   install the record through cPanel's own installer (exit 1 when it refused)

@@ -8,7 +8,7 @@
 use crate::config::Config;
 use crate::db;
 use crate::json::Json;
-use crate::osint::{Finding, Group, OsintReport, Severity, SourceState};
+use crate::osint::{Finding, Group, OsintReport, RunState, Severity, SourceState};
 use crate::osintproviders::clean_text;
 
 pub const MIN_INTERVAL_MINS: u32 = 1440;
@@ -1182,6 +1182,345 @@ pub fn cooldown_ok(now: u64, last: Option<u64>, cooldown_mins: u32) -> bool {
     }
 }
 
+// ---- the scheduler ------------------------------------------------------------------
+
+/// Why a scheduled run did not produce a report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunSkip {
+    Disabled,
+    Busy,
+    RateLimited,
+    TooManyRuns,
+    Invalid(String),
+    Failed(String),
+}
+
+pub trait Runner {
+    fn run(&self, cfg: &Config, address: &str, sources: &[String]) -> Result<OsintReport, RunSkip>;
+}
+
+pub trait Notifier {
+    fn configured(&self) -> bool;
+    fn send(&self, text: &str) -> Result<(), String>;
+    fn now(&self) -> u64;
+    fn host(&self) -> String;
+}
+
+/// Runs the monitor's sources through the OSINT run controller, never from
+/// the interactive cache.
+pub struct RealRunner;
+
+impl Runner for RealRunner {
+    fn run(&self, cfg: &Config, address: &str, sources: &[String]) -> Result<OsintReport, RunSkip> {
+        use crate::osintrun::{self, StartError, StartOk};
+        let inputs =
+            osintrun::parse_inputs(address, sources, true, None).map_err(RunSkip::Invalid)?;
+        let id = match osintrun::start(cfg, inputs) {
+            Ok(StartOk::Started(id) | StartOk::Cached(id)) => id,
+            Err(StartError::Disabled) => return Err(RunSkip::Disabled),
+            Err(StartError::Busy(_)) => return Err(RunSkip::Busy),
+            Err(StartError::RateLimited(_)) => return Err(RunSkip::RateLimited),
+            Err(StartError::TooManyRuns) => return Err(RunSkip::TooManyRuns),
+            Err(StartError::Invalid(e)) => return Err(RunSkip::Invalid(e)),
+        };
+        let limit = std::time::Duration::from_secs(cfg.osint_deadline_secs + 15);
+        let t0 = std::time::Instant::now();
+        loop {
+            match osintrun::snapshot(&id) {
+                Some(r) if r.state != RunState::Running => return Ok(r),
+                Some(_) => {}
+                None => return Err(RunSkip::Failed("the run vanished".into())),
+            }
+            if t0.elapsed() >= limit {
+                osintrun::cancel(&id);
+                return Err(RunSkip::Failed("timed out".into()));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+}
+
+pub struct TelegramNotifier<'a>(pub &'a Config);
+
+impl Notifier for TelegramNotifier<'_> {
+    fn configured(&self) -> bool {
+        crate::telegram::configured(self.0)
+    }
+    fn send(&self, text: &str) -> Result<(), String> {
+        crate::telegram::send(self.0, text)
+    }
+    fn now(&self) -> u64 {
+        crate::osint::now_secs()
+    }
+    fn host(&self) -> String {
+        crate::diaginbox::hostname(self.0)
+    }
+}
+
+/// Clears the "pass running" marker however the pass ends.
+struct PassGuard<'a>(&'a dyn Store);
+impl Drop for PassGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.kv_set("osintmon_running", "0");
+    }
+}
+
+const GUARD_STALE_SECS: u64 = 600;
+
+/// Run every due monitor (public entry: the real runner and Telegram).
+pub fn run_due(cfg: &Config, dry: bool) -> Vec<String> {
+    run_due_with(
+        cfg,
+        &MysqlStore::new(cfg),
+        &RealRunner,
+        &TelegramNotifier(cfg),
+        dry,
+    )
+}
+
+fn runner_skip_note(addr: &str, s: &RunSkip) -> String {
+    let what = match s {
+        RunSkip::Busy => "a run for this address is in progress, will retry".to_string(),
+        RunSkip::RateLimited => "rate limited, will retry".to_string(),
+        RunSkip::TooManyRuns => "too many OSINT runs in progress, will retry".to_string(),
+        RunSkip::Disabled => "OSINT is switched off".to_string(),
+        RunSkip::Invalid(e) => format!("invalid: {}", clean_text(e, 120)),
+        RunSkip::Failed(e) => format!("run failed: {}", clean_text(e, 120)),
+    };
+    format!("osint monitor {addr}: {what}")
+}
+
+/// The run to compare against: the baseline pointer when it names a run of
+/// this monitor, else the run before this one; `None` makes this run the
+/// new baseline.
+fn baseline_report(store: &dyn Store, m: &Monitor, run_id: u32) -> Option<OsintReport> {
+    let by_pointer = store
+        .kv_get(&format!("osint_base_{}", m.id))
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|id| *id != run_id)
+        .and_then(|id| store.run_by_id(id).ok().flatten())
+        .filter(|(mon, _)| *mon == m.id)
+        .map(|(_, r)| r);
+    by_pointer.or_else(|| {
+        store
+            .previous_run(m.id, run_id)
+            .ok()
+            .flatten()
+            .map(|(_, r)| r)
+    })
+}
+
+pub fn run_due_with(
+    cfg: &Config,
+    store: &dyn Store,
+    runner: &dyn Runner,
+    notifier: &dyn Notifier,
+    dry: bool,
+) -> Vec<String> {
+    let mut notes = Vec::new();
+    if !cfg.osint_enabled {
+        return notes;
+    }
+    // no table yet, DB down or not configured: quiet, like Delivery monitors
+    let Ok(monitors) = store.list(None) else {
+        return notes;
+    };
+    let now = notifier.now();
+    let mut due: Vec<Monitor> = monitors.into_iter().filter(|m| m.due(now)).collect();
+    due.sort_by_key(|m| (m.last_run_at, m.id));
+    if due.is_empty() {
+        return notes;
+    }
+    if dry {
+        for m in &due {
+            notes.push(format!(
+                "osint monitor {}: due (every {} min) — dry run, not started",
+                clean_text(&m.address, 254),
+                m.interval_mins
+            ));
+        }
+        return notes;
+    }
+    let fresh = store
+        .kv_get("osintmon_running")
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|t| now.saturating_sub(t) < GUARD_STALE_SECS && t <= now)
+        .unwrap_or(false);
+    if fresh {
+        notes.push("osint monitors: previous pass still running".into());
+        return notes;
+    }
+    let _ = store.kv_set("osintmon_running", &now.to_string());
+    let _guard = PassGuard(store);
+    let host = clean_text(&notifier.host(), 100);
+    let infos = crate::osintproviders::infos(cfg);
+    let mut started = 0;
+    for m in due {
+        if started >= MAX_PER_PASS {
+            break;
+        }
+        let addr = clean_text(&m.address, 254);
+        let period = period_for(now);
+        let units = m
+            .sources
+            .iter()
+            .filter(|s| infos.iter().any(|i| i.id == s.as_str() && i.configured))
+            .count() as u32;
+        if cfg.osint_monitor_budget > 0 {
+            let used = store.usage_month(&period).unwrap_or(0);
+            if used + units > cfg.osint_monitor_budget {
+                let key = format!("alert_osint_budget_{period}");
+                if store.kv_get(&key).is_none() {
+                    notes.push(format!(
+                        "osint monitor {addr}: skipped, monthly budget reached ({used} of {} units)",
+                        cfg.osint_monitor_budget
+                    ));
+                    if notifier.configured() {
+                        let text = budget_text(&host, used, cfg.osint_monitor_budget, &period);
+                        match notifier.send(&text) {
+                            Ok(()) => {
+                                let _ = store.kv_set(&key, &now.to_string());
+                                notes.push("osint monitors: Telegram alert sent (budget)".into());
+                            }
+                            Err(e) => notes.push(format!(
+                                "osint monitors: Telegram failed: {}",
+                                clean_text(&e, 120)
+                            )),
+                        }
+                    } else {
+                        let _ = store.kv_set(&key, &now.to_string());
+                        notes
+                            .push("osint monitors: budget reached, Telegram not configured".into());
+                    }
+                }
+                continue;
+            }
+        }
+        started += 1;
+        let run_key = crate::deliveryrun::new_id();
+        if let Err(e) = store.usage_reserve(m.id, &period, units, &run_key) {
+            notes.push(format!(
+                "osint monitor {addr}: cannot reserve usage: {}",
+                clean_text(&e, 120)
+            ));
+            continue;
+        }
+        let began = std::time::Instant::now();
+        let mut report = match runner.run(cfg, &m.address, &m.sources) {
+            Ok(r) => r,
+            Err(skip) => {
+                let _ = store.usage_release(&run_key);
+                notes.push(runner_skip_note(&addr, &skip));
+                continue;
+            }
+        };
+        if report.state == RunState::Failed || report.state == RunState::Cancelled {
+            let _ = store.usage_release(&run_key);
+            notes.push(format!(
+                "osint monitor {addr}: run {}, nothing stored",
+                report.state.as_str()
+            ));
+            continue;
+        }
+        match store.get(m.id) {
+            Ok(Some(cur)) if cur.enabled => {}
+            _ => {
+                let _ = store.usage_release(&run_key);
+                notes.push(format!(
+                    "osint monitor {addr}: removed or disabled during the run, result dropped"
+                ));
+                continue;
+            }
+        }
+        let final_units = report
+            .sources
+            .iter()
+            .filter(|s| {
+                !matches!(
+                    s.state,
+                    SourceState::NotConfigured | SourceState::NotRequested
+                )
+            })
+            .count() as u32;
+        let _ = store.usage_settle(&run_key, final_units);
+        strip_assets(&mut report);
+        let (ok, bad) = source_counts(&report);
+        let summary = format!(
+            "{} finding(s), {ok} source(s) ok, {bad} not",
+            report.findings.len()
+        );
+        let duration_ms = began.elapsed().as_millis().min(u32::MAX as u128) as u32;
+        let run_id = match store.store_run(m.id, &report, duration_ms, &summary) {
+            Ok(id) => id,
+            Err(e) => {
+                notes.push(format!(
+                    "osint monitor {addr}: cannot store the run: {}",
+                    clean_text(&e, 160)
+                ));
+                continue;
+            }
+        };
+        let pointer = format!("osint_base_{}", m.id);
+        let Some(prev) = baseline_report(store, &m, run_id) else {
+            let _ = store.kv_set(&pointer, &run_id.to_string());
+            notes.push(format!("osint monitor {addr}: {summary} — baseline stored"));
+            continue;
+        };
+        notes.push(format!("osint monitor {addr}: {summary}"));
+        let delta = diff_reports(&prev, &report);
+        let texts = alert_texts(&host, &addr, &delta);
+        // false when a needed alert was held back or failed to send: the
+        // baseline then stays and the change is raised again
+        let mut all_done = true;
+        for (kind, text) in &texts {
+            let key = format!("alert_osint_{}_{}", m.id, kind.key_part());
+            let last = store
+                .kv_get(&key)
+                .and_then(|v| v.trim().parse::<u64>().ok());
+            if !cooldown_ok(now, last, cfg.alert_cooldown_mins) {
+                all_done = false;
+                notes.push(format!(
+                    "osint monitor {addr}: {} alert suppressed by the cooldown",
+                    kind.key_part()
+                ));
+                continue;
+            }
+            if !notifier.configured() {
+                notes.push(format!(
+                    "osint monitor {addr}: {} changes — Telegram not configured",
+                    kind.key_part()
+                ));
+                continue;
+            }
+            match notifier.send(text) {
+                Ok(()) => {
+                    let _ = store.kv_set(&key, &now.to_string());
+                    notes.push(format!(
+                        "osint monitor {addr}: Telegram alert sent ({})",
+                        kind.key_part()
+                    ));
+                }
+                Err(e) => {
+                    all_done = false;
+                    notes.push(format!(
+                        "osint monitor {addr}: Telegram failed: {}",
+                        clean_text(&e, 120)
+                    ));
+                }
+            }
+        }
+        if baseline_decision(!texts.is_empty(), all_done) {
+            let _ = store.kv_set(&pointer, &run_id.to_string());
+        }
+    }
+    notes
+}
+
+/// Drop runs past the retention window (the latest run of each monitor stays).
+pub fn prune(cfg: &Config, days: u32) -> Result<(), String> {
+    MysqlStore::new(cfg).prune(days)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1958,5 +2297,599 @@ mod change_tests {
         assert!(cooldown_ok(100 + 3600, Some(100), 60));
         assert!(cooldown_ok(50, Some(100), 0));
         assert!(!cooldown_ok(50, Some(100), 60));
+    }
+}
+
+#[cfg(test)]
+mod sched_tests {
+    use super::*;
+    use crate::osint::{
+        Confidence, Finding, Group, OsintReport, RunState, Severity, SourceState, SourceStatus,
+    };
+    use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
+
+    const T0: u64 = 1_000_000;
+
+    struct FakeRunner<'a> {
+        queue: RefCell<VecDeque<Result<OsintReport, RunSkip>>>,
+        calls: RefCell<Vec<(String, Vec<String>)>>,
+        hook: RefCell<Option<Box<dyn Fn() + 'a>>>,
+    }
+    impl<'a> FakeRunner<'a> {
+        fn new() -> Self {
+            FakeRunner {
+                queue: RefCell::new(VecDeque::new()),
+                calls: RefCell::new(vec![]),
+                hook: RefCell::new(None),
+            }
+        }
+        fn push(&self, r: Result<OsintReport, RunSkip>) {
+            self.queue.borrow_mut().push_back(r);
+        }
+    }
+    impl Runner for FakeRunner<'_> {
+        fn run(
+            &self,
+            _cfg: &Config,
+            address: &str,
+            sources: &[String],
+        ) -> Result<OsintReport, RunSkip> {
+            self.calls
+                .borrow_mut()
+                .push((address.to_string(), sources.to_vec()));
+            if let Some(h) = self.hook.borrow().as_ref() {
+                h();
+            }
+            self.queue
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or(Err(RunSkip::Failed("nothing canned".into())))
+        }
+    }
+
+    struct FakeNotifier {
+        configured: Cell<bool>,
+        fail: Cell<bool>,
+        sent: RefCell<Vec<String>>,
+        now: Cell<u64>,
+    }
+    impl FakeNotifier {
+        fn new() -> Self {
+            FakeNotifier {
+                configured: Cell::new(true),
+                fail: Cell::new(false),
+                sent: RefCell::new(vec![]),
+                now: Cell::new(T0),
+            }
+        }
+        fn sent(&self) -> usize {
+            self.sent.borrow().len()
+        }
+    }
+    impl Notifier for FakeNotifier {
+        fn configured(&self) -> bool {
+            self.configured.get()
+        }
+        fn send(&self, text: &str) -> Result<(), String> {
+            if self.fail.get() {
+                return Err("boom".into());
+            }
+            self.sent.borrow_mut().push(text.to_string());
+            Ok(())
+        }
+        fn now(&self) -> u64 {
+            self.now.get()
+        }
+        fn host(&self) -> String {
+            "host.test".into()
+        }
+    }
+
+    fn cfg() -> Config {
+        Config {
+            osint_enabled: true,
+            osint_monitor_budget: 0,
+            alert_cooldown_mins: 60,
+            ..Config::default()
+        }
+    }
+
+    fn fnd(url: &str) -> Finding {
+        Finding {
+            group: Group::Exposure,
+            confidence: Confidence::Medium,
+            confidence_reason: "r".into(),
+            severity: Severity::Info,
+            observed_at: 1,
+            event_at: None,
+            source_id: "gravatar".into(),
+            source_url: Some(url.into()),
+            title: format!("item {}", url.len()),
+            evidence: "EVID".into(),
+            limitations: vec![],
+            asset_id: Some("aaaaaaaaaaaaaaaa".into()),
+            asset_mime: Some("image/png".into()),
+        }
+    }
+    fn st(s: SourceState) -> Vec<(&'static str, SourceState)> {
+        vec![("gravatar", s)]
+    }
+    fn rpt(sources: Vec<(&str, SourceState)>, urls: &[&str]) -> OsintReport {
+        OsintReport {
+            run_id: "0123456789abcdef".into(),
+            address: "A@x.org".into(),
+            started: T0,
+            finished: Some(T0 + 1),
+            state: RunState::Complete,
+            cached: false,
+            planned: vec![],
+            sources: sources
+                .into_iter()
+                .map(|(i, s)| SourceStatus {
+                    id: i.into(),
+                    state: s,
+                    retry_after: None,
+                    detail: "d".into(),
+                })
+                .collect(),
+            findings: urls.iter().map(|u| fnd(u)).collect(),
+            delivery_run_id: None,
+            limitations: vec![],
+        }
+    }
+    fn mon(store: &FakeStore, addr: &str, sources: &[&str]) -> Monitor {
+        let v: Vec<String> = sources.iter().map(|s| s.to_string()).collect();
+        store.add(addr, "root", &v, 1440, 50).unwrap()
+    }
+    /// Make every monitor due, then run a pass.
+    fn pass(store: &FakeStore, r: &FakeRunner, n: &FakeNotifier) -> Vec<String> {
+        for m in store.list(None).unwrap() {
+            store.touch_last_run(m.id, 0).unwrap();
+        }
+        run_due_with(&cfg(), store, r, n, false)
+    }
+    fn ptr(store: &FakeStore, id: u32) -> Option<String> {
+        store.kv_get(&format!("osint_base_{id}"))
+    }
+    fn has(notes: &[String], what: &str) -> bool {
+        notes.iter().any(|n| n.contains(what))
+    }
+
+    #[test]
+    fn disabled_or_nothing_due_does_nothing() {
+        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+        mon(&s, "a@x.org", &["gravatar"]);
+        let off = Config {
+            osint_enabled: false,
+            ..cfg()
+        };
+        assert!(run_due_with(&off, &s, &r, &n, false).is_empty());
+        assert!(r.calls.borrow().is_empty());
+        // enabled but nothing due: the monitor ran just now
+        s.touch_last_run(1, T0).unwrap();
+        assert!(run_due_with(&cfg(), &s, &r, &n, false).is_empty());
+        let empty = FakeStore::default();
+        assert!(run_due_with(&cfg(), &empty, &r, &n, false).is_empty());
+        assert!(empty.kv_get("osintmon_running").is_none());
+    }
+
+    #[test]
+    fn first_run_is_a_baseline_without_alert() {
+        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+        mon(&s, "A@x.org", &["gravatar", "rdap"]);
+        r.push(Ok(rpt(st(SourceState::Matched), &["https://e.org/1"])));
+        let notes = pass(&s, &r, &n);
+        assert!(has(&notes, "baseline stored"), "{notes:?}");
+        assert!(!has(&notes, "alert sent"));
+        assert_eq!(n.sent(), 0);
+        assert_eq!(ptr(&s, 1).as_deref(), Some("1"));
+        assert_eq!(s.runs(1, 10).unwrap().len(), 1);
+        // the stored address and the approved set reach the runner exactly
+        let c = r.calls.borrow();
+        assert_eq!(c[0].0, "A@x.org");
+        assert_eq!(c[0].1, vec!["gravatar".to_string(), "rdap".to_string()]);
+        assert_eq!(
+            s.st.borrow().monitors[0].last_summary,
+            "1 finding(s), 1 source(s) ok, 0 not"
+        );
+    }
+
+    #[test]
+    fn a_new_finding_alerts_once() {
+        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+        mon(&s, "A@x.org", &["gravatar"]);
+        r.push(Ok(rpt(st(SourceState::Matched), &["https://e.org/1"])));
+        pass(&s, &r, &n);
+        r.push(Ok(rpt(
+            st(SourceState::Matched),
+            &["https://e.org/1", "https://e.org/2"],
+        )));
+        let notes = pass(&s, &r, &n);
+        assert!(has(&notes, "Telegram alert sent"), "{notes:?}");
+        assert_eq!(n.sent(), 1);
+        let text = n.sent.borrow()[0].clone();
+        assert!(text.contains("A@x.org") && text.contains("host.test"));
+        assert!(!text.contains("EVID") && !text.contains("http"));
+        assert_eq!(ptr(&s, 1).as_deref(), Some("2"));
+        // an identical third run is quiet
+        r.push(Ok(rpt(
+            st(SourceState::Matched),
+            &["https://e.org/1", "https://e.org/2"],
+        )));
+        let notes = pass(&s, &r, &n);
+        assert!(!has(&notes, "alert sent"));
+        assert_eq!(n.sent(), 1);
+        assert_eq!(ptr(&s, 1).as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn a_failed_send_keeps_the_baseline_and_is_retried() {
+        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+        mon(&s, "a@x.org", &["gravatar"]);
+        r.push(Ok(rpt(st(SourceState::Matched), &[])));
+        pass(&s, &r, &n);
+        n.fail.set(true);
+        r.push(Ok(rpt(st(SourceState::Matched), &["https://e.org/2"])));
+        let notes = pass(&s, &r, &n);
+        assert!(has(&notes, "Telegram failed: boom"), "{notes:?}");
+        assert!(!has(&notes, "alert sent"));
+        assert_eq!(ptr(&s, 1).as_deref(), Some("1"));
+        // no cooldown was set by the failure, so the retry is not held back
+        n.fail.set(false);
+        r.push(Ok(rpt(st(SourceState::Matched), &["https://e.org/2"])));
+        let notes = pass(&s, &r, &n);
+        assert!(has(&notes, "Telegram alert sent"));
+        assert_eq!(n.sent(), 1);
+        assert_eq!(ptr(&s, 1).as_deref(), Some("3"));
+        r.push(Ok(rpt(st(SourceState::Matched), &["https://e.org/2"])));
+        pass(&s, &r, &n);
+        assert_eq!(n.sent(), 1);
+    }
+
+    #[test]
+    fn unconfigured_telegram_advances_the_baseline_without_spam() {
+        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+        n.configured.set(false);
+        mon(&s, "a@x.org", &["gravatar"]);
+        r.push(Ok(rpt(st(SourceState::Matched), &[])));
+        pass(&s, &r, &n);
+        r.push(Ok(rpt(st(SourceState::Matched), &["https://e.org/2"])));
+        let notes = pass(&s, &r, &n);
+        assert!(has(&notes, "Telegram not configured"), "{notes:?}");
+        assert!(!has(&notes, "alert sent"));
+        assert_eq!(ptr(&s, 1).as_deref(), Some("2"));
+        r.push(Ok(rpt(st(SourceState::Matched), &["https://e.org/2"])));
+        let notes = pass(&s, &r, &n);
+        assert!(!has(&notes, "not configured"));
+        assert_eq!(n.sent(), 0);
+    }
+
+    #[test]
+    fn the_cooldown_holds_an_alert_back_without_losing_the_change() {
+        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+        mon(&s, "a@x.org", &["gravatar"]);
+        r.push(Ok(rpt(st(SourceState::Matched), &[])));
+        pass(&s, &r, &n);
+        r.push(Ok(rpt(st(SourceState::Matched), &["https://e.org/a"])));
+        pass(&s, &r, &n);
+        assert_eq!(n.sent(), 1);
+        assert_eq!(ptr(&s, 1).as_deref(), Some("2"));
+        // ten minutes later another finding: held back, baseline stays
+        n.now.set(T0 + 600);
+        r.push(Ok(rpt(
+            st(SourceState::Matched),
+            &["https://e.org/a", "https://e.org/b"],
+        )));
+        let notes = pass(&s, &r, &n);
+        assert!(has(&notes, "cooldown"), "{notes:?}");
+        assert!(!has(&notes, "alert sent"));
+        assert_eq!(n.sent(), 1);
+        assert_eq!(ptr(&s, 1).as_deref(), Some("2"));
+        // after the window the same change is alerted
+        n.now.set(T0 + 3601);
+        r.push(Ok(rpt(
+            st(SourceState::Matched),
+            &["https://e.org/a", "https://e.org/b"],
+        )));
+        let notes = pass(&s, &r, &n);
+        assert!(has(&notes, "Telegram alert sent"), "{notes:?}");
+        assert_eq!(n.sent(), 2);
+        assert_eq!(ptr(&s, 1).as_deref(), Some("4"));
+    }
+
+    #[test]
+    fn a_source_going_bad_alerts_once_and_a_flapping_one_never() {
+        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+        mon(&s, "a@x.org", &["gravatar"]);
+        r.push(Ok(rpt(st(SourceState::Matched), &[])));
+        pass(&s, &r, &n);
+        r.push(Ok(rpt(st(SourceState::Failed), &[])));
+        let notes = pass(&s, &r, &n);
+        assert!(has(&notes, "Telegram alert sent"), "{notes:?}");
+        assert_eq!(n.sent(), 1);
+        assert!(n.sent.borrow()[0].contains("source problem"));
+        r.push(Ok(rpt(st(SourceState::Failed), &[])));
+        pass(&s, &r, &n);
+        assert_eq!(n.sent(), 1);
+        // matched -> rate_limited -> matched: nothing at all
+        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+        mon(&s, "a@x.org", &["gravatar"]);
+        for state in [
+            SourceState::Matched,
+            SourceState::RateLimited,
+            SourceState::Matched,
+        ] {
+            r.push(Ok(rpt(st(state), &[])));
+            pass(&s, &r, &n);
+        }
+        assert_eq!(n.sent(), 0);
+    }
+
+    #[test]
+    fn a_monitor_removed_or_disabled_while_running_leaves_nothing() {
+        for remove in [true, false] {
+            let (s, n) = (FakeStore::default(), FakeNotifier::new());
+            mon(&s, "a@x.org", &["gravatar"]);
+            let r = FakeRunner::new();
+            r.push(Ok(rpt(st(SourceState::Matched), &["https://e.org/1"])));
+            {
+                let sref = &s;
+                *r.hook.borrow_mut() = Some(Box::new(move || {
+                    if remove {
+                        sref.remove(1).unwrap();
+                    } else {
+                        sref.set_enabled(1, false).unwrap();
+                    }
+                }));
+                let notes = pass(&s, &r, &n);
+                assert!(has(&notes, "removed or disabled"), "{notes:?}");
+            }
+            assert!(s.st.borrow().runs.is_empty());
+            assert!(s.st.borrow().usage.is_empty());
+            assert_eq!(n.sent(), 0);
+            assert!(ptr(&s, 1).is_none());
+        }
+    }
+
+    #[test]
+    fn budget_cap_skips_and_alerts_once_per_month() {
+        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+        mon(&s, "a@x.org", &["gravatar", "rdap", "openpgp"]);
+        let period = period_for(T0);
+        s.usage_reserve(1, &period, 2, "other1").unwrap();
+        let c = Config {
+            osint_monitor_budget: 3,
+            ..cfg()
+        };
+        s.touch_last_run(1, 0).unwrap();
+        let notes = run_due_with(&c, &s, &r, &n, false);
+        assert!(has(&notes, "budget"), "{notes:?}");
+        assert!(r.calls.borrow().is_empty());
+        assert_eq!(n.sent(), 1);
+        assert!(n.sent.borrow()[0].contains("budget"));
+        assert_eq!(s.usage_month(&period).unwrap(), 2, "nothing reserved");
+        assert!(s.kv_get(&format!("alert_osint_budget_{period}")).is_some());
+        // later in the month: still skipped, no second alert
+        n.now.set(T0 + 7200);
+        let notes = run_due_with(&c, &s, &r, &n, false);
+        assert!(!has(&notes, "alert sent"));
+        assert_eq!(n.sent(), 1);
+        assert!(r.calls.borrow().is_empty());
+        // a cap of 0 is unlimited
+        r.push(Ok(rpt(st(SourceState::Matched), &[])));
+        let c0 = Config {
+            osint_monitor_budget: 0,
+            ..cfg()
+        };
+        run_due_with(&c0, &s, &r, &n, false);
+        assert_eq!(r.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn usage_is_reserved_then_settled_to_the_real_units() {
+        let seen = RefCell::new(0u32);
+        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+        mon(&s, "a@x.org", &["gravatar", "rdap", "openpgp"]);
+        {
+            let sref = &s;
+            let seen = &seen;
+            *r.hook.borrow_mut() = Some(Box::new(move || {
+                *seen.borrow_mut() = sref.usage_month(&period_for(T0)).unwrap();
+            }));
+            r.push(Ok(rpt(
+                vec![
+                    ("gravatar", SourceState::Matched),
+                    ("rdap", SourceState::NoMatch),
+                    ("openpgp", SourceState::NotConfigured),
+                ],
+                &[],
+            )));
+            pass(&s, &r, &n);
+        }
+        assert_eq!(*seen.borrow(), 3, "reserved while running");
+        assert_eq!(s.usage_month(&period_for(T0)).unwrap(), 2, "settled");
+    }
+
+    #[test]
+    fn a_run_that_cannot_start_releases_and_is_retried() {
+        for skip in [
+            RunSkip::Busy,
+            RunSkip::RateLimited,
+            RunSkip::TooManyRuns,
+            RunSkip::Disabled,
+            RunSkip::Invalid("bad".into()),
+            RunSkip::Failed("down".into()),
+        ] {
+            let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+            mon(&s, "a@x.org", &["gravatar"]);
+            r.push(Err(skip.clone()));
+            let notes = pass(&s, &r, &n);
+            assert_eq!(notes.len(), 1, "{skip:?} {notes:?}");
+            assert!(s.st.borrow().usage.is_empty(), "{skip:?}");
+            assert!(s.st.borrow().runs.is_empty(), "{skip:?}");
+            assert_eq!(n.sent(), 0);
+        }
+        // last_run_at is untouched, so the next pass tries again
+        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+        mon(&s, "a@x.org", &["gravatar"]);
+        r.push(Err(RunSkip::Busy));
+        let notes = run_due_with(&cfg(), &s, &r, &n, false);
+        assert!(has(&notes, "retry"), "{notes:?}");
+        assert_eq!(s.st.borrow().monitors[0].last_run_at, 0);
+        r.push(Ok(rpt(st(SourceState::Matched), &[])));
+        run_due_with(&cfg(), &s, &r, &n, false);
+        assert_eq!(s.runs(1, 5).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn at_most_max_per_pass_run_oldest_first() {
+        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+        for i in 0..5 {
+            mon(&s, &format!("u{i}@x.org"), &["gravatar"]);
+            s.touch_last_run(i + 1, 100 + (5 - i) as u64).unwrap();
+        }
+        for _ in 0..5 {
+            r.push(Ok(rpt(st(SourceState::Matched), &[])));
+        }
+        run_due_with(&cfg(), &s, &r, &n, false);
+        let c = r.calls.borrow();
+        assert_eq!(c.len(), MAX_PER_PASS);
+        // u4 has the oldest last_run_at, then u3
+        assert_eq!(c[0].0, "u4@x.org");
+        assert_eq!(c[1].0, "u3@x.org");
+    }
+
+    #[test]
+    fn the_running_guard_blocks_a_fresh_pass_and_ignores_a_stale_one() {
+        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+        mon(&s, "a@x.org", &["gravatar"]);
+        s.touch_last_run(1, 0).unwrap();
+        s.kv_set("osintmon_running", &(T0 - 100).to_string())
+            .unwrap();
+        let notes = run_due_with(&cfg(), &s, &r, &n, false);
+        assert_eq!(
+            notes,
+            vec!["osint monitors: previous pass still running".to_string()]
+        );
+        assert!(r.calls.borrow().is_empty());
+        s.kv_set("osintmon_running", &(T0 - 601).to_string())
+            .unwrap();
+        r.push(Ok(rpt(st(SourceState::Matched), &[])));
+        let notes = run_due_with(&cfg(), &s, &r, &n, false);
+        assert!(has(&notes, "baseline stored"));
+        // the guard is cleared at the end
+        let v: u64 = s.kv_get("osintmon_running").unwrap().parse().unwrap();
+        assert_eq!(v, 0);
+        // also when the pass ends early (a skipped run)
+        s.touch_last_run(1, 0).unwrap();
+        r.push(Err(RunSkip::Busy));
+        run_due_with(&cfg(), &s, &r, &n, false);
+        assert_eq!(s.kv_get("osintmon_running").as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn a_dry_run_starts_nothing() {
+        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+        mon(&s, "a@x.org", &["gravatar"]);
+        s.touch_last_run(1, 0).unwrap();
+        let notes = run_due_with(&cfg(), &s, &r, &n, true);
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("dry run, not started"), "{notes:?}");
+        assert!(r.calls.borrow().is_empty());
+        assert!(s.st.borrow().usage.is_empty());
+        assert!(s.kv_get("osintmon_running").is_none());
+    }
+
+    #[test]
+    fn avatar_ids_never_reach_the_store() {
+        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+        mon(&s, "a@x.org", &["gravatar"]);
+        r.push(Ok(rpt(st(SourceState::Matched), &["https://e.org/1"])));
+        pass(&s, &r, &n);
+        let json = s.st.borrow().runs[0].1.clone();
+        assert!(!json.contains("aaaaaaaaaaaaaaaa"), "{json}");
+        assert!(!json.contains("image/png"));
+    }
+
+    #[test]
+    fn a_failed_runner_leaves_history_untouched() {
+        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+        mon(&s, "a@x.org", &["gravatar"]);
+        r.push(Ok(rpt(st(SourceState::Matched), &[])));
+        pass(&s, &r, &n);
+        r.push(Err(RunSkip::Failed("timed out".into())));
+        let notes = pass(&s, &r, &n);
+        assert!(has(&notes, "timed out"));
+        assert_eq!(s.runs(1, 10).unwrap().len(), 1);
+        assert_eq!(ptr(&s, 1).as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn a_missing_baseline_falls_back_to_the_previous_run() {
+        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+        mon(&s, "a@x.org", &["gravatar"]);
+        r.push(Ok(rpt(st(SourceState::Matched), &[])));
+        pass(&s, &r, &n);
+        for bad in ["999", "junk", ""] {
+            s.kv_set("osint_base_1", bad).unwrap();
+            let before = n.sent();
+            r.push(Ok(rpt(st(SourceState::Matched), &["https://e.org/x"])));
+            // the previous run is the one just before this one
+            let notes = pass(&s, &r, &n);
+            let _ = notes;
+            // the first bad pass diffs against run 1 and alerts; later ones
+            // already contain the finding
+            if bad == "999" {
+                assert_eq!(n.sent(), before + 1);
+            }
+        }
+        // a baseline that points at another monitor's run is invalid too
+        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+        mon(&s, "a@x.org", &["gravatar"]);
+        mon(&s, "b@x.org", &["gravatar"]);
+        r.push(Ok(rpt(st(SourceState::Matched), &[])));
+        r.push(Ok(rpt(st(SourceState::Matched), &[])));
+        pass(&s, &r, &n);
+        s.kv_set("osint_base_1", "2").unwrap();
+        r.push(Ok(rpt(st(SourceState::Matched), &["https://e.org/y"])));
+        r.push(Ok(rpt(st(SourceState::Matched), &["https://e.org/y"])));
+        pass(&s, &r, &n);
+        assert_eq!(n.sent(), 2);
+    }
+
+    #[test]
+    fn a_pointer_to_a_pruned_run_with_no_history_is_a_new_baseline() {
+        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+        mon(&s, "a@x.org", &["gravatar"]);
+        s.kv_set("osint_base_1", "77").unwrap();
+        r.push(Ok(rpt(st(SourceState::Matched), &["https://e.org/1"])));
+        let notes = pass(&s, &r, &n);
+        assert!(has(&notes, "baseline stored"));
+        assert_eq!(n.sent(), 0);
+        assert_eq!(ptr(&s, 1).as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn validation_findings_are_history_only() {
+        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+        mon(&s, "a@x.org", &["gravatar"]);
+        r.push(Ok(rpt(st(SourceState::Matched), &[])));
+        pass(&s, &r, &n);
+        let mut rep = rpt(st(SourceState::Matched), &["https://e.org/v"]);
+        rep.findings[0].group = Group::Validation;
+        r.push(Ok(rep));
+        pass(&s, &r, &n);
+        assert_eq!(n.sent(), 0);
+        assert_eq!(ptr(&s, 1).as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn disabled_monitors_do_not_run() {
+        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+        mon(&s, "a@x.org", &["gravatar"]);
+        s.set_enabled(1, false).unwrap();
+        assert!(pass(&s, &r, &n).is_empty());
+        assert!(r.calls.borrow().is_empty());
     }
 }

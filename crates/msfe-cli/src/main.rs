@@ -95,7 +95,17 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
             "--json",
             "--html",
         ]),
-        ("delivery", Some("osint")) => Some(&["--providers", "--json", "--html", "--force"]),
+        ("delivery", Some("osint")) => Some(&[
+            "--providers",
+            "--json",
+            "--html",
+            "--force",
+            // `osint monitor ...`
+            "--sources",
+            "--interval-mins",
+            "--dry-run",
+            "--id",
+        ]),
         ("delivery", _) => Some(NONE),
         ("acctdns", Some("scan")) => Some(&["--user", "--domain", "--all", "--json"]),
         ("acctdns", Some("fix")) => Some(&["--record", "--json"]),
@@ -138,7 +148,7 @@ fn usage_of(cmd: &str) -> &'static str {
         "backup" => "msfe-ng backup <file.tar.gz>   (alias: snapshot export --only msfe)",
         "restore" => "msfe-ng restore <file.tar.gz> [--yes]   (alias: snapshot import --only msfe)",
         "conf" => "msfe-ng conf <test [--no-lint] [--json] [--with <id>=<file>]... | test-message <clean|gtube|eicar|file.eml> [--offline] [--json] | grep <text>>",
-        "delivery" => "msfe-ng delivery <test <address> [--ip <sending ip>] [--selector <dkim selector>] [--audit] [--days <1-7>] [--json | --html] [--force] | eml <file.eml> [--bounce] [--address <a>] [--ip <ip>] [--selector <s>] [--audit] [--json | --html] | inbox <install [--dry-run] | uninstall [--dry-run] | status | new | poll <token> [--json] | remove <token> | sweep> | testmail --from <local address> --to <address> [--tag <t>] [--follow <secs>] [--json] | monitor <list [--json] | add <address> [--interval-mins n] [--audit] [--ip ..] [--selector ..] [--days n] | remove <id|address> | run [--dry-run] [--id n]> | osint <address> [--providers a,b] [--json | --html] [--force] | osint providers [--json] | osint sweep>",
+        "delivery" => "msfe-ng delivery <test <address> [--ip <sending ip>] [--selector <dkim selector>] [--audit] [--days <1-7>] [--json | --html] [--force] | eml <file.eml> [--bounce] [--address <a>] [--ip <ip>] [--selector <s>] [--audit] [--json | --html] | inbox <install [--dry-run] | uninstall [--dry-run] | status | new | poll <token> [--json] | remove <token> | sweep> | testmail --from <local address> --to <address> [--tag <t>] [--follow <secs>] [--json] | monitor <list [--json] | add <address> [--interval-mins n] [--audit] [--ip ..] [--selector ..] [--days n] | remove <id|address> | run [--dry-run] [--id n]> | osint <address> [--providers a,b] [--json | --html] [--force] | osint providers [--json] | osint sweep | osint monitor <list [--json] | add <address> [--sources a,b] [--interval-mins n] | remove <id|address> | enable <id> | disable <id> | run [--dry-run] [--id n] | history <id> [--json]>>",
         "acctdns" => "msfe-ng acctdns <scan [--user <account>] [--domain <domain>] [--all] [--json] | fix <domain> <spf|dkim|dmarc> [--record <record>] [--json]>",
         "footers" => "msfe-ng footers <status [--json] | set \"<directive>\" on|off [\"<directive>\" on|off]... [--dry-run] | off [--dry-run] | restore [<backup>] [--dry-run] | backups>",
         "dmarc" => "msfe-ng dmarc <fetch [--dry-run] [--keep] [--json] | import <file.xml|.gz|.zip|.eml>... [--json] | status [--json] | test | prune>",
@@ -859,6 +869,7 @@ fn cmd_housekeeping() -> ExitCode {
     msfe_core::diaginbox::sweep();
     msfe_core::osintrun::sweep(cfg.osint_retention_hours.saturating_mul(3600));
     let _ = msfe_core::deliverymon::prune(&cfg, 90);
+    let _ = msfe_core::osintmon::prune(&cfg, cfg.osint_history_days);
     match msfe_core::housekeeping::prune(&cfg, days) {
         Ok(()) => {
             println!("housekeeping: pruned maillog/quarantine rows older than {days} days");
@@ -3019,6 +3030,272 @@ fn osint_default_sources(infos: &[msfe_core::osintproviders::Info]) -> Vec<Strin
         .collect()
 }
 
+/// The parts of `delivery osint monitor <sub> ...`: flags with a value and
+/// plain switches are told apart, so a value is never read as a positional.
+struct MonitorArgs {
+    positional: Vec<String>,
+    sources: Option<String>,
+    interval: Option<String>,
+    id: Option<String>,
+    json: bool,
+    dry: bool,
+}
+
+fn parse_monitor_args(rest: &[String]) -> MonitorArgs {
+    let mut a = MonitorArgs {
+        positional: vec![],
+        sources: None,
+        interval: None,
+        id: None,
+        json: false,
+        dry: false,
+    };
+    let mut it = rest.iter();
+    while let Some(x) = it.next() {
+        match x.as_str() {
+            "--sources" => a.sources = it.next().cloned(),
+            "--interval-mins" => a.interval = it.next().cloned(),
+            "--id" => a.id = it.next().cloned(),
+            "--json" => a.json = true,
+            "--dry-run" => a.dry = true,
+            f if f.starts_with('-') => {}
+            _ => a.positional.push(x.clone()),
+        }
+    }
+    a
+}
+
+/// Validate `monitor add` input: the address, the source set (the configured
+/// default when none is named; `hunter` only when named) and the interval
+/// (clamped to the daily minimum). The error is a message for exit code 3.
+fn monitor_add_input(
+    cfg: &Config,
+    infos: &[msfe_core::osintproviders::Info],
+    address: &str,
+    sources: Option<&str>,
+    interval: Option<&str>,
+) -> Result<(Vec<String>, u32), String> {
+    msfe_core::netguard::parse_address(address.trim())?;
+    let wanted: Vec<String> = match sources {
+        Some(v) => v
+            .split(',')
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .collect(),
+        None => osint_default_sources(infos),
+    };
+    let sources = msfe_core::osintmon::validate_sources(&wanted, cfg)?;
+    let mins = match interval {
+        Some(v) => v
+            .trim()
+            .parse::<u32>()
+            .map_err(|_| format!("bad interval '{v}'"))?,
+        None => msfe_core::osintmon::DEFAULT_INTERVAL_MINS,
+    };
+    Ok((sources, msfe_core::osintmon::clamp_interval(mins)))
+}
+
+fn cmd_osint_monitor(cfg: &Config, rest: &[String]) -> ExitCode {
+    use msfe_core::osintmon::{self, Store};
+    let a = parse_monitor_args(rest);
+    let store = osintmon::MysqlStore::new(cfg);
+    let db_err = |e: String| -> ExitCode {
+        eprintln!("msfe-ng delivery osint monitor: {e}\n(the monitors live in MySQL: is the database configured and migration 0006 applied? `msfe-ng db-migrate`)");
+        ExitCode::from(1)
+    };
+    let usage = || -> ExitCode {
+        eprintln!("usage: {}", usage_of("delivery"));
+        ExitCode::from(2)
+    };
+    let id_arg = |v: Option<&String>| v.and_then(|s| s.parse::<u32>().ok());
+    match a.positional.first().map(String::as_str) {
+        Some("list") => {
+            match store.list(None) {
+                Ok(ms) => {
+                    if a.json {
+                        println!(
+                            "{}",
+                            msfe_core::json::Json::Array(ms.iter().map(|m| m.to_json()).collect())
+                        );
+                    } else if ms.is_empty() {
+                        println!("no OSINT monitors (add one: msfe-ng delivery osint monitor add <address>)");
+                    } else {
+                        for m in ms {
+                            println!(
+                                "{:<5} {:<40} every {:>5} min  {}  last {}  [{}]  {}",
+                                m.id,
+                                m.address,
+                                m.interval_mins,
+                                if m.enabled { "on " } else { "off" },
+                                if m.last_run_at == 0 {
+                                    "never".to_string()
+                                } else {
+                                    fmt_when(m.last_run_at)
+                                },
+                                m.sources.join(","),
+                                m.last_summary
+                            );
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => db_err(e),
+            }
+        }
+        Some("add") => {
+            let Some(address) = a.positional.get(1) else {
+                return usage();
+            };
+            let infos = msfe_core::osintproviders::infos(cfg);
+            let (sources, mins) = match monitor_add_input(
+                cfg,
+                &infos,
+                address,
+                a.sources.as_deref(),
+                a.interval.as_deref(),
+            ) {
+                Ok(x) => x,
+                Err(e) => {
+                    eprintln!("msfe-ng delivery osint monitor: {e}");
+                    return ExitCode::from(3);
+                }
+            };
+            match store.add(address.trim(), "", &sources, mins, cfg.osint_max_monitors) {
+                Ok(m) => {
+                    println!(
+                        "monitor {} for {} every {} min, sources {} (first run at the next `msfe-ng monitor` pass; it stores a baseline and does not alert)",
+                        m.id,
+                        m.address,
+                        m.interval_mins,
+                        m.sources.join(",")
+                    );
+                    if !cfg.osint_enabled {
+                        println!("note: osint_enabled is false, so monitors do not run until it is switched on");
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("msfe-ng delivery osint monitor: {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        Some("remove") => {
+            let Some(what) = a.positional.get(1) else {
+                return usage();
+            };
+            let id = match what.parse::<u32>() {
+                Ok(id) => Some(id),
+                // the address is matched exactly: the local part is case-sensitive
+                Err(_) => store
+                    .list(None)
+                    .ok()
+                    .and_then(|ms| ms.into_iter().find(|m| m.address == *what).map(|m| m.id)),
+            };
+            match id {
+                Some(id) => match store.remove(id) {
+                    Ok(true) => {
+                        println!("removed monitor {id} with its history and usage");
+                        ExitCode::SUCCESS
+                    }
+                    Ok(false) => {
+                        eprintln!("no monitor {id}");
+                        ExitCode::from(1)
+                    }
+                    Err(e) => db_err(e),
+                },
+                None => {
+                    eprintln!("no monitor for {what}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        Some(sw @ ("enable" | "disable")) => {
+            let Some(id) = id_arg(a.positional.get(1)) else {
+                return usage();
+            };
+            match store.get(id) {
+                Ok(Some(_)) => match store.set_enabled(id, sw == "enable") {
+                    Ok(()) => {
+                        println!("monitor {id} {sw}d");
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => db_err(e),
+                },
+                Ok(None) => {
+                    eprintln!("no monitor {id}");
+                    ExitCode::from(1)
+                }
+                Err(e) => db_err(e),
+            }
+        }
+        Some("run") => {
+            if let Some(raw) = &a.id {
+                let Ok(id) = raw.parse::<u32>() else {
+                    return usage();
+                };
+                match store.get(id) {
+                    Ok(Some(m)) => {
+                        if !m.enabled {
+                            println!("monitor {id} is disabled and will not run (enable it first)");
+                        } else if a.dry {
+                            println!(
+                                "monitor {id}: would be run now (dry run, schedule unchanged)"
+                            );
+                        } else if let Err(e) = store.touch_last_run(id, 0) {
+                            return db_err(e);
+                        }
+                    }
+                    Ok(None) => {
+                        eprintln!("no monitor {id}");
+                        return ExitCode::from(1);
+                    }
+                    Err(e) => return db_err(e),
+                }
+            }
+            for n in osintmon::run_due(cfg, a.dry) {
+                println!("{n}");
+            }
+            ExitCode::SUCCESS
+        }
+        Some("history") => {
+            let Some(id) = id_arg(a.positional.get(1)) else {
+                return usage();
+            };
+            match store.runs(id, osintmon::KEEP_RUNS) {
+                Ok(rows) => {
+                    if a.json {
+                        println!(
+                            "{}",
+                            msfe_core::json::Json::Array(
+                                rows.iter().map(|r| r.to_json()).collect()
+                            )
+                        );
+                    } else if rows.is_empty() {
+                        println!("no runs stored for monitor {id}");
+                    } else {
+                        for r in rows {
+                            println!(
+                                "{:<6} {}  {:<9} {:>3} finding(s)  {} source(s) ok, {} not  {} ms",
+                                r.id,
+                                fmt_when(r.started_at),
+                                r.state,
+                                r.n_findings,
+                                r.n_sources_ok,
+                                r.n_sources_bad,
+                                r.duration_ms
+                            );
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => db_err(e),
+            }
+        }
+        _ => usage(),
+    }
+}
+
 fn cmd_delivery_osint(rest: &[String]) -> ExitCode {
     use msfe_core::json::Json;
     use msfe_core::osint::RunState;
@@ -3060,6 +3337,9 @@ fn cmd_delivery_osint(rest: &[String]) -> ExitCode {
     if rest.first().map(String::as_str) == Some("sweep") {
         osintrun::sweep(cfg.osint_retention_hours * 3600);
         return ExitCode::SUCCESS;
+    }
+    if rest.first().map(String::as_str) == Some("monitor") {
+        return cmd_osint_monitor(&cfg, &rest[1..]);
     }
     let Some(addr) = rest
         .iter()
@@ -3914,6 +4194,106 @@ mod tests {
             rejected_flag("delivery", Some("osint"), &a(&["--nonsense"])),
             Some("--nonsense")
         );
+    }
+
+    #[test]
+    fn osint_monitor_flags_are_accepted_and_the_old_ones_still_work() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for f in [
+            "--sources",
+            "--interval-mins",
+            "--dry-run",
+            "--id",
+            "--json",
+        ] {
+            assert!(rejected_flag("delivery", Some("osint"), &a(&["monitor", f, "x"])).is_none());
+        }
+        assert!(rejected_flag(
+            "delivery",
+            Some("osint"),
+            &a(&["x@y.org", "--providers", "a"])
+        )
+        .is_none());
+        assert_eq!(
+            rejected_flag("delivery", Some("osint"), &a(&["monitor", "--bogus"])),
+            Some("--bogus")
+        );
+        // other delivery subcommands did not gain the flags
+        assert_eq!(
+            rejected_flag("delivery", Some("inbox"), &a(&["--sources"])),
+            Some("--sources")
+        );
+        let u = usage_of("delivery");
+        assert!(u.contains(
+            "osint monitor <list [--json] | add <address> [--sources a,b] [--interval-mins n]"
+        ));
+        assert!(u.contains("history <id> [--json]"));
+        assert!(u.contains("osint <address> [--providers a,b] [--json | --html] [--force]"));
+    }
+
+    #[test]
+    fn monitor_args_do_not_mistake_values_for_positionals() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let p = parse_monitor_args(&a(&[
+            "add",
+            "u@x.org",
+            "--sources",
+            "gravatar,rdap",
+            "--interval-mins",
+            "2000",
+        ]));
+        assert_eq!(p.positional, vec!["add", "u@x.org"]);
+        assert_eq!(p.sources.as_deref(), Some("gravatar,rdap"));
+        assert_eq!(p.interval.as_deref(), Some("2000"));
+        let p = parse_monitor_args(&a(&["run", "--dry-run", "--id", "4"]));
+        assert!(p.dry && p.id.as_deref() == Some("4") && p.positional == vec!["run"]);
+    }
+
+    #[test]
+    fn monitor_add_validates_address_sources_and_interval() {
+        let cfg = Config::default();
+        let infos = [
+            info("delivery", true),
+            info("gravatar", true),
+            info("hibp", false),
+            info("hunter", true),
+        ];
+        let ok = |addr: &str, src: Option<&str>, iv: Option<&str>| {
+            monitor_add_input(&cfg, &infos, addr, src, iv)
+        };
+        // defaults: the configured sources, never delivery or hunter; daily
+        let (s, m) = ok("u@example.org", None, None).unwrap();
+        assert_eq!(s, vec!["gravatar"]);
+        assert_eq!(m, 1440);
+        // interval clamped both ways
+        assert_eq!(
+            ok("u@example.org", Some("gravatar"), Some("5")).unwrap().1,
+            1440
+        );
+        assert_eq!(
+            ok("u@example.org", Some("gravatar"), Some("99999"))
+                .unwrap()
+                .1,
+            10080
+        );
+        assert_eq!(
+            ok("u@example.org", Some("gravatar"), Some("2000"))
+                .unwrap()
+                .1,
+            2000
+        );
+        assert!(ok("u@example.org", Some("gravatar"), Some("soon")).is_err());
+        // hunter only when named; unknown and delivery refused; bad address
+        assert_eq!(
+            ok("u@example.org", Some("gravatar,hunter"), None)
+                .unwrap()
+                .0,
+            vec!["gravatar", "hunter"]
+        );
+        assert!(ok("u@example.org", Some("nosuch"), None).is_err());
+        assert!(ok("u@example.org", Some("delivery"), None).is_err());
+        assert!(ok("not-an-address", Some("gravatar"), None).is_err());
+        assert!(ok("u@example.org", Some(""), None).is_err());
     }
 
     fn info(id: &'static str, configured: bool) -> msfe_core::osintproviders::Info {
