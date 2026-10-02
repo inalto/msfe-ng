@@ -857,6 +857,7 @@ fn cmd_housekeeping() -> ExitCode {
     let body_days = msfe_core::housekeeping::body_retention_days(&settings);
     msfe_core::deliveryrun::sweep();
     msfe_core::diaginbox::sweep();
+    msfe_core::osintrun::sweep(cfg.osint_retention_hours.saturating_mul(3600));
     let _ = msfe_core::deliverymon::prune(&cfg, 90);
     match msfe_core::housekeeping::prune(&cfg, days) {
         Ok(()) => {

@@ -234,7 +234,9 @@ empty to keep it.
 ## OSINT settings
 
 The [OSINT](OSINT) view is off until `osint_enabled = true` is set in
-`config.toml` (the file's form editor above shows it). The same file holds its
+`config.toml` (the installer does not add the `osint_*` keys, and the form editor lists only
+settings already present in the file, so switch the `config.toml` editor to
+**Raw text** and add the line, or edit the file directly). The same file holds its
 limits: `osint_runs_per_min`, `osint_max_concurrent`, `osint_deadline_secs`,
 `osint_max_external_queries`, `osint_cache_secs` and `osint_retention_hours`;
 the defaults are listed on the OSINT page. This release has no OSINT secrets

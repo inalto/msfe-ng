@@ -173,7 +173,10 @@ fn unadmit(at: Instant) {
 fn cache_key(i: &Inputs) -> String {
     let mut p = i.providers.clone();
     p.sort();
-    format!("v{SCHEMA_VERSION}|{}|{}", i.address, p.join(","))
+    // A run linked to a Delivery run never shares a cache entry with an
+    // unlinked one (or one linked to another run).
+    let link = i.delivery_run_id.as_deref().unwrap_or("");
+    format!("v{SCHEMA_VERSION}|{}|{}|{link}", i.address, p.join(","))
 }
 
 pub fn start(cfg: &Config, inputs: Inputs) -> Result<StartOk, StartError> {
@@ -751,6 +754,20 @@ mod tests {
             start(&c, inp("quiet.case@example.org", false)).unwrap(),
             StartOk::Started(_)
         ));
+    }
+
+    #[test]
+    fn delivery_link_is_part_of_the_cache_key() {
+        let (c, _g) = setup();
+        // parse_inputs checks the Delivery run exists; build the link directly.
+        let mut linked = inp("quiet.link@example.org", true);
+        linked.delivery_run_id = Some("0123456789abcdef".into());
+        let StartOk::Started(a) = start(&c, linked).unwrap() else {
+            panic!()
+        };
+        wait_done(&a);
+        let unlinked = inp("quiet.link@example.org", false);
+        assert!(matches!(start(&c, unlinked).unwrap(), StartOk::Started(_)));
     }
 
     #[test]

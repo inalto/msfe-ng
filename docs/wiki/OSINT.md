@@ -3,7 +3,8 @@
 The **Delivery** tab's fourth view, *OSINT*, collects publicly available
 information about one email address, so an operator can judge a suspicious
 sender or recipient. Reach it from the *OSINT* pill, or from the magnifying
-glass beside an address in the message tables and the **Investigate address**
+glass beside the recipient in the Messages list and beside the sender and
+recipient in the queue, and the **Investigate address**
 button on an Address test result.
 
 > **This release is the groundwork.** The view, the report format, the limits,
@@ -70,7 +71,7 @@ Each run is stored as a report under `/var/cache/msfe-ng/osint` (directory mode
 `0700`, files `0600`) and deleted after `osint_retention_hours` (24 h by
 default). Only the normalised findings and minimal evidence are kept, never raw
 provider replies. A report can be downloaded as JSON or as a standalone HTML
-page, or removed from the view. The view works without the database.
+page. A report simply expires after that time. The view works without the database.
 
 ## From the shell
 

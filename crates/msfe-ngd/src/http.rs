@@ -69,8 +69,6 @@ impl Request {
         })
     }
 
-    /// Look up a query-string parameter, percent-decoded (search text, IPv6
-    /// addresses and bracketed client addresses all arrive encoded).
     #[cfg(test)]
     pub fn test(method: &str, path_and_query: &str, body: &str) -> Request {
         let (path, query) = path_and_query
@@ -85,6 +83,8 @@ impl Request {
         }
     }
 
+    /// Look up a query-string parameter, percent-decoded (search text, IPv6
+    /// addresses and bracketed client addresses all arrive encoded).
     pub fn query_param(&self, key: &str) -> Option<String> {
         self.query.split('&').find_map(|kv| {
             let (k, v) = kv.split_once('=')?;

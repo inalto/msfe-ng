@@ -2718,13 +2718,13 @@ async function renderOsint(v){
   });
   card.append(srcRow);
   const out=el('div',{});v.append(out);
-  let curId=null;
+  let curId=null,curCached=false;
 
   function paint(r){
     out.innerHTML='';
     const head=el('div',{class:'card'});
     head.append(el('h2',{},r.address+' — '+r.state));
-    if(r.cached)head.append(el('div',{class:'muted'},'Showing a recent result; tick “fresh lookup” to query again.'));
+    if(curCached)head.append(el('div',{class:'muted'},'Showing a recent result; tick “fresh lookup” to query again.'));
     if(r.state==='cancelled')head.append(el('div',{class:'note warn'},'Cancelled — this result is incomplete.'));
     if(r.state==='partial')head.append(el('div',{class:'note warn'},'Some sources did not give an answer; see Source coverage.'));
     const acts=el('div',{class:'ctl'});
@@ -2770,7 +2770,7 @@ async function renderOsint(v){
     const r=await api('/api/delivery/osint/run',{method:'POST',body});
     if(!r||(r.error&&!r.run_id)){toast((r&&r.error)||'cannot start');return;}
     if(!v.isConnected)return;
-    curId=r.run_id;runBtn.disabled=true;cancelBtn.style.display='';
+    curId=r.run_id;curCached=r.cached===true;runBtn.disabled=true;cancelBtn.style.display='';
     clearInterval(dlvOsintTimer);dlvOsintTimer=setInterval(poll,1500);poll();
   };
   cancelBtn.onclick=async()=>{if(curId)await api('/api/delivery/osint/run/cancel',{method:'POST',body:{id:curId}});};
