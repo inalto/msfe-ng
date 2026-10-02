@@ -2268,6 +2268,29 @@ fn conf_parsed(req: &Request, cfg: &Config, config_file: &Path) -> Response {
     )
 }
 
+/// Validate the OSINT settings of a save. The config writer does not escape
+/// backslashes, so the secret is restricted to a safe alphabet; the offending
+/// value is never echoed (it may be a mistyped secret).
+fn osint_setting_error(changes: &[(String, String)]) -> Option<&'static str> {
+    for (k, v) in changes {
+        match k.as_str() {
+            "osint_hibp_key" => {
+                let ok = v.len() <= 128
+                    && v.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+                if !ok {
+                    return Some("osint_hibp_key must be at most 128 letters, digits, '-' or '_'");
+                }
+            }
+            "osint_hibp_mode" if v != "direct" && v != "range" => {
+                return Some("osint_hibp_mode must be direct or range");
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Apply key→value changes from the visual editor onto the original file text
 /// (comments and untouched lines survive byte-for-byte), with backup.
 fn conf_apply(req: &Request, cfg: &Config, config_file: &Path) -> Response {
@@ -2288,6 +2311,11 @@ fn conf_apply(req: &Request, cfg: &Config, config_file: &Path) -> Response {
     };
     if changes.is_empty() {
         return Response::json(200, r#"{"ok":true,"applied":0}"#);
+    }
+    if which == "msfe" {
+        if let Some(bad) = osint_setting_error(&changes) {
+            return Response::json(400, &format!("{{\"error\":\"{bad}\"}}"));
+        }
     }
     let Some(entry) = confcatalog::resolve(cfg, config_file, &conf_id(&which)) else {
         return Response::json(404, r#"{"error":"file not found"}"#);
@@ -3477,6 +3505,52 @@ mod tests {
             body: body.into(),
             user: String::new(),
         }
+    }
+
+    #[test]
+    fn osint_settings_are_validated_on_save() {
+        let d = std::env::temp_dir().join(format!("msfe-api-osintconf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let file = d.join("config.toml");
+        let orig = "osint_enabled = true\nosint_hibp_key = \"\"\n";
+        std::fs::write(&file, orig).unwrap();
+        let cfg = Config {
+            backup_dir: d.join("bak").display().to_string(),
+            ..Default::default()
+        };
+        let apply = |changes: &str| {
+            let body = format!(r#"{{"which":"msfe","changes":{changes}}}"#);
+            send(handle(&post("/api/service/conf/apply", &body), &cfg, &file))
+        };
+        for bad in [
+            r#"{"osint_hibp_key":"bad\\key"}"#,
+            r#"{"osint_hibp_key":"bad\"key"}"#,
+            r#"{"osint_hibp_key":"bad\nkey"}"#,
+            r#"{"osint_hibp_key":"has space"}"#,
+            r#"{"osint_hibp_mode":"wrong"}"#,
+        ] {
+            let (st, body) = apply(bad);
+            assert_eq!(st, 400, "{bad}: {body}");
+            assert!(!body.contains("bad"), "value echoed: {body}");
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), orig, "{bad}");
+        }
+        let long = format!(r#"{{"osint_hibp_key":"{}"}}"#, "a".repeat(129));
+        assert_eq!(apply(&long).0, 400);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), orig);
+        let (st, body) = apply(
+            r#"{"osint_hibp_key":"0123456789abcdef0123456789ABCDEF","osint_hibp_mode":"range"}"#,
+        );
+        assert_eq!(st, 200, "{body}");
+        let c = Config::from_toml_str(&std::fs::read_to_string(&file).unwrap());
+        assert_eq!(c.osint_hibp_key, "0123456789abcdef0123456789ABCDEF");
+        assert_eq!(c.osint_hibp_mode, "range");
+        // clearing is allowed
+        let (st, body) = apply(r#"{"osint_hibp_key":""}"#);
+        assert_eq!(st, 200, "{body}");
+        let c = Config::from_toml_str(&std::fs::read_to_string(&file).unwrap());
+        assert_eq!(c.osint_hibp_key, "");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

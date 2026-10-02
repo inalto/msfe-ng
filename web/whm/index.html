@@ -4541,7 +4541,7 @@ async function renderConfig(){
   maint.append(tc);
   const tgrid=el('div',{class:'grid2'});
   const tok=el('input',{type:'password',placeholder:cconf.telegram_configured?'(configured — leave empty to keep)':'123456:ABC-DEF…','autocomplete':'off'});
-  tok.dataset.tkey='telegram_bot_token';
+  tok.dataset.tkey='telegram_bot_token';tok.dataset.secret='1';
   const TG_FIELDS=[
     ['telegram_chat_id','Chat id','text'],
     ['alert_queue_size','Alert when delivery queue reaches (messages, 0=off)','number'],
@@ -4551,7 +4551,7 @@ async function renderConfig(){
   ];
   tgrid.append(el('label',{class:'field'},'Bot token'+(cconf.telegram_configured?' (set)':''),tok));
   const abk=el('input',{type:'password',placeholder:cconf.abuseipdb_configured?'(configured — leave empty to keep)':'AbuseIPDB API key','autocomplete':'off'});
-  abk.dataset.tkey='abuseipdb_key';
+  abk.dataset.tkey='abuseipdb_key';abk.dataset.secret='1';
   TG_FIELDS.forEach(([k,lbl,type])=>{
     const inp=el('input',{type,value:String(cconf[k]??'')});
     if(type==='number'){inp.setAttribute('min','0');}
@@ -4565,7 +4565,7 @@ async function renderConfig(){
   tSave.onclick=async()=>{
     const changes={};
     tgrid.querySelectorAll('[data-tkey]').forEach(i=>{
-      if((i.dataset.tkey==='telegram_bot_token'||i.dataset.tkey==='abuseipdb_key')&&!i.value.trim())return; // empty = keep existing
+      if(i.dataset.secret==='1'&&!i.value.trim())return; // empty = keep existing
       changes[i.dataset.tkey]=i.value.trim();
     });
     const r=await api('/api/service/conf/apply',{method:'POST',body:{which:'msfe',changes}});
@@ -4580,6 +4580,44 @@ async function renderConfig(){
     toast(r&&r.ok?'Test message sent':'Test failed — see output');
   };
   tc.append(tgrid,el('div',{class:'ctl'},tSave,tTest),tgOut);
+
+  // OSINT providers: on/off switch, Have I Been Pwned key and mode
+  const oc=el('div',{class:'card',id:'osint-providers-card'},el('h2',{},'OSINT providers'),
+    el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},
+      'OSINT lookups (Delivery tab) query public sources about an address or domain. The Have I Been Pwned key is optional and only enables the breach lookup.'));
+  maint.append(oc);
+  const ogrid=el('div',{class:'grid2'});
+  const oOn=el('input',{type:'checkbox',...(cconf.osint_enabled?{checked:'checked'}:{})});
+  oOn.dataset.okey='osint_enabled';
+  const oKey=el('input',{type:'password',placeholder:cconf.osint_hibp_set?'(configured — leave empty to keep)':'Have I Been Pwned API key','autocomplete':'off',spellcheck:'false'});
+  oKey.dataset.okey='osint_hibp_key';oKey.dataset.secret='1';
+  const oMode=el('select',{},
+    el('option',{value:'direct'},'direct — full address sent to HIBP'),
+    el('option',{value:'range'},'range — only a 6-character hash prefix sent; needs the Pro/High RPM plan'));
+  oMode.value=cconf.osint_hibp_mode==='range'?'range':'direct';
+  oMode.dataset.okey='osint_hibp_mode';
+  ogrid.append(
+    el('label',{class:'field'},oOn,' OSINT lookups '+(cconf.osint_enabled?'(on)':'(off)')),
+    el('label',{class:'field',title:'Create a key in your Have I Been Pwned account. Letters, digits, - and _ only.'},'HIBP API key'+(cconf.osint_hibp_set?' (configured)':''),oKey),
+    el('label',{class:'field'},'HIBP lookup mode',oMode));
+  const oSave=el('button',{class:'act'},'Save OSINT settings');
+  oSave.onclick=async()=>{
+    const changes={};
+    ogrid.querySelectorAll('[data-okey]').forEach(i=>{
+      if(i.dataset.secret==='1'&&!i.value.trim())return; // empty = keep existing
+      changes[i.dataset.okey]=i.type==='checkbox'?(i.checked?'true':'false'):i.value.trim();
+    });
+    const r=await api('/api/service/conf/apply',{method:'POST',body:{which:'msfe',changes}});
+    toast(r&&r.ok?`${r.applied} setting(s) saved`:(r&&r.error)||'Save failed');
+  };
+  const oClear=el('button',{class:'act plain'},'Clear key');
+  oClear.disabled=!cconf.osint_hibp_set;
+  oClear.onclick=async()=>{
+    if(!confirm('Remove the Have I Been Pwned API key?'))return;
+    const r=await api('/api/service/conf/apply',{method:'POST',body:{which:'msfe',changes:{osint_hibp_key:''}}});
+    toast(r&&r.ok?'Key cleared':(r&&r.error)||'Clear failed');
+  };
+  oc.append(ogrid,el('div',{class:'ctl'},oSave,oClear));
 
   // DMARC report mailbox: where the domains' rua= reports arrive (IMAP);
   // `msfe-ng dmarc fetch` reads it hourly and Delivery → DMARC reports shows them

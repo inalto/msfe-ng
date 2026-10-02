@@ -117,6 +117,11 @@ pub struct Config {
     /// AbuseIPDB API key, for manual reports from the client-IP view.
     /// Secret: never exposed via the API (only `abuseipdb_configured`).
     pub abuseipdb_key: String,
+    /// Have I Been Pwned API key for the OSINT breach lookup. Secret: never
+    /// exposed via the API (only `osint_hibp_set`).
+    pub osint_hibp_key: String,
+    /// `direct` (full address sent to HIBP) or `range` (6-char hash prefix).
+    pub osint_hibp_mode: String,
     /// Alert when the delivery queue holds at least this many messages (0 = off).
     pub alert_queue_size: u32,
     /// Alert when the oldest scanning-queue message is at least N minutes old (0 = off).
@@ -216,6 +221,8 @@ impl Default for Config {
             telegram_bot_token: String::new(),
             telegram_chat_id: String::new(),
             abuseipdb_key: String::new(),
+            osint_hibp_key: String::new(),
+            osint_hibp_mode: "direct".to_string(),
             alert_queue_size: 0,
             alert_scan_stuck_mins: 0,
             alert_burst_per_hour: 0,
@@ -357,6 +364,10 @@ impl Config {
                 "telegram_bot_token" => c.telegram_bot_token = v,
                 "telegram_chat_id" => c.telegram_chat_id = v,
                 "abuseipdb_key" => c.abuseipdb_key = v,
+                "osint_hibp_key" => c.osint_hibp_key = v,
+                "osint_hibp_mode" => {
+                    c.osint_hibp_mode = if v == "range" { "range" } else { "direct" }.to_string()
+                }
                 "alert_queue_size" => c.alert_queue_size = v.parse().unwrap_or(0),
                 "alert_scan_stuck_mins" => c.alert_scan_stuck_mins = v.parse().unwrap_or(0),
                 "alert_burst_per_hour" => c.alert_burst_per_hour = v.parse().unwrap_or(0),
@@ -555,6 +566,15 @@ impl Config {
                 "dmarc_alert_min_messages".into(),
                 Json::Int(self.dmarc_alert_min_messages as i64),
             ),
+            // the HIBP key is a secret too: only whether it is set
+            (
+                "osint_hibp_set".into(),
+                Json::Bool(!self.osint_hibp_key.trim().is_empty()),
+            ),
+            (
+                "osint_hibp_mode".into(),
+                Json::str(self.osint_hibp_mode.clone()),
+            ),
             // the AbuseIPDB key is a secret too
             (
                 "abuseipdb_configured".into(),
@@ -672,6 +692,25 @@ mod tests {
             );
             assert_eq!(Config::from_toml_str(&text).dmarc_imap_pass, pw, "{text}");
         }
+    }
+
+    #[test]
+    fn hibp_key_is_never_serialized_and_mode_is_validated() {
+        let c = Config::from_toml_str(
+            "osint_hibp_key = \"SECRETKEY123\"\nosint_hibp_mode = \"range\"\n",
+        );
+        assert_eq!(c.osint_hibp_key, "SECRETKEY123");
+        assert_eq!(c.osint_hibp_mode, "range");
+        let j = c.to_public_json().to_string();
+        assert!(!j.contains("SECRETKEY123"));
+        assert!(j.contains("\"osint_hibp_set\":true"));
+        assert!(j.contains("\"osint_hibp_mode\":\"range\""));
+        let d = Config::from_toml_str("osint_hibp_mode = \"bogus\"\n");
+        assert_eq!(d.osint_hibp_mode, "direct");
+        assert!(Config::default()
+            .to_public_json()
+            .to_string()
+            .contains("\"osint_hibp_set\":false"));
     }
 
     #[test]

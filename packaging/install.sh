@@ -150,6 +150,11 @@ alert_cooldown_mins = 60
 # AbuseIPDB API key (Config → Telegram alerts card): manual reports from the
 # client-IP view and msfe-ng report. Secret; empty = reporting off.
 abuseipdb_key = ""
+
+# Have I Been Pwned (OSINT breach lookup; Config -> OSINT providers card).
+# Secret; empty = lookup skipped. Mode: direct | range (hash prefix only).
+osint_hibp_key = ""
+osint_hibp_mode = "direct"
 EOF
     chmod 0640 "$CONFDIR/config.toml"
 fi
