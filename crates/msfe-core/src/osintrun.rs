@@ -7,6 +7,7 @@
 use crate::config::Config;
 use crate::netguard;
 use crate::osint::*;
+use crate::osintproviders::{self, Outcome, QueryCtx};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -53,27 +54,10 @@ pub enum StartOk {
     Cached(String),
 }
 
-pub struct ProviderInfo {
-    pub id: &'static str,
-    pub name: &'static str,
-    /// What the source receives, shown to the operator before a run.
-    pub disclosure: &'static str,
-}
+pub use crate::osintproviders::Info as ProviderInfo;
 
-pub fn providers() -> Vec<ProviderInfo> {
-    let mut v = Vec::new();
-    if fixture_enabled() {
-        v.push(ProviderInfo {
-            id: "fixture",
-            name: "Fixture (synthetic, no network)",
-            disclosure: "Nothing leaves this server.",
-        });
-    }
-    v
-}
-
-fn fixture_enabled() -> bool {
-    std::env::var_os("MSFE_NG_OSINT_FIXTURE").is_some()
+pub fn providers(cfg: &Config) -> Vec<ProviderInfo> {
+    crate::osintproviders::infos(cfg)
 }
 
 pub fn report_dir() -> PathBuf {
@@ -101,13 +85,12 @@ pub fn parse_inputs(
     // Reuse the Delivery parser for consistent MVP behavior; it is an ASCII
     // subset and not a complete RFC mailbox parser.
     let (local, domain) = netguard::parse_address(address)?;
-    let known: Vec<&str> = providers().iter().map(|p| p.id).collect();
     if providers_req.is_empty() {
         return Err("choose at least one source".into());
     }
     let mut chosen: Vec<String> = Vec::new();
     for p in providers_req {
-        if !known.contains(&p.as_str()) {
+        if !crate::osintproviders::is_known(p) {
             return Err(format!("unknown or unavailable source '{p}'"));
         }
         if !chosen.contains(p) {
@@ -283,9 +266,10 @@ pub fn start(cfg: &Config, inputs: Inputs) -> Result<StartOk, StartError> {
     let deadline = Instant::now() + Duration::from_secs(cfg.osint_deadline_secs);
     let max_q = query_budget(cfg, &inputs);
     let id2 = id.clone();
+    let cfg2 = cfg.clone();
     let spawned = std::thread::Builder::new()
         .name("osint-run".into())
-        .spawn(move || worker(id2, inputs, cancel, deadline, max_q));
+        .spawn(move || worker(id2, inputs, cancel, deadline, max_q, cfg2));
     if spawned.is_err() {
         with_runs(|runs| runs.remove(&id));
         unadmit(admitted_at);
@@ -294,96 +278,14 @@ pub fn start(cfg: &Config, inputs: Inputs) -> Result<StartOk, StartError> {
     Ok(StartOk::Started(id))
 }
 
-struct QueryCtx<'a> {
-    address: &'a str,
-    cancel: &'a AtomicBool,
+fn worker(
+    id: String,
+    inputs: Inputs,
+    cancel: Arc<AtomicBool>,
     deadline: Instant,
-}
-impl QueryCtx<'_> {
-    fn stop(&self) -> bool {
-        self.cancel.load(Ordering::Relaxed) || Instant::now() >= self.deadline
-    }
-}
-
-struct Outcome {
-    source: SourceStatus,
-    findings: Vec<Finding>,
-}
-
-fn run_provider(id: &str, q: &QueryCtx) -> Outcome {
-    match id {
-        "fixture" => fixture(q),
-        other => Outcome {
-            source: SourceStatus {
-                id: other.to_string(),
-                state: SourceState::Failed,
-                retry_after: None,
-                detail: "no such provider".into(),
-            },
-            findings: Vec::new(),
-        },
-    }
-}
-
-fn fixture(q: &QueryCtx) -> Outcome {
-    let local = q
-        .address
-        .split('@')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    let status = |state, detail: &str| SourceStatus {
-        id: "fixture".into(),
-        state,
-        retry_after: None,
-        detail: detail.into(),
-    };
-    if local.contains("panic") {
-        panic!("synthetic provider panic");
-    }
-    if local.contains("slow") {
-        for _ in 0..40 {
-            if q.stop() {
-                return Outcome {
-                    source: status(SourceState::Inconclusive, "stopped before finishing"),
-                    findings: vec![],
-                };
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
-    if local.contains("fail") {
-        return Outcome {
-            source: status(SourceState::Failed, "synthetic failure"),
-            findings: vec![],
-        };
-    }
-    if local.contains("breach") {
-        let f = Finding {
-            group: Group::Exposure,
-            confidence: Confidence::Medium,
-            confidence_reason: "synthetic fixture".into(),
-            severity: Severity::Info,
-            observed_at: now_secs(),
-            event_at: Some(1_500_000_000),
-            source_id: "fixture".into(),
-            source_url: Some("https://example.org/fixture".into()),
-            title: "Appears in a synthetic incident".into(),
-            evidence: "Incident-wide data classes: Email addresses, Passwords. This does not show that a password for this address was exposed.".into(),
-            limitations: vec!["Historical incident; synthetic data.".into()],
-        };
-        return Outcome {
-            source: status(SourceState::Matched, "1 incident"),
-            findings: vec![f],
-        };
-    }
-    Outcome {
-        source: status(SourceState::NoMatch, "nothing found in this source"),
-        findings: vec![],
-    }
-}
-
-fn worker(id: String, inputs: Inputs, cancel: Arc<AtomicBool>, deadline: Instant, max_q: usize) {
+    max_q: usize,
+    cfg: Config,
+) {
     #[cfg(test)]
     if inputs.address.to_ascii_lowercase().starts_with("deaf") {
         // Test hook: the worker is busy and deaf to cancel for a fixed window,
@@ -412,9 +314,11 @@ fn worker(id: String, inputs: Inputs, cancel: Arc<AtomicBool>, deadline: Instant
             address: &inputs.address,
             cancel: &cancel,
             deadline,
+            cfg: &cfg,
         };
-        let o = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_provider(p, &q)))
-        {
+        let o = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            osintproviders::run(p, &q)
+        })) {
             Ok(o) => o,
             Err(_) => {
                 panicked = true;
@@ -748,6 +652,20 @@ mod tests {
             start(&c, inp("off@example.org", false)).unwrap_err(),
             StartError::Disabled
         );
+    }
+
+    #[test]
+    fn unconfigured_provider_makes_the_run_partial_not_clean() {
+        let (c, _g) = setup();
+        let p = vec!["hibp".to_string()];
+        let inputs = parse_inputs("quiet.nokey@example.org", &p, true, None).unwrap();
+        let StartOk::Started(id) = start(&c, inputs).unwrap() else {
+            panic!()
+        };
+        let r = wait_done(&id);
+        assert_eq!(r.sources[0].state, SourceState::NotConfigured);
+        assert_eq!(r.state, RunState::Partial);
+        assert!(r.findings.is_empty());
     }
 
     #[test]

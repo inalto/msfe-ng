@@ -70,6 +70,7 @@ pub mod mxchecks;
 pub mod netguard;
 pub mod osint;
 pub mod osinthtml;
+pub mod osintproviders;
 pub mod osintrun;
 pub mod panel;
 pub mod providerhttp;

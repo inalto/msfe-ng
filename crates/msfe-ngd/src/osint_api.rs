@@ -28,14 +28,14 @@ fn err(status: u16, msg: &str) -> Response {
 }
 
 fn providers(cfg: &Config) -> Response {
-    let list: Vec<Json> = osintrun::providers()
+    let list: Vec<Json> = osintrun::providers(cfg)
         .iter()
         .map(|p| {
             Json::Object(vec![
                 ("id".into(), Json::str(p.id)),
                 ("name".into(), Json::str(p.name)),
-                ("disclosure".into(), Json::str(p.disclosure)),
-                ("configured".into(), Json::Bool(true)),
+                ("disclosure".into(), Json::str(p.disclosure.as_str())),
+                ("configured".into(), Json::Bool(p.configured)),
             ])
         })
         .collect();

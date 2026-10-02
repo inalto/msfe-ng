@@ -3016,20 +3016,31 @@ fn cmd_delivery_osint(rest: &[String]) -> ExitCode {
     let html = rest.iter().any(|a| a == "--html");
     if rest.first().map(String::as_str) == Some("providers") {
         if json {
-            let list = osintrun::providers()
+            let list = osintrun::providers(&cfg)
                 .iter()
                 .map(|p| {
                     Json::Object(vec![
                         ("id".into(), Json::str(p.id)),
                         ("name".into(), Json::str(p.name)),
-                        ("disclosure".into(), Json::str(p.disclosure)),
+                        ("configured".into(), Json::Bool(p.configured)),
+                        ("disclosure".into(), Json::str(p.disclosure.as_str())),
                     ])
                 })
                 .collect();
             println!("{}", Json::Array(list));
         } else {
-            for p in osintrun::providers() {
-                println!("{}\t{}\t{}", p.id, p.name, p.disclosure);
+            for p in osintrun::providers(&cfg) {
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    p.id,
+                    p.name,
+                    if p.configured {
+                        "configured"
+                    } else {
+                        "not configured"
+                    },
+                    p.disclosure
+                );
             }
         }
         return ExitCode::SUCCESS;
@@ -3065,7 +3076,7 @@ fn cmd_delivery_osint(rest: &[String]) -> ExitCode {
         }
     }
     if !given {
-        provs = osintrun::providers()
+        provs = osintrun::providers(&cfg)
             .iter()
             .map(|p| p.id.to_string())
             .collect();

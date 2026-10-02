@@ -2714,7 +2714,7 @@ async function renderOsint(v){
   if(!prov.providers.length)srcRow.append(el('div',{class:'muted'},'No sources are available.'));
   prov.providers.forEach(p=>{
     const cb=el('input',{type:'checkbox',checked:'checked'});cb.dataset.id=p.id;boxes.push(cb);
-    srcRow.append(el('label',{style:'display:block;font-size:.85rem'},cb,' ',el('b',{},p.name),el('span',{class:'muted'},' — '+p.disclosure)));
+    srcRow.append(el('label',{style:'display:block;font-size:.85rem'},cb,' ',el('b',{},p.name),el('span',{class:'muted'},' — '+p.disclosure+(p.configured===false?' — not configured':''))));
   });
   card.append(srcRow);
   const out=el('div',{});v.append(out);
