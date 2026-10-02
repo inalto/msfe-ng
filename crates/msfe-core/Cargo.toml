@@ -8,3 +8,7 @@ description = "MSFE-NG core: panel abstraction, config model, rule engine, MailS
 
 [dependencies]
 msfe-api = { workspace = true }
+
+[features]
+# Exposes in-memory test doubles (`osintmon::FakeStore`) to other crates' tests.
+testing = []

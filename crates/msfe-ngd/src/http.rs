@@ -288,6 +288,11 @@ mod tests {
             ("GET", "/whm"),
             ("POST", "/api/config"),
             ("GET", "/api/userx"),
+            ("GET", "/api/delivery/osint/monitors"),
+            ("POST", "/api/delivery/osint/monitors"),
+            ("DELETE", "/api/delivery/osint/monitors"),
+            ("POST", "/api/delivery/osint/monitors/run"),
+            ("GET", "/api/delivery/osint/monitors/report"),
         ] {
             let mut r = path_req(m, p, "");
             let denied = peer_scope(&mut r, Some(1001), name_of).expect(p);

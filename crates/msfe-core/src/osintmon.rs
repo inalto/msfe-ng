@@ -636,7 +636,7 @@ impl Store for MysqlStore<'_> {
 
 // ---- in-memory store for tests -----------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 #[derive(Default)]
 pub struct FakeState {
     pub monitors: Vec<Monitor>,
@@ -650,13 +650,13 @@ pub struct FakeState {
     next_run: u32,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 #[derive(Default)]
 pub struct FakeStore {
     pub st: std::cell::RefCell<FakeState>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 impl FakeStore {
     /// The kv keys that belong to monitor `id` (exact: id 5 is not 55).
     pub fn remove_keys(&self, id: u32) {
@@ -669,7 +669,7 @@ impl FakeStore {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 impl Store for FakeStore {
     fn list(&self, owner: Option<&str>) -> Result<Vec<Monitor>, String> {
         let mut v: Vec<Monitor> = self
@@ -914,7 +914,7 @@ impl Store for FakeStore {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 impl FakeStore {
     /// Same semantics as `sql_prune`: runs older than `days` go except the
     /// latest run of every monitor id present in the runs; usage rows older

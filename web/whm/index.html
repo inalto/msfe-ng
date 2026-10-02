@@ -2774,17 +2774,21 @@ async function renderOsint(v){
   const out=el('div',{});v.append(out);
   let curId=null,curCached=false;
 
-  function paint(r){
+  // `stored` is the integer id of a stored monitor run when `r` is one: the
+  // exports then read that run, and a live-run notice is not shown. Painting
+  // never starts a poll or touches the live-run state (curId, timers).
+  function paint(r,stored){
     osintRevoke();
     out.innerHTML='';
     const head=el('div',{class:'card'});
     head.append(el('h2',{},r.address+' — '+r.state));
-    if(curCached)head.append(el('div',{class:'muted'},'Showing a recent result; tick “fresh lookup” to query again.'));
+    if(stored)head.append(el('div',{class:'muted'},'A stored monitor run from '+fmtTime(r.started)+'; avatars are not kept.'));
+    else if(curCached)head.append(el('div',{class:'muted'},'Showing a recent result; tick “fresh lookup” to query again.'));
     if(r.state==='cancelled')head.append(el('div',{class:'note warn'},'Cancelled — this result is incomplete.'));
     if(r.state==='partial')head.append(el('div',{class:'note warn'},'Some sources did not give an answer; see Source coverage.'));
     const acts=el('div',{class:'ctl'});
     const t=el('button',{class:'act'},'Open Address test');t.onclick=()=>deliveryTestFor(r.address);
-    const dl=async(fmt,mime,ext)=>{const x=await apiRaw('/api/delivery/osint/report?id='+encodeURIComponent(r.run_id)+'&format='+fmt);if(!x.ok){toast('cannot export this report');return;}const b=new Blob([x.text],{type:mime});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='osint-'+r.run_id+'.'+ext;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);};
+    const dl=async(fmt,mime,ext)=>{const x=await apiRaw((stored?'/api/delivery/osint/monitors/report?run='+encodeURIComponent(stored):'/api/delivery/osint/report?id='+encodeURIComponent(r.run_id))+'&format='+fmt);if(!x.ok){toast('cannot export this report');return;}const b=new Blob([x.text],{type:mime});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='osint-'+(stored?'monitor-'+stored:r.run_id)+'.'+ext;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);};
     const j=el('a',{class:'act',href:'#'},'JSON');j.onclick=e=>{e.preventDefault();dl('json','application/json','json');};
     const h=el('a',{class:'act',href:'#'},'HTML');h.onclick=e=>{e.preventDefault();dl('html','text/html','html');};
     acts.append(t,j,h);head.append(acts);
@@ -2840,6 +2844,78 @@ async function renderOsint(v){
     clearInterval(dlvOsintTimer);dlvOsintTimer=setInterval(poll,1500);poll();
   };
   cancelBtn.onclick=async()=>{if(curId)await api('/api/delivery/osint/run/cancel',{method:'POST',body:{id:curId}});};
+
+  // ---- monitors ---------------------------------------------------------------
+  // An address checked on a schedule with the sources chosen here. Opening the
+  // card only lists the monitors; nothing queries a provider until a monitor is
+  // due (or "run now" is pressed). No timers: the list is reloaded on demand.
+  const mo=el('details',{class:'card'},el('summary',{},'Monitors — watch an address'));v.append(mo);
+  const moBody=el('div');mo.append(moBody);
+  const OSINT_INTERVALS=[[1440,'every 24 h'],[2880,'every 48 h'],[10080,'every 7 days']];
+  const intLabel=n=>{const f=OSINT_INTERVALS.find(x=>x[0]===n);return f?f[1].replace('every ',''):(n>=1440?Math.round(n/1440)+' d':n+' min');};
+  async function renderMon(){
+    moBody.innerHTML='';
+    const d=await api('/api/delivery/osint/monitors');
+    if(!d||d.error){moBody.append(el('div',{class:'note warn',style:'font-size:.8rem'},(d&&d.error)||'cannot load the monitors'));return;}
+    const b=d.budget||{};
+    moBody.append(el('div',{class:'muted',style:'font-size:.8rem;margin:.4rem 0'},
+      `A monitor re-runs the lookup with the sources you tick, at most once a day (${d.max} monitors at most). Every run uses provider quota. The first run is a baseline and never alerts; later runs report new public exposure or a source that stops answering${d.telegram?' on Telegram':' (Telegram is not configured: Settings → Telegram alerts — the history still records changes)'}. History is kept for 90 days.`));
+    moBody.append(el('div',{class:'muted',style:'font-size:.8rem;margin:.2rem 0 .5rem'},
+      'Monthly budget '+(b.period||'')+': '+(b.used||0)+' / '+(b.cap?b.cap:'unlimited')+' provider units used.'+(d.enabled?'':' OSINT is switched off, so monitors do not run.')));
+    const mAddr=el('input',{type:'email',placeholder:'user@example.org',style:'max-width:18rem',value:addr.value.trim()});
+    const mInt=el('select',{},...OSINT_INTERVALS.map(([n,l])=>el('option',{value:String(n)},l)));
+    const mBoxes=[];
+    const mSrc=el('div',{style:'margin:.4rem 0'});
+    (prov.providers||[]).filter(p=>p.id!=='delivery').forEach(p=>{
+      const cb=el('input',{type:'checkbox'});
+      // The same default as the Run form: configured sources, never the paid Hunter probe unless chosen.
+      if(p.configured!==false&&p.id!=='hunter')cb.checked=true;
+      cb.dataset.id=p.id;mBoxes.push(cb);
+      mSrc.append(el('label',{style:'display:block;font-size:.85rem'},cb,' ',el('b',{},p.name),el('span',{class:'muted'},' — '+p.disclosure+(p.configured===false?' — not configured':''))));
+    });
+    const addBtn=el('button',{class:'act'},'Add monitor');
+    addBtn.disabled=!d.enabled;
+    moBody.append(el('div',{class:'ctl'},mAddr,mInt,addBtn),mSrc);
+    addBtn.onclick=async()=>{
+      const a=mAddr.value.trim();if(!a){mAddr.focus();return;}
+      const sources=mBoxes.filter(x=>x.checked).map(x=>x.dataset.id);
+      if(!sources.length){toast('tick at least one source');return;}
+      const r=await api('/api/delivery/osint/monitors',{method:'POST',body:{address:a,sources,interval_mins:+mInt.value}});
+      if(!r||r.error){toast((r&&r.error)||'cannot add');return;}
+      toast('Monitor added — the first run (the baseline) happens at the next monitor pass');renderMon();
+    };
+    const t=el('table');moBody.append(t);
+    t.append(el('tr',{},...['Address','Sources','Interval','Last run','Result','',''].map(h=>el('th',{},h))));
+    (d.monitors||[]).forEach(m=>{
+      const runNow=el('button',{class:'linkbtn'},'run now');
+      runNow.onclick=async()=>{const r=await api('/api/delivery/osint/monitors/run',{method:'POST',body:{id:m.id}});toast(r&&!r.error?'Started — open the history in a minute':((r&&r.error)||'failed'));};
+      const hist=el('button',{class:'linkbtn'},'history');
+      hist.onclick=()=>showMonHistory(m);
+      const tog=el('button',{class:'linkbtn'},m.enabled?'pause':'resume');
+      tog.onclick=async()=>{const r=await api('/api/delivery/osint/monitors/enable',{method:'POST',body:{id:m.id,enabled:!m.enabled}});if(r&&r.error)toast(r.error);renderMon();};
+      const rm=el('button',{class:'linkbtn'},'remove');
+      rm.onclick=async()=>{if(!confirm('Remove the monitor for '+m.address+' and its history?'))return;const r=await api('/api/delivery/osint/monitors/remove',{method:'POST',body:{id:m.id}});if(r&&r.error)toast(r.error);renderMon();};
+      const sum=m.last_summary?el('span',{class:'dlv-mini'},m.last_summary):el('span',{class:'muted'},'—');
+      t.append(el('tr',{},el('td',{class:'mono'},m.address+(m.enabled?'':' · paused')),el('td',{},(m.sources||[]).join(', ')),el('td',{},intLabel(m.interval_mins)),el('td',{},m.last_run_at?fmtTime(m.last_run_at):'never'),el('td',{},sum),el('td',{},runNow,' ',hist),el('td',{},tog,' ',rm)));
+    });
+    if(!(d.monitors||[]).length)t.append(el('tr',{},el('td',{colspan:'7',class:'muted'},'No monitors yet.')));
+  }
+  async function showMonHistory(m){
+    const md=modal('History — '+m.address);
+    const d=await api('/api/delivery/osint/monitors/runs?id='+m.id+'&limit=100');
+    if(!d||d.error){md.body.append(el('div',{class:'muted'},(d&&d.error)||'cannot load'));return;}
+    const t=el('table');md.body.append(t);
+    t.append(el('tr',{},...['When','Duration','State','Findings','Sources ok','Sources bad',''].map(h=>el('th',{},h))));
+    (d.runs||[]).forEach(r=>{
+      const open=el('button',{class:'linkbtn'},'open');
+      open.onclick=async()=>{const rep=await api('/api/delivery/osint/monitors/report?run='+r.id);if(!rep||rep.error){toast((rep&&rep.error)||'cannot load');return;}md.close();paint(rep,r.id);out.scrollIntoView({behavior:'smooth'});};
+      const html=el('button',{class:'linkbtn'},'html');
+      html.onclick=async()=>{const x=await apiRaw('/api/delivery/osint/monitors/report?run='+r.id+'&format=html');if(!x.ok){toast('cannot load');return;}const w=window.open('','_blank');if(w){w.document.open();w.document.write(x.text);w.document.close();}};
+      t.append(el('tr',{},el('td',{},fmtTime(r.started_at)),el('td',{},Math.round(r.duration_ms/1000)+' s'),el('td',{},r.state),el('td',{},String(r.findings)),el('td',{},String(r.sources_ok)),el('td',{class:r.sources_bad?'chip fail':''},String(r.sources_bad)),el('td',{},open,' ',html)));
+    });
+    if(!(d.runs||[]).length)t.append(el('tr',{},el('td',{colspan:'7',class:'muted'},'No runs yet — the first one is the baseline.')));
+  }
+  mo.addEventListener('toggle',()=>{if(mo.open)renderMon();});
 }
 
 async function renderDmarcReports(v){

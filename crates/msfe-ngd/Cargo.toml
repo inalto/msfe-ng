@@ -13,3 +13,6 @@ path = "src/main.rs"
 [dependencies]
 msfe-api = { workspace = true }
 msfe-core = { workspace = true }
+
+[dev-dependencies]
+msfe-core = { workspace = true, features = ["testing"] }
