@@ -3068,6 +3068,13 @@ fn parse_monitor_args(rest: &[String]) -> MonitorArgs {
 /// Validate `monitor add` input: the address, the source set (the configured
 /// default when none is named; `hunter` only when named) and the interval
 /// (clamped to the daily minimum). The error is a message for exit code 3.
+/// The stored form of a monitor address: the same normalisation the API
+/// applies (domain lower-cased, trailing dot stripped).
+fn monitor_address(address: &str) -> Result<String, String> {
+    let (local, domain) = msfe_core::netguard::parse_address(address.trim())?;
+    Ok(format!("{local}@{domain}"))
+}
+
 fn monitor_add_input(
     cfg: &Config,
     infos: &[msfe_core::osintproviders::Info],
@@ -3075,7 +3082,7 @@ fn monitor_add_input(
     sources: Option<&str>,
     interval: Option<&str>,
 ) -> Result<(Vec<String>, u32), String> {
-    msfe_core::netguard::parse_address(address.trim())?;
+    monitor_address(address)?;
     let wanted: Vec<String> = match sources {
         Some(v) => v
             .split(',')
@@ -3160,7 +3167,10 @@ fn cmd_osint_monitor(cfg: &Config, rest: &[String]) -> ExitCode {
                     return ExitCode::from(3);
                 }
             };
-            match store.add(address.trim(), "", &sources, mins, cfg.osint_max_monitors) {
+            let Ok(stored) = monitor_address(address) else {
+                return ExitCode::from(3);
+            };
+            match store.add(&stored, "", &sources, mins, cfg.osint_max_monitors) {
                 Ok(m) => {
                     println!(
                         "monitor {} for {} every {} min, sources {} (first run at the next `msfe-ng monitor` pass; it stores a baseline and does not alert)",
@@ -4294,6 +4304,18 @@ mod tests {
         assert!(ok("u@example.org", Some("delivery"), None).is_err());
         assert!(ok("not-an-address", Some("gravatar"), None).is_err());
         assert!(ok("u@example.org", Some(""), None).is_err());
+    }
+
+    #[test]
+    fn monitor_address_is_stored_normalised_like_the_api() {
+        assert_eq!(monitor_address("a@Example.ORG.").unwrap(), "a@example.org");
+        assert_eq!(
+            monitor_address(" a@Example.ORG. ").unwrap(),
+            monitor_address("a@example.org").unwrap()
+        );
+        // the local part keeps its case
+        assert_eq!(monitor_address("A@X.org").unwrap(), "A@x.org");
+        assert!(monitor_address("not-an-address").is_err());
     }
 
     fn info(id: &'static str, configured: bool) -> msfe_core::osintproviders::Info {
