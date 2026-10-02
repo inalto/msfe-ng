@@ -16,6 +16,8 @@ pub struct QueryCtx<'a> {
     pub cancel: &'a AtomicBool,
     pub deadline: Instant,
     pub cfg: &'a Config,
+    /// The Delivery run linked by the request (never looked up by address).
+    pub delivery_run_id: Option<&'a str>,
 }
 
 impl QueryCtx<'_> {
@@ -52,7 +54,12 @@ fn fixture_enabled() -> bool {
 }
 
 pub fn infos(cfg: &Config) -> Vec<Info> {
-    let mut v = vec![hibp_info(cfg), gravatar_info(), rdap_info()];
+    let mut v = vec![
+        hibp_info(cfg),
+        gravatar_info(),
+        rdap_info(),
+        delivery_info(),
+    ];
     if fixture_enabled() {
         v.push(Info {
             id: "fixture",
@@ -65,7 +72,11 @@ pub fn infos(cfg: &Config) -> Vec<Info> {
 }
 
 pub fn is_known(id: &str) -> bool {
-    id == "hibp" || id == "gravatar" || id == "rdap" || (id == "fixture" && fixture_enabled())
+    id == "hibp"
+        || id == "gravatar"
+        || id == "rdap"
+        || id == DELIVERY_ID
+        || (id == "fixture" && fixture_enabled())
 }
 
 pub fn run(id: &str, q: &QueryCtx) -> Outcome {
@@ -74,6 +85,7 @@ pub fn run(id: &str, q: &QueryCtx) -> Outcome {
         "hibp" => hibp(q),
         "gravatar" => gravatar(q),
         "rdap" => rdap(q),
+        DELIVERY_ID => delivery(q),
         other => Outcome {
             source: SourceStatus {
                 id: other.to_string(),
@@ -84,6 +96,94 @@ pub fn run(id: &str, q: &QueryCtx) -> Outcome {
             findings: Vec::new(),
             assets: Vec::new(),
         },
+    }
+}
+
+pub const DELIVERY_ID: &str = "delivery";
+
+fn delivery_info() -> Info {
+    Info {
+        id: DELIVERY_ID,
+        name: "Delivery test context",
+        disclosure: "reads the linked Delivery test report on this server; nothing leaves it"
+            .into(),
+        configured: true,
+    }
+}
+
+/// Pseudo-source: shows the linked Address test next to the OSINT result.
+/// It makes no network call and only ever reads the run named in the request.
+fn delivery(q: &QueryCtx) -> Outcome {
+    let Some(id) = q.delivery_run_id else {
+        return outcome(
+            DELIVERY_ID,
+            SourceState::NotRequested,
+            "no Delivery run is linked",
+        );
+    };
+    let Some(report) = crate::deliveryrun::snapshot(id) else {
+        return outcome(
+            DELIVERY_ID,
+            SourceState::Inconclusive,
+            "the linked Delivery run is no longer available; run a new Address test",
+        );
+    };
+    let i = &report.inputs;
+    let mut ev = format!(
+        "Delivery test address: {}; sending IP: {}; DKIM selector: {}; log days: {}; server audit: {}.",
+        i.address,
+        i.ip.map(|a| a.to_string()).unwrap_or_else(|| "none".into()),
+        i.selector.as_deref().unwrap_or("none"),
+        i.days,
+        if i.audit { "yes" } else { "no" },
+    );
+    if !i.address.eq_ignore_ascii_case(q.address) {
+        ev.push_str(&format!(
+            " The OSINT lookup is for {}, a different address.",
+            q.address
+        ));
+    }
+    let sum = report.summary();
+    if sum.is_empty() {
+        ev.push_str(" No checks are recorded in this run.");
+    }
+    for (scope, n) in &sum {
+        ev.push_str(&format!(
+            " {}: {} fail, {} warn, {} unknown, {} pass, {} not applicable.",
+            scope.as_str(),
+            n[0],
+            n[1],
+            n[2],
+            n[3],
+            n[4]
+        ));
+    }
+    let f = Finding {
+        group: Group::Context,
+        confidence: Confidence::High,
+        confidence_reason: "recorded by this server's Address test".into(),
+        severity: Severity::Info,
+        observed_at: now_secs(),
+        event_at: Some(report.started),
+        source_id: DELIVERY_ID.into(),
+        source_url: None,
+        title: format!("Delivery test of {} (run {})", i.address, report.id),
+        evidence: ev,
+        limitations: vec![
+            "Delivery results describe mail routing and authentication, not exposure; they are shown here for context only and are not combined with OSINT findings."
+                .into(),
+        ],
+        asset_id: None,
+        asset_mime: None,
+    };
+    Outcome {
+        source: status(
+            DELIVERY_ID,
+            SourceState::Matched,
+            "linked Delivery run found",
+        ),
+        findings: vec![f],
+        assets: Vec::new(),
     }
 }
 
@@ -1332,6 +1432,7 @@ mod tests {
             cancel: &cancel,
             deadline: Instant::now() + Duration::from_secs(10),
             cfg: &cfg,
+            delivery_run_id: None,
         };
         let o = run("hibp", &q);
         std::env::remove_var("MSFE_NG_OSINT_BASE_HIBP");
@@ -1400,6 +1501,7 @@ mod tests {
             cancel: &cancel,
             deadline: Instant::now() + Duration::from_secs(5),
             cfg: &cfg,
+            delivery_run_id: None,
         };
         let o = run("hibp", &q);
         assert_eq!(o.source.state, SourceState::NotConfigured);
@@ -1440,6 +1542,7 @@ mod tests {
                 cancel: &cancel,
                 deadline: Instant::now() + Duration::from_secs(10),
                 cfg: &cfg,
+                delivery_run_id: None,
             };
             let o = run("hibp", &q);
             let head = h.join().unwrap();
@@ -1491,6 +1594,7 @@ mod tests {
             cancel: &cancel,
             deadline: Instant::now() + Duration::from_secs(10),
             cfg: &cfg,
+            delivery_run_id: None,
         };
         let o = run("hibp", &q);
         let head = h.join().unwrap();
@@ -1580,6 +1684,7 @@ mod tests {
             cancel: &cancel,
             deadline: Instant::now() + Duration::from_secs(10),
             cfg: &cfg,
+            delivery_run_id: None,
         };
         let o = run("gravatar", &q);
         let head = h.join().unwrap();
@@ -1633,6 +1738,7 @@ mod tests {
                 cancel: &cancel,
                 deadline: Instant::now() + Duration::from_secs(10),
                 cfg: &cfg,
+                delivery_run_id: None,
             };
             let o = run("gravatar", &q);
             assert_eq!(o.source.state, want, "{}", o.source.detail);
@@ -1892,6 +1998,7 @@ mod tests {
             cancel: &cancel,
             deadline: Instant::now() + Duration::from_secs(10),
             cfg: &cfg,
+            delivery_run_id: None,
         };
         run("rdap", &q)
     }
@@ -2064,5 +2171,139 @@ mod tests {
             .contains("domain of the address (not the full address)"));
         assert!(i.disclosure.contains("IANA bootstrap"));
         assert!(is_known("rdap"));
+    }
+    fn delivery_report(id: &str, address: &str) -> crate::delivery::Report {
+        use crate::delivery::{Category, Check, Scope, Verdict};
+        let mk = |sc, v| {
+            Check::new(
+                "c",
+                sc,
+                Category::Dns,
+                v,
+                crate::delivery::Severity::Info,
+                "t",
+                "",
+            )
+        };
+        crate::delivery::Report {
+            id: id.into(),
+            inputs: crate::deliveryrun::parse_inputs(
+                address,
+                Some("8.8.8.8"),
+                Some("sel1"),
+                Some(7),
+                false,
+                false,
+                None,
+            )
+            .unwrap(),
+            started: 1_700_000_000,
+            finished: Some(1_700_000_030),
+            done: true,
+            planned: vec![],
+            checks: vec![
+                mk(Scope::Sending, Verdict::Fail),
+                mk(Scope::Sending, Verdict::Pass),
+                mk(Scope::Sending, Verdict::Pass),
+                mk(Scope::Receiving, Verdict::Warn),
+            ],
+            tool_notes: vec![],
+            cached: false,
+        }
+    }
+
+    fn delivery_q<'a>(
+        cfg: &'a Config,
+        cancel: &'a AtomicBool,
+        addr: &'a str,
+        id: Option<&'a str>,
+    ) -> QueryCtx<'a> {
+        QueryCtx {
+            address: addr,
+            cancel,
+            deadline: Instant::now() + Duration::from_secs(5),
+            cfg,
+            delivery_run_id: id,
+        }
+    }
+
+    #[test]
+    fn delivery_source_is_listed_and_selectable() {
+        let i = infos(&Config::default())
+            .into_iter()
+            .find(|i| i.id == "delivery")
+            .expect("listed");
+        assert!(i.configured);
+        assert!(i.disclosure.contains("nothing leaves it"));
+        assert!(is_known("delivery"));
+    }
+
+    #[test]
+    fn delivery_without_a_link_is_not_requested_and_never_matches_by_address() {
+        let (cfg, c) = (Config::default(), AtomicBool::new(false));
+        // A run for this very address exists, but no id was given.
+        crate::deliveryrun::insert_for_test(delivery_report("d0d0d0d0d0d0d0d0", "who@example.org"));
+        let o = run("delivery", &delivery_q(&cfg, &c, "who@example.org", None));
+        assert_eq!(o.source.state, SourceState::NotRequested);
+        assert_eq!(o.source.detail, "no Delivery run is linked");
+        assert!(o.findings.is_empty());
+    }
+
+    #[test]
+    fn delivery_unknown_id_is_inconclusive_without_a_finding() {
+        let (cfg, c) = (Config::default(), AtomicBool::new(false));
+        let o = run(
+            "delivery",
+            &delivery_q(&cfg, &c, "a@example.org", Some("ffffffffffffffff")),
+        );
+        assert_eq!(o.source.state, SourceState::Inconclusive);
+        assert!(o.source.detail.contains("run a new Address test"));
+        assert!(o.findings.is_empty());
+    }
+
+    #[test]
+    fn delivery_found_run_gives_one_context_finding_with_counts_and_its_own_time() {
+        let (cfg, c) = (Config::default(), AtomicBool::new(false));
+        crate::deliveryrun::insert_for_test(delivery_report("d1d1d1d1d1d1d1d1", "a@example.org"));
+        let o = run(
+            "delivery",
+            &delivery_q(&cfg, &c, "a@example.org", Some("d1d1d1d1d1d1d1d1")),
+        );
+        assert_eq!(o.source.state, SourceState::Matched);
+        assert_eq!(o.findings.len(), 1);
+        let f = &o.findings[0];
+        assert_eq!(f.group, Group::Context);
+        assert_eq!(f.confidence, Confidence::High);
+        assert_eq!(f.event_at, Some(1_700_000_000));
+        assert_eq!(
+            f.title,
+            "Delivery test of a@example.org (run d1d1d1d1d1d1d1d1)"
+        );
+        assert!(f.evidence.contains("8.8.8.8"), "{}", f.evidence);
+        assert!(f.evidence.contains("sel1"));
+        assert!(f
+            .evidence
+            .contains("sending: 1 fail, 0 warn, 0 unknown, 2 pass"));
+        assert!(f.evidence.contains("receiving: 0 fail, 1 warn"));
+        assert!(!f.evidence.contains("different address"));
+        assert!(f.limitations[0].contains("not exposure"));
+        assert!(f.limitations[0].contains("not combined with OSINT findings"));
+    }
+
+    #[test]
+    fn delivery_run_for_another_address_shows_both_addresses() {
+        let (cfg, c) = (Config::default(), AtomicBool::new(false));
+        crate::deliveryrun::insert_for_test(delivery_report(
+            "d2d2d2d2d2d2d2d2",
+            "tested@example.com",
+        ));
+        let o = run(
+            "delivery",
+            &delivery_q(&cfg, &c, "other@example.org", Some("d2d2d2d2d2d2d2d2")),
+        );
+        let f = &o.findings[0];
+        assert!(f.title.contains("tested@example.com"));
+        assert!(f.evidence.contains("other@example.org"), "{}", f.evidence);
+        assert!(f.evidence.contains("a different address"));
     }
 }

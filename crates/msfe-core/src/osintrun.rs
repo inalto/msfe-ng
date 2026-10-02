@@ -102,6 +102,10 @@ pub fn parse_inputs(
         Some(_) => return Err("that Delivery run does not exist (it may have expired)".into()),
         None => None,
     };
+    // A linked Delivery run is always shown next to the result.
+    if delivery_run_id.is_some() && !chosen.iter().any(|p| p == osintproviders::DELIVERY_ID) {
+        chosen.push(osintproviders::DELIVERY_ID.to_string());
+    }
     Ok(Inputs {
         address: format!("{local}@{domain}"),
         providers: chosen,
@@ -301,7 +305,10 @@ fn worker(
         if cancel.load(Ordering::Relaxed) || Instant::now() >= deadline {
             break;
         }
-        if ran >= max_q {
+        // The Delivery pseudo-source never leaves the server: it does not use
+        // the external query budget.
+        let local = p == osintproviders::DELIVERY_ID;
+        if !local && ran >= max_q {
             sources.push(SourceStatus {
                 id: p.clone(),
                 state: SourceState::NotRequested,
@@ -310,12 +317,15 @@ fn worker(
             });
             continue;
         }
-        ran += 1;
+        if !local {
+            ran += 1;
+        }
         let q = QueryCtx {
             address: &inputs.address,
             cancel: &cancel,
             deadline,
             cfg: &cfg,
+            delivery_run_id: inputs.delivery_run_id.as_deref(),
         };
         let o = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             osintproviders::run(p, &q)
@@ -1361,5 +1371,63 @@ mod tests {
         assert!(stranger.exists() && other.exists());
         let _ = std::fs::remove_file(&stranger);
         let _ = std::fs::remove_file(&other);
+    }
+    #[test]
+    fn linked_delivery_run_is_auto_added_and_a_lone_unlinked_delivery_is_partial() {
+        let (c, _g) = setup();
+        // Only an unlinked delivery source: not-requested is not a clean result.
+        let lone = parse_inputs(
+            "quiet.lone@example.org",
+            &["delivery".to_string()],
+            true,
+            None,
+        )
+        .unwrap();
+        assert!(lone.delivery_run_id.is_none());
+        let StartOk::Started(id) = start(&c, lone).unwrap() else {
+            panic!()
+        };
+        let r = wait_done(&id);
+        assert_eq!(r.state, RunState::Partial);
+        assert_eq!(r.sources[0].state, SourceState::NotRequested);
+        // A linked run is added to the plan even when the client did not list it.
+        let did = "e1e1e1e1e1e1e1e1";
+        let mut rep = crate::delivery::Report {
+            id: did.into(),
+            inputs: crate::deliveryrun::parse_inputs(
+                "quiet.linked@example.org",
+                None,
+                None,
+                None,
+                false,
+                false,
+                None,
+            )
+            .unwrap(),
+            started: 1_700_000_000,
+            finished: Some(1_700_000_001),
+            done: true,
+            planned: vec![],
+            checks: vec![],
+            tool_notes: vec![],
+            cached: false,
+        };
+        rep.checks.clear();
+        crate::deliveryrun::insert_for_test(rep);
+        let linked = parse_inputs(
+            "quiet.linked@example.org",
+            &["fixture".to_string()],
+            true,
+            Some(did),
+        )
+        .unwrap();
+        assert_eq!(linked.providers, vec!["fixture", "delivery"]);
+        let StartOk::Started(id) = start(&c, linked).unwrap() else {
+            panic!()
+        };
+        let r = wait_done(&id);
+        let d = r.sources.iter().find(|s| s.id == "delivery").unwrap();
+        assert_eq!(d.state, SourceState::Matched);
+        assert!(r.findings.iter().any(|f| f.source_id == "delivery"));
     }
 }

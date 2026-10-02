@@ -329,6 +329,13 @@ function osintLink(addr,context){
   const icon=strokeIcon('m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z','dtico');
   return Object.assign(el('a',{class:'dtlink',role:'button','aria-label':'Investigate '+a,title:'Investigate '+a+' (OSINT: public information about this address; you pick the sources and press Run)'},icon),{onclick:e=>{e.stopPropagation();osintFor(a,context);}});
 }
+// Text button "Investigate address" for detail views. Empty/bounce senders and
+// values without an @ render nothing. It only prefills the OSINT view.
+function investigateBtn(addr,label){
+  const a=String(addr||'').split(',')[0].trim();
+  if(!a.includes('@'))return el('span',{});
+  return Object.assign(el('button',{class:'act plain',style:'margin-left:.5rem',title:'Open Delivery → OSINT with '+a+' filled in; nothing runs until you press Run'},label||'Investigate address'),{onclick:e=>{e.stopPropagation();osintFor(a);}});
+}
 function senderLink(addr){
   const a=String(addr||'').trim();
   if(!a||!a.includes('@'))return el('span',{},a);
@@ -1274,8 +1281,9 @@ async function renderMessageView(id){
   row('Scan status',lbl);row('Message ID',d.id);row('Date received',d.ts);
   if(d.from&&String(d.from).trim()!=='')
     dt.append(el('tr',{},el('th',{style:'width:12rem'},'From'),
-      el('td',{},senderLink(d.from),el('span',{class:'muted'},'  (click to blacklist the address or its domain)'))));
-  row('To',d.to);row('Subject',d.subject);
+      el('td',{},senderLink(d.from),el('span',{class:'muted'},'  (click to blacklist the address or its domain)'),investigateBtn(d.from))));
+  if(d.to!=null&&String(d.to).trim()!=='')
+    dt.append(el('tr',{},el('th',{style:'width:12rem'},'To'),el('td',{style:'word-break:break-word'},String(d.to),investigateBtn(d.to))));row('Subject',d.subject);
   row('Size',fmtSize(d.size)+` (${d.size} bytes)`);
   if(d.clientip&&String(d.clientip).trim()!=='')
     dt.append(el('tr',{},el('th',{style:'width:12rem'},'Client IP'),el('td',{},ipLink(d.clientip),el('span',{class:'muted'},'  (click for details and firewall actions)'))));
@@ -2328,6 +2336,7 @@ function queueCard(v,which,title){
   const qctl=el('div',{class:'ctl'});qc.append(qctl);
   const qtable=el('table');
   const qpre=el('pre',{class:'log',style:'display:none'},'');
+  const qinv=el('div',{class:'ctl',style:'display:none'});
   const qdetail=el('pre',{class:'log',style:'display:none;max-height:20rem'});
   const qcount=el('span',{class:'muted',style:'margin-left:auto;font-size:.8rem'});
   let QMSGS=[],QSEL=new Set(),QFILT='all',QTEXT='',QTRUNC=false;
@@ -2356,6 +2365,15 @@ function queueCard(v,which,title){
   }
   async function msgView(id,what){
     qdetail.style.display='';
+    const qm=QMSGS.find(x=>x.id===id);
+    qinv.innerHTML='';qinv.style.display='none';
+    if(qm){
+      const s=qm.bounce?'':(qm.sender||''),r=(qm.recipients||[])[0]||'';
+      const ib=[];
+      if(s.includes('@'))ib.push(el('span',{class:'muted'},'Sender '+s),investigateBtn(s,'Investigate sender'));
+      if(r.includes('@'))ib.push(el('span',{class:'muted',style:'margin-left:1rem'},'Recipient '+r),investigateBtn(r,'Investigate recipient'));
+      if(ib.length){qinv.append(...ib);qinv.style.display='';}
+    }
     qdetail.textContent='Loading '+what+'…';
     qdetail.textContent=await api(`/api/service/queue/msg?which=${which}&id=${encodeURIComponent(id)}&what=${what}`,{raw:true});
   }
@@ -2489,7 +2507,7 @@ function queueCard(v,which,title){
   const qsearch=el('input',{placeholder:'search sender / recipient / subject / id…',style:'flex:1;max-width:22rem'});
   qsearch.oninput=()=>{QTEXT=qsearch.value.trim();drawTable();};
   filtbar.append(qsearch,bSpamAll,bBncAll);
-  qc.append(filtbar,bulkbar,qtable,qpre,qdetail);
+  qc.append(filtbar,bulkbar,qtable,qpre,qinv,qdetail);
   refreshQ();
   return {refresh:refreshQ};
 }
@@ -2739,10 +2757,16 @@ async function renderOsint(v){
   runBtn.disabled=!prov.enabled;
   card.append(el('div',{class:'ctl'},addr,runBtn,cancelBtn,el('label',{class:'muted',style:'font-size:.8rem;display:flex;gap:.3rem;align-items:center'},force,' fresh lookup')));
   const boxes=[];
+  const hasLink=!!(pre&&pre.context&&pre.context.delivery_run_id);
   const srcRow=el('div',{style:'margin:.4rem 0'});
   if(!prov.providers.length)srcRow.append(el('div',{class:'muted'},'No sources are available.'));
   prov.providers.forEach(p=>{
-    const cb=el('input',{type:'checkbox',checked:'checked'});cb.dataset.id=p.id;boxes.push(cb);
+    const linked=p.id==='delivery';
+    const cb=el('input',{type:'checkbox'});
+    // The Delivery context source is ticked and fixed only when a run is linked.
+    if(!linked||hasLink)cb.checked=true;
+    if(linked&&hasLink)cb.disabled=true;
+    cb.dataset.id=p.id;boxes.push(cb);
     srcRow.append(el('label',{style:'display:block;font-size:.85rem'},cb,' ',el('b',{},p.name),el('span',{class:'muted'},' — '+p.disclosure+(p.configured===false?' — not configured':''))));
   });
   card.append(srcRow);
@@ -2768,6 +2792,7 @@ async function renderOsint(v){
       const fs=(r.findings||[]).filter(f=>f.group===g);
       if(!fs.length)return;
       const c=el('div',{class:'card'},el('h2',{},title));
+      if(g==='context'){const ob=el('button',{class:'act',style:'margin-bottom:.3rem'},'Open Address test');ob.onclick=()=>deliveryTestFor(r.address);c.append(ob);}
       fs.forEach(f=>{
         const row=el('div',{style:'margin:.5rem 0'});
         row.append(el('div',{},el('b',{},f.title)));
@@ -2802,9 +2827,11 @@ async function renderOsint(v){
     if(r.state!=='running'){clearInterval(dlvOsintTimer);dlvOsintTimer=null;runBtn.disabled=!prov.enabled;cancelBtn.style.display='none';}
   }
   runBtn.onclick=async()=>{
-    const providers=boxes.filter(b=>b.checked).map(b=>b.dataset.id);
+    const linkOk=hasLink&&pre.address===addr.value.trim();
+    // The link only applies to the prefilled address; without it the Delivery source has nothing to read.
+    const providers=boxes.filter(b=>b.checked&&(b.dataset.id!=='delivery'||linkOk)).map(b=>b.dataset.id);
     const body={address:addr.value.trim(),providers,force:force.checked};
-    if(pre&&pre.context&&pre.context.delivery_run_id&&pre.address===body.address)body.context={delivery_run_id:pre.context.delivery_run_id};
+    if(linkOk)body.context={delivery_run_id:pre.context.delivery_run_id};
     const r=await api('/api/delivery/osint/run',{method:'POST',body});
     if(!r||(r.error&&!r.run_id)){toast((r&&r.error)||'cannot start');return;}
     if(!v.isConnected)return;

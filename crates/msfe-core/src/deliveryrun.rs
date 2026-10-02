@@ -529,6 +529,21 @@ pub fn run_blocking(
     report
 }
 
+/// Test helper: register a finished report so other modules can link it.
+#[cfg(test)]
+pub fn insert_for_test(report: Report) {
+    with_runs(|runs| {
+        runs.insert(
+            report.id.clone(),
+            RunState {
+                report,
+                finished_at: Some(Instant::now()),
+                cancel: Arc::new(AtomicBool::new(false)),
+            },
+        );
+    });
+}
+
 pub fn snapshot(id: &str) -> Option<Report> {
     with_runs(|runs| runs.get(id).map(|s| s.report.clone())).or_else(|| load(id))
 }
