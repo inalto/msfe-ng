@@ -681,3 +681,49 @@ fn service_unit_needs_a_name_and_an_action() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("not one of the services"));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+fn osint(dir: &std::path::Path, enabled: bool, args: &[&str]) -> std::process::Output {
+    std::fs::write(
+        dir.join("config.toml"),
+        format!("osint_enabled = {enabled}\n"),
+    )
+    .unwrap();
+    Command::new(env!("CARGO_BIN_EXE_msfe-ng"))
+        .args(["delivery", "osint"])
+        .args(args)
+        .env("MSFE_NG_CONFIG", dir.join("config.toml"))
+        .env("MSFE_NG_OSINT_DIR", dir.join("osint"))
+        .env("MSFE_NG_OSINT_FIXTURE", "1")
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn osint_exit_codes_end_to_end() {
+    let d = tmp("osint");
+    let o = osint(
+        &d,
+        true,
+        &["breach.x@example.org", "--providers", "fixture"],
+    );
+    assert_eq!(o.status.code(), Some(0), "{o:?}");
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(
+        out.contains("matched") && out.contains("[exposure]"),
+        "{out}"
+    );
+    let o = osint(&d, true, &["fail.x@example.org", "--providers", "fixture"]);
+    assert_eq!(o.status.code(), Some(4), "{o:?}");
+    let o = osint(&d, true, &["not-an-address", "--providers", "fixture"]);
+    assert_eq!(o.status.code(), Some(2), "{o:?}");
+    let o = osint(&d, true, &["a@@b", "--providers", "fixture"]);
+    assert_eq!(o.status.code(), Some(3), "{o:?}");
+    let o = osint(
+        &d,
+        false,
+        &["breach.x@example.org", "--providers", "fixture"],
+    );
+    assert_eq!(o.status.code(), Some(3), "{o:?}");
+    let o = osint(&d, true, &["--bogus"]);
+    assert_eq!(o.status.code(), Some(2), "{o:?}");
+}

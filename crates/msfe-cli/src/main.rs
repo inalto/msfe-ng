@@ -95,6 +95,7 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
             "--json",
             "--html",
         ]),
+        ("delivery", Some("osint")) => Some(&["--providers", "--json", "--html", "--force"]),
         ("delivery", _) => Some(NONE),
         ("acctdns", Some("scan")) => Some(&["--user", "--domain", "--all", "--json"]),
         ("acctdns", Some("fix")) => Some(&["--record", "--json"]),
@@ -137,7 +138,7 @@ fn usage_of(cmd: &str) -> &'static str {
         "backup" => "msfe-ng backup <file.tar.gz>   (alias: snapshot export --only msfe)",
         "restore" => "msfe-ng restore <file.tar.gz> [--yes]   (alias: snapshot import --only msfe)",
         "conf" => "msfe-ng conf <test [--no-lint] [--json] [--with <id>=<file>]... | test-message <clean|gtube|eicar|file.eml> [--offline] [--json] | grep <text>>",
-        "delivery" => "msfe-ng delivery <test <address> [--ip <sending ip>] [--selector <dkim selector>] [--audit] [--days <1-7>] [--json | --html] [--force] | eml <file.eml> [--bounce] [--address <a>] [--ip <ip>] [--selector <s>] [--audit] [--json | --html] | inbox <install [--dry-run] | uninstall [--dry-run] | status | new | poll <token> [--json] | remove <token> | sweep> | testmail --from <local address> --to <address> [--tag <t>] [--follow <secs>] [--json] | monitor <list [--json] | add <address> [--interval-mins n] [--audit] [--ip ..] [--selector ..] [--days n] | remove <id|address> | run [--dry-run] [--id n]>>",
+        "delivery" => "msfe-ng delivery <test <address> [--ip <sending ip>] [--selector <dkim selector>] [--audit] [--days <1-7>] [--json | --html] [--force] | eml <file.eml> [--bounce] [--address <a>] [--ip <ip>] [--selector <s>] [--audit] [--json | --html] | inbox <install [--dry-run] | uninstall [--dry-run] | status | new | poll <token> [--json] | remove <token> | sweep> | testmail --from <local address> --to <address> [--tag <t>] [--follow <secs>] [--json] | monitor <list [--json] | add <address> [--interval-mins n] [--audit] [--ip ..] [--selector ..] [--days n] | remove <id|address> | run [--dry-run] [--id n]> | osint <address> [--providers a,b] [--json | --html] [--force] | osint providers [--json] | osint sweep>",
         "acctdns" => "msfe-ng acctdns <scan [--user <account>] [--domain <domain>] [--all] [--json] | fix <domain> <spf|dkim|dmarc> [--record <record>] [--json]>",
         "footers" => "msfe-ng footers <status [--json] | set \"<directive>\" on|off [\"<directive>\" on|off]... [--dry-run] | off [--dry-run] | restore [<backup>] [--dry-run] | backups>",
         "dmarc" => "msfe-ng dmarc <fetch [--dry-run] [--keep] [--json] | import <file.xml|.gz|.zip|.eml>... [--json] | status [--json] | test | prune>",
@@ -2589,6 +2590,9 @@ fn cmd_delivery(sub: Option<&str>, rest: &[String]) -> ExitCode {
     if sub == Some("monitor") {
         return cmd_delivery_monitor(rest);
     }
+    if sub == Some("osint") {
+        return cmd_delivery_osint(rest);
+    }
     let eml_mode = match sub {
         Some("test") => false,
         Some("eml") => true,
@@ -2991,6 +2995,131 @@ fn cmd_delivery_testmail(rest: &[String]) -> ExitCode {
     } else {
         ExitCode::from(1)
     }
+}
+
+fn osint_exit(s: msfe_core::osint::RunState) -> u8 {
+    use msfe_core::osint::RunState::*;
+    match s {
+        Complete => 0,
+        Partial | Cancelled => 4,
+        Failed | Running => 3,
+    }
+}
+
+fn cmd_delivery_osint(rest: &[String]) -> ExitCode {
+    use msfe_core::json::Json;
+    use msfe_core::osint::RunState;
+    use msfe_core::osintrun::{self, StartError, StartOk};
+    let cfg = Config::load(&config_path());
+    let json = rest.iter().any(|a| a == "--json");
+    let html = rest.iter().any(|a| a == "--html");
+    if rest.first().map(String::as_str) == Some("providers") {
+        if json {
+            let list = osintrun::providers()
+                .iter()
+                .map(|p| {
+                    Json::Object(vec![
+                        ("id".into(), Json::str(p.id)),
+                        ("name".into(), Json::str(p.name)),
+                        ("disclosure".into(), Json::str(p.disclosure)),
+                    ])
+                })
+                .collect();
+            println!("{}", Json::Array(list));
+        } else {
+            for p in osintrun::providers() {
+                println!("{}\t{}\t{}", p.id, p.name, p.disclosure);
+            }
+        }
+        return ExitCode::SUCCESS;
+    }
+    if rest.first().map(String::as_str) == Some("sweep") {
+        osintrun::sweep(cfg.osint_retention_hours * 3600);
+        return ExitCode::SUCCESS;
+    }
+    let Some(addr) = rest
+        .iter()
+        .enumerate()
+        .find(|(i, a)| {
+            !a.starts_with('-') && a.contains('@') && !(*i > 0 && rest[*i - 1] == "--providers")
+        })
+        .map(|(_, a)| a)
+    else {
+        eprintln!("usage: {}", usage_of("delivery"));
+        return ExitCode::from(2);
+    };
+    let mut provs: Vec<String> = Vec::new();
+    let mut given = false;
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        if a == "--providers" {
+            given = true;
+            if let Some(v) = it.next() {
+                provs.extend(
+                    v.split(',')
+                        .map(|p| p.trim().to_string())
+                        .filter(|p| !p.is_empty()),
+                );
+            }
+        }
+    }
+    if !given {
+        provs = osintrun::providers()
+            .iter()
+            .map(|p| p.id.to_string())
+            .collect();
+    }
+    let force = rest.iter().any(|a| a == "--force");
+    let inputs = match osintrun::parse_inputs(addr, &provs, force, None) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("msfe-ng: {e}");
+            return ExitCode::from(3);
+        }
+    };
+    let id = match osintrun::start(&cfg, inputs) {
+        Ok(StartOk::Started(id) | StartOk::Cached(id)) => id,
+        Err(StartError::Disabled) => {
+            eprintln!("msfe-ng: OSINT is switched off (set osint_enabled = true in config.toml)");
+            return ExitCode::from(3);
+        }
+        Err(e) => {
+            eprintln!("msfe-ng: cannot start: {e:?}");
+            return ExitCode::from(3);
+        }
+    };
+    let report = loop {
+        match osintrun::snapshot(&id) {
+            Some(r) if r.state != RunState::Running => break r,
+            Some(_) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            None => {
+                eprintln!("msfe-ng: the run disappeared");
+                return ExitCode::from(3);
+            }
+        }
+    };
+    if html {
+        println!("{}", msfe_core::osinthtml::render(&report));
+    } else if json {
+        println!("{}", report.to_json());
+    } else {
+        println!("{} - {}", report.address, report.state.as_str());
+        for s in &report.sources {
+            println!(
+                "  source {:<10} {:<14} {}",
+                s.id,
+                s.state.as_str(),
+                s.detail
+            );
+        }
+        for f in &report.findings {
+            println!("  [{}] {} - {}", f.group.as_str(), f.title, f.evidence);
+        }
+        for l in &report.limitations {
+            println!("  note: {l}");
+        }
+    }
+    ExitCode::from(osint_exit(report.state))
 }
 
 fn cmd_delivery_inbox(rest: &[String]) -> ExitCode {
@@ -3746,4 +3875,32 @@ PROJECT:
     https://github.com/inalto/msfe-ng        source, releases, issues
     https://github.com/inalto/msfe-ng/wiki   usage wiki"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delivery_osint_flags_are_accepted() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(
+            rejected_flag("delivery", Some("osint"), &a(&["--providers", "fixture"])).is_none()
+        );
+        assert!(rejected_flag("delivery", Some("osint"), &a(&["--json"])).is_none());
+        assert!(rejected_flag("delivery", Some("osint"), &a(&["--html", "--force"])).is_none());
+        assert_eq!(
+            rejected_flag("delivery", Some("osint"), &a(&["--nonsense"])),
+            Some("--nonsense")
+        );
+    }
+
+    #[test]
+    fn osint_exit_codes() {
+        use msfe_core::osint::RunState::*;
+        assert_eq!(osint_exit(Complete), 0);
+        assert_eq!(osint_exit(Partial), 4);
+        assert_eq!(osint_exit(Cancelled), 4);
+        assert_eq!(osint_exit(Failed), 3);
+    }
 }
