@@ -21,6 +21,20 @@ pub struct Inputs {
     pub providers: Vec<String>,
     pub force: bool,
     pub delivery_run_id: Option<String>,
+    /// Operator-requested cap on external queries; clamped to the config ceiling.
+    pub max_queries: Option<u32>,
+}
+
+impl Inputs {
+    pub fn with_query_limit(mut self, n: Option<u32>) -> Inputs {
+        self.max_queries = n;
+        self
+    }
+}
+
+pub(crate) fn query_budget(cfg: &Config, i: &Inputs) -> usize {
+    let ceiling = cfg.osint_max_external_queries.max(1);
+    i.max_queries.unwrap_or(ceiling).clamp(1, ceiling) as usize
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +124,7 @@ pub fn parse_inputs(
         providers: chosen,
         force,
         delivery_run_id,
+        max_queries: None,
     })
 }
 
@@ -120,6 +135,9 @@ struct Slot {
     key: String,
     finished_at: Option<Instant>,
     cancel: Arc<AtomicBool>,
+    /// Removed while running: invisible, but it still holds its concurrency
+    /// slot until the worker ends.
+    removed: bool,
 }
 
 static RUNS: Mutex<Option<HashMap<String, Slot>>> = Mutex::new(None);
@@ -188,7 +206,7 @@ pub fn start(cfg: &Config, inputs: Inputs) -> Result<StartOk, StartError> {
     if !inputs.force {
         let hit = with_runs(|runs| {
             runs.values()
-                .filter(|s| s.key == key && s.report.state == RunState::Complete)
+                .filter(|s| !s.removed && s.key == key && s.report.state == RunState::Complete)
                 .filter(|s| {
                     s.finished_at
                         .map(|t| t.elapsed() < Duration::from_secs(cfg.osint_cache_secs))
@@ -233,10 +251,9 @@ pub fn start(cfg: &Config, inputs: Inputs) -> Result<StartOk, StartError> {
     // Busy, the concurrency ceiling and the insert happen under one lock, so
     // two simultaneous starts cannot both pass.
     let rejected = with_runs(|runs| {
-        if let Some(s) = runs
-            .values()
-            .find(|s| s.report.state == RunState::Running && s.report.address == inputs.address)
-        {
+        if let Some(s) = runs.values().find(|s| {
+            !s.removed && s.report.state == RunState::Running && s.report.address == inputs.address
+        }) {
             return Some(StartError::Busy(s.report.run_id.clone()));
         }
         if runs
@@ -254,6 +271,7 @@ pub fn start(cfg: &Config, inputs: Inputs) -> Result<StartOk, StartError> {
                 key,
                 finished_at: None,
                 cancel: cancel.clone(),
+                removed: false,
             },
         );
         None
@@ -263,7 +281,7 @@ pub fn start(cfg: &Config, inputs: Inputs) -> Result<StartOk, StartError> {
         return Err(e);
     }
     let deadline = Instant::now() + Duration::from_secs(cfg.osint_deadline_secs);
-    let max_q = cfg.osint_max_external_queries.max(1) as usize;
+    let max_q = query_budget(cfg, &inputs);
     let id2 = id.clone();
     let spawned = std::thread::Builder::new()
         .name("osint-run".into())
@@ -437,6 +455,10 @@ fn worker(id: String, inputs: Inputs, cancel: Arc<AtomicBool>, deadline: Instant
     // state, and cancel() sets it under the same lock: a cancel() that returned
     // true always yields Cancelled.
     let report = with_runs(|runs| {
+        if runs.get(&id).map(|s| s.removed).unwrap_or(false) {
+            runs.remove(&id);
+            return None;
+        }
         let s = runs.get_mut(&id)?;
         let state = if cancel.load(Ordering::Relaxed) {
             RunState::Cancelled
@@ -464,24 +486,47 @@ fn worker(id: String, inputs: Inputs, cancel: Arc<AtomicBool>, deadline: Instant
 
 // ---- persistence -------------------------------------------------------------
 
+fn ensure_dir() -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    let dir = report_dir();
+    match std::fs::symlink_metadata(&dir) {
+        Ok(md) => {
+            if !md.is_dir() {
+                return Err(std::io::Error::other("report dir is not a directory"));
+            }
+            let me = std::fs::metadata("/proc/self")?.uid();
+            if md.uid() != me {
+                return Err(std::io::Error::other("report dir has the wrong owner"));
+            }
+            if md.permissions().mode() & 0o077 != 0 {
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&dir)?;
+        }
+        Err(e) => return Err(e),
+    }
+    Ok(dir)
+}
+
 fn persist(r: &OsintReport) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    use std::os::unix::fs::OpenOptionsExt;
     if !valid_id(&r.run_id) {
         return Err(std::io::Error::other("bad run id"));
     }
-    let dir = report_dir();
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&dir)?;
+    let dir = ensure_dir()?;
     let tmp = dir.join(format!("{}.tmp", r.run_id));
     let fin = dir.join(format!("{}.json", r.run_id));
     {
+        let _ = std::fs::remove_file(&tmp); // a stale or hostile entry; never write through it
         let mut f = std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
             .open(&tmp)?;
         f.write_all(r.to_json().to_string().as_bytes())?;
@@ -512,12 +557,17 @@ pub fn snapshot(id: &str) -> Option<OsintReport> {
     if tombstoned(id) {
         return None;
     }
-    with_runs(|runs| runs.get(id).map(|s| s.report.clone())).or_else(|| load(id))
+    with_runs(|runs| {
+        runs.get(id)
+            .filter(|s| !s.removed)
+            .map(|s| s.report.clone())
+    })
+    .or_else(|| load(id))
 }
 
 pub fn cancel(id: &str) -> bool {
     with_runs(|runs| match runs.get(id) {
-        Some(s) if s.report.state == RunState::Running => {
+        Some(s) if !s.removed && s.report.state == RunState::Running => {
             s.cancel.store(true, Ordering::Relaxed);
             true
         }
@@ -526,8 +576,12 @@ pub fn cancel(id: &str) -> bool {
 }
 
 pub fn recent(n: usize) -> Vec<OsintReport> {
-    let mut v: Vec<OsintReport> =
-        with_runs(|runs| runs.values().map(|s| s.report.clone()).collect());
+    let mut v: Vec<OsintReport> = with_runs(|runs| {
+        runs.values()
+            .filter(|s| !s.removed)
+            .map(|s| s.report.clone())
+            .collect()
+    });
     if let Ok(rd) = std::fs::read_dir(report_dir()) {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
@@ -553,9 +607,15 @@ pub fn remove(id: &str) -> bool {
     let _g = PERSIST.lock().unwrap_or_else(|e| e.into_inner());
     let p = report_dir().join(format!("{id}.json"));
     let on_disk = p.exists();
-    let had_mem = with_runs(|runs| match runs.remove(id) {
+    let had_mem = with_runs(|runs| match runs.get_mut(id) {
+        Some(s) if s.removed => false,
         Some(s) => {
             s.cancel.store(true, Ordering::Relaxed);
+            if s.report.state == RunState::Running {
+                s.removed = true; // the worker deletes it when it ends
+            } else {
+                runs.remove(id);
+            }
             true
         }
         None => false,
@@ -572,6 +632,15 @@ pub fn remove(id: &str) -> bool {
     had_mem || had_file
 }
 
+#[cfg(test)]
+fn running_count() -> usize {
+    with_runs(|runs| {
+        runs.values()
+            .filter(|s| s.report.state == RunState::Running)
+            .count()
+    })
+}
+
 fn sweep_memory(keep_finished: Duration) {
     with_runs(|runs| {
         runs.retain(|_, s| {
@@ -585,12 +654,22 @@ fn sweep_memory(keep_finished: Duration) {
 /// Delete `<16hex>.json` files older than `max_age_secs`. Other files in the
 /// directory are never touched.
 pub fn sweep(max_age_secs: u64) {
+    sweep_with_tmp_age(max_age_secs, 3600);
+}
+
+/// As `sweep`, also deleting orphaned `<16hex>.tmp` files older than
+/// `tmp_age_secs`.
+pub(crate) fn sweep_with_tmp_age(max_age_secs: u64, tmp_age_secs: u64) {
     let Ok(rd) = std::fs::read_dir(report_dir()) else {
         return;
     };
     for e in rd.flatten() {
         let name = e.file_name().to_string_lossy().to_string();
-        let Some(id) = name.strip_suffix(".json") else {
+        let (id, limit) = if let Some(id) = name.strip_suffix(".json") {
+            (id, max_age_secs)
+        } else if let Some(id) = name.strip_suffix(".tmp") {
+            (id, tmp_age_secs)
+        } else {
             continue;
         };
         if !valid_id(id) {
@@ -603,7 +682,7 @@ pub fn sweep(max_age_secs: u64) {
             .and_then(|t| t.elapsed().ok())
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        if age >= max_age_secs {
+        if age >= limit {
             let _ = std::fs::remove_file(e.path());
         }
     }
@@ -931,5 +1010,115 @@ mod tests {
             start(&c, inp("panic.one@example.org", true)),
             Ok(StartOk::Started(_))
         ));
+    }
+
+    #[test]
+    fn persist_refuses_to_follow_a_symlinked_tmp() {
+        use std::os::unix::fs::symlink;
+        let (_c, _g) = setup();
+        let d = report_dir();
+        std::fs::create_dir_all(&d).unwrap();
+        let victim = d.join("victim.txt");
+        std::fs::write(&victim, "keep").unwrap();
+        let id = "00000000000000aa";
+        let _ = std::fs::remove_file(d.join(format!("{id}.tmp")));
+        symlink(&victim, d.join(format!("{id}.tmp"))).unwrap();
+        let r = OsintReport {
+            run_id: id.into(),
+            address: "a@example.org".into(),
+            started: 1,
+            finished: Some(2),
+            state: RunState::Complete,
+            cached: false,
+            planned: vec![],
+            sources: vec![],
+            findings: vec![],
+            delivery_run_id: None,
+            limitations: vec![],
+        };
+        persist(&r).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "keep",
+            "the symlink target must be untouched"
+        );
+        assert!(d.join(format!("{id}.json")).is_file());
+        let _ = std::fs::remove_file(d.join(format!("{id}.json")));
+        let _ = std::fs::remove_file(victim);
+    }
+
+    #[test]
+    fn existing_loose_directory_is_tightened_to_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_c, _g) = setup();
+        let d = report_dir();
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ensure_dir().unwrap();
+        assert_eq!(
+            std::fs::metadata(&d).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    #[test]
+    fn sweep_removes_old_orphan_tmp_files_but_not_strangers() {
+        let (_c, _g) = setup();
+        let d = report_dir();
+        std::fs::create_dir_all(&d).unwrap();
+        let orphan = d.join("00000000000000bb.tmp");
+        std::fs::write(&orphan, "x").unwrap();
+        let stranger = d.join("notes.tmp");
+        std::fs::write(&stranger, "x").unwrap();
+        sweep_with_tmp_age(0, 0);
+        assert!(!orphan.exists());
+        assert!(stranger.exists());
+        let _ = std::fs::remove_file(stranger);
+    }
+
+    #[test]
+    fn removing_a_running_run_keeps_its_concurrency_slot_until_the_worker_ends() {
+        let (mut c, _g) = setup();
+        c.osint_max_concurrent = 1;
+        let StartOk::Started(id) = start(&c, inp("slow.rmslot@example.org", true)).unwrap() else {
+            panic!()
+        };
+        assert!(remove(&id));
+        assert!(snapshot(&id).is_none(), "removed run is invisible");
+        // The worker has not noticed the cancel yet or has only just; either
+        // way a new start must never exceed the ceiling of 1.
+        let second = start(&c, inp("quiet.rmslot2@example.org", true));
+        match second {
+            Ok(StartOk::Started(id2)) => {
+                wait_done(&id2);
+            }
+            Err(StartError::TooManyRuns) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        let end = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < end && running_count() > 0 {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            running_count(),
+            0,
+            "the removed slot is released when the worker ends"
+        );
+        assert!(
+            !report_dir().join(format!("{id}.json")).exists(),
+            "a removed run is never persisted"
+        );
+    }
+
+    #[test]
+    fn query_limit_is_clamped_to_the_configured_ceiling() {
+        let (mut c, _g) = setup();
+        c.osint_max_external_queries = 1;
+        let i = inp("quiet.q@example.org", true);
+        assert_eq!(query_budget(&c, &i.clone().with_query_limit(Some(99))), 1);
+        assert_eq!(query_budget(&c, &i.clone().with_query_limit(None)), 1);
+        c.osint_max_external_queries = 5;
+        assert_eq!(query_budget(&c, &i.clone().with_query_limit(Some(2))), 2);
+        assert_eq!(query_budget(&c, &i.with_query_limit(Some(0))), 1);
     }
 }

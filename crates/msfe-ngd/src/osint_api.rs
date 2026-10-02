@@ -91,6 +91,11 @@ fn start(req: &Request, cfg: &Config) -> Response {
     let delivery_id = ctx
         .and_then(|c| c.get("delivery_run_id"))
         .and_then(Json::as_str);
+    let limit = v
+        .get("external_query_limit")
+        .and_then(Json::as_i64)
+        .filter(|n| *n >= 1)
+        .map(|n| n.min(u32::MAX as i64) as u32);
     let inputs = match osintrun::parse_inputs(
         &v.str_field("address"),
         &provs,
@@ -99,7 +104,8 @@ fn start(req: &Request, cfg: &Config) -> Response {
     ) {
         Ok(i) => i,
         Err(e) => return err(400, &e),
-    };
+    }
+    .with_query_limit(limit);
     match osintrun::start(cfg, inputs) {
         Ok(StartOk::Started(id)) => Response::json(
             201,
@@ -345,5 +351,93 @@ mod tests {
             &c,
         );
         assert_eq!(r.status, 404);
+    }
+
+    fn post(path: &str, body: &str, c: &Config) -> Response {
+        handle(
+            "POST",
+            path,
+            &crate::http::Request::test("POST", path, body),
+            c,
+        )
+    }
+
+    #[test]
+    fn busy_cached_and_rate_limited_map_to_409_200_429() {
+        let c = Config {
+            osint_runs_per_min: 1000,
+            osint_max_concurrent: 8,
+            ..setup()
+        };
+        let run = "/api/delivery/osint/run";
+        let slow = r#"{"address":"slow.route@example.org","providers":["fixture"],"force":true}"#;
+        let a = post(run, slow, &c);
+        assert_eq!(a.status, 201);
+        let id = Json::parse(a.body_str()).unwrap().str_field("run_id");
+        let b = post(run, slow, &c);
+        assert_eq!(b.status, 409);
+        assert_eq!(Json::parse(b.body_str()).unwrap().str_field("run_id"), id);
+        let _ = post(
+            "/api/delivery/osint/run/cancel",
+            &format!(r#"{{"id":"{id}"}}"#),
+            &c,
+        );
+
+        let quiet = r#"{"address":"quiet.route@example.org","providers":["fixture"],"force":true}"#;
+        let q = post(run, quiet, &c);
+        let qid = Json::parse(q.body_str()).unwrap().str_field("run_id");
+        for _ in 0..200 {
+            let p = handle(
+                "GET",
+                run,
+                &crate::http::Request::test("GET", &format!("{run}?id={qid}"), ""),
+                &c,
+            );
+            if Json::parse(p.body_str()).unwrap().str_field("state") == "complete" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let cached = r#"{"address":"quiet.route@example.org","providers":["fixture"]}"#;
+        let r = post(run, cached, &c);
+        assert_eq!(r.status, 200);
+        assert!(r.body_str().contains("\"cached\":true"));
+
+        let tight = Config {
+            osint_runs_per_min: 1,
+            ..c.clone()
+        };
+        let one = r#"{"address":"quiet.route2@example.org","providers":["fixture"],"force":true}"#;
+        let two = r#"{"address":"quiet.route3@example.org","providers":["fixture"],"force":true}"#;
+        let _ = post(run, one, &tight);
+        let t = post(run, two, &tight);
+        assert_eq!(t.status, 429);
+    }
+
+    #[test]
+    fn non_hex_ids_are_404_on_report_cancel_and_remove() {
+        let c = setup();
+        for (m, p, b) in [
+            ("GET", "/api/delivery/osint/report?id=..%2Fx", ""),
+            ("POST", "/api/delivery/osint/run/cancel", r#"{"id":"../x"}"#),
+            ("POST", "/api/delivery/osint/remove", r#"{"id":"../x"}"#),
+        ] {
+            let r = handle(
+                m,
+                p.split('?').next().unwrap(),
+                &crate::http::Request::test(m, p, b),
+                &c,
+            );
+            assert_eq!(r.status, 404, "{p}");
+        }
+    }
+
+    #[test]
+    fn client_supplied_urls_paths_and_keys_are_ignored() {
+        let c = setup();
+        let body = r#"{"address":"quiet.ign@example.org","providers":["fixture"],"force":true,"url":"https://evil.example/x","path":"/etc/passwd","key":"k","ip":"127.0.0.1"}"#;
+        let r = post("/api/delivery/osint/run", body, &c);
+        assert!(r.status == 201 || r.status == 200 || r.status == 429);
+        assert!(!r.body_str().contains("evil"));
     }
 }
