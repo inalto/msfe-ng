@@ -59,6 +59,7 @@ pub fn infos(cfg: &Config) -> Vec<Info> {
         gravatar_info(),
         rdap_info(),
         search_info(cfg),
+        hunter_info(cfg),
         delivery_info(),
     ];
     if fixture_enabled() {
@@ -77,6 +78,7 @@ pub fn is_known(id: &str) -> bool {
         || id == "gravatar"
         || id == "rdap"
         || id == SEARCH_ID
+        || id == HUNTER_ID
         || id == DELIVERY_ID
         || (id == "fixture" && fixture_enabled())
 }
@@ -88,6 +90,7 @@ pub fn run(id: &str, q: &QueryCtx) -> Outcome {
         "gravatar" => gravatar(q),
         "rdap" => rdap(q),
         SEARCH_ID => search(q),
+        HUNTER_ID => hunter(q),
         DELIVERY_ID => delivery(q),
         other => Outcome {
             source: SourceStatus {
@@ -1525,6 +1528,196 @@ fn search(q: &QueryCtx) -> Outcome {
     }
 }
 
+// ---- Hunter email validation ----------------------------------------------
+
+const HUNTER_ID: &str = "hunter";
+const HUNTER_HOST: &str = "api.hunter.io";
+const HUNTER_MAX_BODY: usize = 256 * 1024;
+const HUNTER_STATUSES: [&str; 6] = [
+    "valid",
+    "invalid",
+    "accept_all",
+    "webmail",
+    "disposable",
+    "unknown",
+];
+
+fn hunter_info(cfg: &Config) -> Info {
+    Info {
+        id: HUNTER_ID,
+        name: "Hunter email verification",
+        disclosure: "the full address is sent to Hunter, which checks the mailbox itself and uses paid quota".into(),
+        configured: !cfg.osint_validation_key.trim().is_empty(),
+    }
+}
+
+fn yes_no(j: &Json, key: &str, label: &str, out: &mut Vec<String>) {
+    if let Some(Json::Bool(b)) = j.get(key) {
+        out.push(format!("{label}: {}", if *b { "yes" } else { "no" }));
+    }
+}
+
+/// One `Validation` finding from Hunter's answer. Only a fixed status
+/// vocabulary and booleans/score are copied; `sources` is only counted.
+fn hunter_finding(body: &[u8], now: u64) -> Result<Finding, String> {
+    let text = std::str::from_utf8(body).map_err(|_| "unexpected answer".to_string())?;
+    let j = Json::parse(text).map_err(|_| "unexpected answer".to_string())?;
+    let d = match j.get("data") {
+        Some(d) if matches!(d, Json::Object(_)) => d,
+        _ => return Err("unexpected answer".into()),
+    };
+    let status = str_of(d, "status")
+        .filter(|s| HUNTER_STATUSES.contains(s))
+        .unwrap_or("unknown value");
+    let mut parts: Vec<String> = Vec::new();
+    yes_no(d, "mx_records", "MX records", &mut parts);
+    yes_no(d, "smtp_check", "SMTP check", &mut parts);
+    yes_no(d, "accept_all", "accept-all server", &mut parts);
+    yes_no(d, "block", "blocked", &mut parts);
+    yes_no(d, "disposable", "disposable", &mut parts);
+    yes_no(d, "webmail", "webmail", &mut parts);
+    yes_no(d, "gibberish", "looks auto-generated", &mut parts);
+    if let Some(n) = d.get("score").and_then(|s| s.as_i64()) {
+        if (0..=100).contains(&n) {
+            parts.push(format!("score: {n}"));
+        }
+    }
+    let mut evidence = if parts.is_empty() {
+        "Hunter returned no further details.".to_string()
+    } else {
+        format!("{}.", parts.join("; "))
+    };
+    let n_sources = d
+        .get("sources")
+        .and_then(|s| s.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    if n_sources > 0 {
+        evidence.push_str(&format!(
+            " Hunter lists {n_sources} public page(s) for this address."
+        ));
+    }
+    Ok(Finding {
+        group: Group::Validation,
+        confidence: Confidence::Medium,
+        confidence_reason:
+            "a vendor assertion from Hunter's own checks; MSFE-NG did not probe this mailbox".into(),
+        severity: Severity::Info,
+        observed_at: now,
+        event_at: None,
+        source_id: HUNTER_ID.into(),
+        source_url: None,
+        title: format!("Hunter's verdict: {status}"),
+        evidence,
+        limitations: vec![
+            "This does not prove the mailbox exists or is read by its owner.".into(),
+            "Servers that accept all recipients cannot be verified remotely.".into(),
+            "MSFE-NG's own Delivery tests remain the evidence for this server's mail routing."
+                .into(),
+        ],
+        asset_id: None,
+        asset_mime: None,
+    })
+}
+
+fn hunter(q: &QueryCtx) -> Outcome {
+    let key = q.cfg.osint_validation_key.trim().to_string();
+    if key.is_empty() {
+        return outcome(
+            HUNTER_ID,
+            SourceState::NotConfigured,
+            "no validation API key is set (Config \u{2192} OSINT providers)",
+        );
+    }
+    let remaining = q.deadline.saturating_duration_since(Instant::now());
+    if q.stop() || remaining.is_zero() {
+        return outcome(
+            HUNTER_ID,
+            SourceState::Inconclusive,
+            "stopped before this source ran",
+        );
+    }
+    let addr = q.address.trim();
+    let req = Request {
+        provider: "hunter",
+        host: HUNTER_HOST.to_string(),
+        path: "/v2/email-verifier".to_string(),
+        query: vec![("email", addr.to_string())],
+        headers: vec![
+            ("x-api-key", key.clone()),
+            ("accept", "application/json".to_string()),
+        ],
+        // The verifier talks to the recipient's mail server, so it is slow.
+        timeout: remaining.min(Duration::from_secs(20)),
+        max_body: HUNTER_MAX_BODY,
+    };
+    let resp = match providerhttp::fetch(&req) {
+        Ok(r) => r,
+        Err(HttpError::Timeout) => return outcome(HUNTER_ID, SourceState::Failed, "timed out"),
+        Err(e) => {
+            let t = providerhttp::redact(&e.to_string(), &[&key, addr]);
+            return outcome(HUNTER_ID, SourceState::Failed, &t);
+        }
+    };
+    match resp.status {
+        200 => match hunter_finding(&resp.body, now_secs()) {
+            Err(_) => outcome(
+                HUNTER_ID,
+                SourceState::Failed,
+                "unexpected answer from Hunter",
+            ),
+            Ok(f) => {
+                let verdict = f
+                    .title
+                    .strip_prefix("Hunter's verdict: ")
+                    .unwrap_or("unknown value")
+                    .to_string();
+                Outcome {
+                    source: status(
+                        HUNTER_ID,
+                        SourceState::Matched,
+                        &format!("Hunter status: {verdict}"),
+                    ),
+                    findings: vec![f],
+                    assets: Vec::new(),
+                }
+            }
+        },
+        202 => outcome(
+            HUNTER_ID,
+            SourceState::Inconclusive,
+            "Hunter is still verifying this address; try again later",
+        ),
+        222 => outcome(
+            HUNTER_ID,
+            SourceState::Inconclusive,
+            "the recipient's mail server gave Hunter an error",
+        ),
+        400 => outcome(
+            HUNTER_ID,
+            SourceState::Failed,
+            "Hunter rejected the request as malformed",
+        ),
+        401 => outcome(
+            HUNTER_ID,
+            SourceState::Restricted,
+            "HTTP 401: Hunter rejected the API key",
+        ),
+        403 => rate_limited(HUNTER_ID, resp.retry_after, "Hunter rate limit"),
+        429 => rate_limited(HUNTER_ID, resp.retry_after, "Hunter usage quota used up"),
+        451 => outcome(
+            HUNTER_ID,
+            SourceState::Restricted,
+            "Hunter declined: this person asked it to stop processing their data",
+        ),
+        n => outcome(
+            HUNTER_ID,
+            SourceState::Failed,
+            &format!("Hunter answered HTTP {n}"),
+        ),
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod testutil {
     use std::io::{Read, Write};
@@ -2660,5 +2853,175 @@ mod tests {
                 .configured
         );
         assert!(is_known("search"));
+    }
+
+    // ---- hunter ----------------------------------------------------------
+
+    static HUNTER_LOCK: Mutex<()> = Mutex::new(());
+
+    const HUNTER_BODY: &str = r#"{"data":{"status":"valid","score":87,"regexp":true,"gibberish":false,"disposable":false,"webmail":true,"mx_records":true,"smtp_server":true,"smtp_check":true,"accept_all":false,"block":false,"sources":[{"uri":"https://x.example/","domain":"x.example"},{"uri":"https://y.example/"}]}}"#;
+
+    #[test]
+    fn hunter_finding_lists_only_present_booleans_and_counts_sources() {
+        let f = hunter_finding(HUNTER_BODY.as_bytes(), 5).unwrap();
+        assert_eq!(f.group, Group::Validation);
+        assert_eq!(f.confidence, Confidence::Medium);
+        assert_ne!(f.confidence, Confidence::High);
+        assert_eq!(f.severity, Severity::Info);
+        assert_eq!(f.title, "Hunter's verdict: valid");
+        for part in [
+            "MX records: yes",
+            "SMTP check: yes",
+            "accept-all server: no",
+            "blocked: no",
+            "disposable: no",
+            "webmail: yes",
+            "looks auto-generated: no",
+            "score: 87",
+            "Hunter lists 2 public page(s) for this address",
+        ] {
+            assert!(f.evidence.contains(part), "{part}: {}", f.evidence);
+        }
+        assert!(!f.evidence.contains("x.example"), "sources are not copied");
+        assert!(f.confidence_reason.contains("vendor assertion"));
+        assert_eq!(f.limitations.len(), 3);
+        assert!(f.source_url.is_none());
+    }
+
+    #[test]
+    fn hunter_parsing_edge_cases() {
+        assert!(hunter_finding(b"{}", 1).is_err());
+        assert!(hunter_finding(b"nope", 1).is_err());
+        assert!(hunter_finding(br#"{"data":"x"}"#, 1).is_err());
+        // Non-bool fields are ignored; a hostile status is replaced.
+        let f = hunter_finding(
+            br#"{"data":{"status":"<b>valid</b>; DROP","mx_records":"yes","score":"high","webmail":1}}"#,
+            1,
+        )
+        .unwrap();
+        assert_eq!(f.title, "Hunter's verdict: unknown value");
+        assert!(!f.evidence.contains("MX") && !f.evidence.contains("score"));
+        assert!(!f.evidence.contains("DROP") && !f.title.contains("DROP"));
+        // Out-of-range score is ignored; no sources, no mention.
+        let g = hunter_finding(br#"{"data":{"status":"invalid","score":900}}"#, 1).unwrap();
+        assert_eq!(g.title, "Hunter's verdict: invalid");
+        assert!(!g.evidence.contains("score") && !g.evidence.contains("public page"));
+    }
+
+    #[test]
+    fn hunter_without_a_key_is_not_configured_and_sends_nothing() {
+        let _g = HUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (port, h) = serve(http("200 OK", HUNTER_BODY));
+        let _e = EnvGuard::set("MSFE_NG_OSINT_BASE_HUNTER", port);
+        let o = run_with("hunter", &Config::default(), "a@example.org");
+        assert_eq!(o.source.state, SourceState::NotConfigured);
+        assert!(o.findings.is_empty());
+        let _ = std::net::TcpStream::connect(("127.0.0.1", port));
+        assert!(!h.join().unwrap().contains("GET"));
+    }
+
+    #[test]
+    fn hunter_status_table_end_to_end() {
+        let _g = HUNTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cases: Vec<(&str, &str, SourceState, &str)> = vec![
+            (
+                "200 OK",
+                HUNTER_BODY,
+                SourceState::Matched,
+                "Hunter status: valid",
+            ),
+            (
+                "202 Accepted",
+                "",
+                SourceState::Inconclusive,
+                "still verifying",
+            ),
+            (
+                "222 Unknown",
+                "",
+                SourceState::Inconclusive,
+                "mail server gave Hunter an error",
+            ),
+            ("400 Bad Request", "", SourceState::Failed, ""),
+            ("401 Unauthorized", "", SourceState::Restricted, "401"),
+            (
+                "403 Forbidden",
+                "",
+                SourceState::RateLimited,
+                "Hunter rate limit",
+            ),
+            (
+                "429 Too Many Requests",
+                "",
+                SourceState::RateLimited,
+                "usage quota used up",
+            ),
+            (
+                "451 Unavailable For Legal Reasons",
+                "",
+                SourceState::Restricted,
+                "asked it to stop processing",
+            ),
+            ("503 Service Unavailable", "", SourceState::Failed, ""),
+        ];
+        for (status, body, want, detail) in cases {
+            let (port, h) = serve(http(status, body));
+            let _e = EnvGuard::set("MSFE_NG_OSINT_BASE_HUNTER", port);
+            let cfg = Config {
+                osint_validation_key: "HUNTSECRET77".into(),
+                ..Config::default()
+            };
+            let o = run_with("hunter", &cfg, "a+b@example.org");
+            let head = h.join().unwrap();
+            assert_eq!(o.source.state, want, "{status}: {}", o.source.detail);
+            assert!(
+                o.source.detail.contains(detail),
+                "{status}: {}",
+                o.source.detail
+            );
+            let line = head.lines().next().unwrap();
+            assert!(
+                line.starts_with("GET /v2/email-verifier?email=a%2Bb%40example.org "),
+                "{line}"
+            );
+            assert!(
+                head.to_ascii_lowercase()
+                    .contains("x-api-key: huntsecret77"),
+                "{head}"
+            );
+            assert!(
+                !line.contains("HUNTSECRET77") && !line.to_ascii_lowercase().contains("api_key")
+            );
+            assert!(!o.source.detail.contains("HUNTSECRET77"));
+            for f in &o.findings {
+                assert!(!format!("{f:?}").contains("HUNTSECRET77"));
+                assert_ne!(f.confidence, Confidence::High);
+            }
+            assert_eq!(o.findings.len(), usize::from(want == SourceState::Matched));
+            if status.starts_with("403") || status.starts_with("429") {
+                assert_eq!(o.source.retry_after, Some(7));
+            }
+            if status.starts_with("401") {
+                assert!(o.source.detail.starts_with("HTTP 401"));
+            }
+        }
+    }
+
+    #[test]
+    fn hunter_is_listed_as_paid_and_configured_follows_the_key() {
+        let mut cfg = Config::default();
+        let i = infos(&cfg).into_iter().find(|p| p.id == "hunter").unwrap();
+        assert!(!i.configured);
+        assert!(i.disclosure.contains("full address is sent to Hunter"));
+        assert!(i.disclosure.contains("paid quota"));
+        cfg.osint_validation_key = "k".into();
+        assert!(
+            infos(&cfg)
+                .into_iter()
+                .find(|p| p.id == "hunter")
+                .unwrap()
+                .configured
+        );
+        assert!(is_known("hunter"));
     }
 }
