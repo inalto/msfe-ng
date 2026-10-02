@@ -323,6 +323,12 @@ function deliveryTestLink(addr){
   const icon=strokeIcon('M6 12 3.269 3.125A59.769 59.769 0 0 1 21.485 12 59.768 59.768 0 0 1 3.27 20.875L5.999 12Zm0 0h7.5','dtico');
   return Object.assign(el('a',{class:'dtlink',role:'button','aria-label':'Delivery test for '+a,title:'Run a delivery test for '+a+' (DNS, authentication, mail servers; the server audit when hosted here)'},icon),{onclick:e=>{e.stopPropagation();deliveryTestFor(a);}});
 }
+function osintLink(addr,context){
+  const a=String(addr||'').split(',')[0].trim();
+  if(!a.includes('@'))return el('span',{});
+  const icon=strokeIcon('m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z','dtico');
+  return Object.assign(el('a',{class:'dtlink',role:'button','aria-label':'Investigate '+a,title:'Investigate '+a+' (OSINT: public information about this address; you pick the sources and press Run)'},icon),{onclick:e=>{e.stopPropagation();osintFor(a,context);}});
+}
 function senderLink(addr){
   const a=String(addr||'').trim();
   if(!a||!a.includes('@'))return el('span',{},a);
@@ -635,7 +641,8 @@ let dlvInboxTimer=null; // diagnostic inbox poller
 let dlvMailTimer=null; // outbound test-message job poller
 let dlvAcctTimer=null; // Account DNS scan poller; cleared on every tab switch
 let dlvDmarcTimer=null; // DMARC report fetch poller; cleared on every tab switch
-let DLV_VIEW='test'; // which view of the Delivery tab: 'test' | 'accounts' | 'dmarc'
+let dlvOsintTimer=null; // OSINT run poller; cleared on every tab switch
+let DLV_VIEW='test'; // which view of the Delivery tab: 'test' | 'accounts' | 'dmarc' | 'osint'
 let DLV_PREFILL=null; // {address, run} set by other tabs before opening the Delivery test tab
 // Open the Delivery test tab for an address and start the run at once.
 function deliveryTestFor(address){
@@ -644,10 +651,20 @@ function deliveryTestFor(address){
   DLV_PREFILL={address:a,run:true};DLV_VIEW='test';
   document.querySelector('#tabs button[data-tab="delivery"]').click();
 }
+let OSINT_PREFILL=null;
+// "Investigate address": open Delivery → OSINT with the address filled in. It
+// never starts a lookup; the operator picks sources and presses Run.
+function osintFor(address,context){
+  const a=String(address||'').trim();
+  if(!a.includes('@')){toast('no address to investigate');return;}
+  OSINT_PREFILL={address:a,context:context||null};
+  DLV_VIEW='osint';
+  document.querySelector('#tabs button[data-tab="delivery"]').click();
+}
 $('#tabs').addEventListener('click',e=>{
   const b=e.target.closest('button');if(!b)return;
   clearInterval(logTimer);logTimer=null;
-  clearInterval(cfgJobTimer);clearInterval(dlvTimer);dlvTimer=null;clearInterval(dlvInboxTimer);dlvInboxTimer=null;clearInterval(dlvMailTimer);dlvMailTimer=null;clearInterval(dlvAcctTimer);dlvAcctTimer=null;clearInterval(dlvDmarcTimer);dlvDmarcTimer=null;clearInterval(jrnTimer);jrnTimer=null;
+  clearInterval(cfgJobTimer);clearInterval(dlvTimer);dlvTimer=null;clearInterval(dlvInboxTimer);dlvInboxTimer=null;clearInterval(dlvMailTimer);dlvMailTimer=null;clearInterval(dlvAcctTimer);dlvAcctTimer=null;clearInterval(dlvDmarcTimer);dlvDmarcTimer=null;clearInterval(dlvOsintTimer);dlvOsintTimer=null;clearInterval(jrnTimer);jrnTimer=null;
   clearInterval(msgTimer);msgTimer=null;
   clearInterval(dashTimer);dashTimer=null;
   document.querySelectorAll('#tabs button').forEach(x=>x.setAttribute('aria-selected',x===b));
@@ -1214,7 +1231,7 @@ async function renderMessages(){
         el('td',{},pick),
         el('td',{class:'muted',style:'white-space:nowrap'},m.ts),
         el('td',{class:'num'},m.score||'0'),
-        el('td',{},el('div',{},senderLink(m.from)),el('div',{class:'muted'},m.to,' ',deliveryTestLink(m.to))),
+        el('td',{},el('div',{},senderLink(m.from)),el('div',{class:'muted'},m.to,' ',deliveryTestLink(m.to),' ',osintLink(m.to))),
         el('td',{style:'white-space:nowrap'},m.clientip?ipLink(m.clientip):''),
         el('td',{},m.subject,' ',Object.assign(el('a',{class:'iplink',title:'Block messages like this one and/or ban their source'},'ban rule'),{onclick:e=>{e.stopPropagation();banRuleFromMessage(m);}})),
         el('td',{class:'num'},fmtSize(m.size)),
@@ -2430,8 +2447,8 @@ function queueCard(v,which,title){
           m.frozen?el('span',{class:'badge',style:'background:var(--serious);margin-left:.4rem'},'frozen'):'',
           m.parsed?'':el('span',{class:'badge',style:'background:var(--muted);margin-left:.4rem',title:'spool header could not be parsed — only age and size are known'},'?')),
         scoreCell(m),
-        el('td',{},m.bounce?el('span',{class:'badge',style:'background:var(--ink2)',title:'null envelope sender — a bounce, or spam sent so it can never be bounced back'},'∅ bounce'):el('span',{},m.sender||'—',' ',deliveryTestLink(m.sender||''))),
-        el('td',{title:m.recipients.join(', ')},m.recipients[0]||'—',m.recipients.length>1?el('span',{class:'muted'},' +'+(m.recipients.length-1)):'',' ',deliveryTestLink(m.recipients[0]||'')),
+        el('td',{},m.bounce?el('span',{class:'badge',style:'background:var(--ink2)',title:'null envelope sender — a bounce, or spam sent so it can never be bounced back'},'∅ bounce'):el('span',{},m.sender||'—',' ',deliveryTestLink(m.sender||''),' ',osintLink(m.sender||''))),
+        el('td',{title:m.recipients.join(', ')},m.recipients[0]||'—',m.recipients.length>1?el('span',{class:'muted'},' +'+(m.recipients.length-1)):'',' ',deliveryTestLink(m.recipients[0]||''),' ',osintLink(m.recipients[0]||'')),
         el('td',{style:'max-width:16rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap',title:m.subject||''},m.subject||el('span',{class:'muted'},'—')),
         el('td',{},...['headers','body','log'].map(w=>Object.assign(el('button',{class:'act plain',style:'margin-right:.25rem'},w),{onclick:()=>msgView(m.id,w)}))),
         el('td',{},
@@ -2674,6 +2691,91 @@ async function dmShowReport(r){
   m.body.append(Array.isArray(rows)?dmRecordsTable(rows,false):el('div',{class:'muted'},(rows&&rows.error)||'cannot load'));
 }
 
+const OSINT_STATE_LABEL={matched:'found',no_match:'no match',inconclusive:'inconclusive',restricted:'restricted',not_configured:'not configured',not_requested:'not requested',rate_limited:'rate limited',failed:'failed'};
+const OSINT_GROUPS=[['exposure','Exposure'],['profile','Public identity and avatar'],['reference','Public references'],['domain','Domain context'],['validation','Validation'],['context','Delivery context']];
+async function renderOsint(v){
+  clearInterval(dlvOsintTimer);dlvOsintTimer=null;
+  const card=el('div',{class:'card'},el('h2',{},'OSINT — what is publicly known about an address'));
+  card.append(el('div',{class:'muted',style:'font-size:.8rem;margin-bottom:.6rem'},
+    'Looks up public sources for one address you choose. Nothing runs until you press Run. A source finding nothing does not mean the address is safe or unexposed, and an old breach is history, not proof of a current problem. Nothing here changes how mail is filtered or delivered.'));
+  v.append(card);
+  const prov=await api('/api/delivery/osint/providers');
+  if(!prov||prov.error){card.append(el('div',{class:'note warn'},(prov&&prov.error)||'no response'));return;}
+  if(!prov.enabled){card.append(el('div',{class:'note warn'},'OSINT is switched off. Set osint_enabled = true in config.toml (Config tab) to use it.'));}
+  const pre=OSINT_PREFILL;OSINT_PREFILL=null;
+  const addr=el('input',{type:'text',placeholder:'user@example.org',style:'min-width:18rem',value:pre?pre.address:''});
+  const force=el('input',{type:'checkbox'});
+  const runBtn=el('button',{class:'act'},'Run OSINT');
+  const cancelBtn=el('button',{class:'act',style:'display:none'},'Cancel');
+  runBtn.disabled=!prov.enabled;
+  card.append(el('div',{class:'ctl'},addr,runBtn,cancelBtn,el('label',{class:'muted',style:'font-size:.8rem;display:flex;gap:.3rem;align-items:center'},force,' fresh lookup')));
+  const boxes=[];
+  const srcRow=el('div',{style:'margin:.4rem 0'});
+  if(!prov.providers.length)srcRow.append(el('div',{class:'muted'},'No sources are available.'));
+  prov.providers.forEach(p=>{
+    const cb=el('input',{type:'checkbox',checked:'checked'});cb.dataset.id=p.id;boxes.push(cb);
+    srcRow.append(el('label',{style:'display:block;font-size:.85rem'},cb,' ',el('b',{},p.name),el('span',{class:'muted'},' — '+p.disclosure)));
+  });
+  card.append(srcRow);
+  const out=el('div',{});v.append(out);
+  let curId=null,curCached=false;
+
+  function paint(r){
+    out.innerHTML='';
+    const head=el('div',{class:'card'});
+    head.append(el('h2',{},r.address+' — '+r.state));
+    if(curCached)head.append(el('div',{class:'muted'},'Showing a recent result; tick “fresh lookup” to query again.'));
+    if(r.state==='cancelled')head.append(el('div',{class:'note warn'},'Cancelled — this result is incomplete.'));
+    if(r.state==='partial')head.append(el('div',{class:'note warn'},'Some sources did not give an answer; see Source coverage.'));
+    const acts=el('div',{class:'ctl'});
+    const t=el('button',{class:'act'},'Open Address test');t.onclick=()=>deliveryTestFor(r.address);
+    const dl=async(fmt,mime,ext)=>{const x=await apiRaw('/api/delivery/osint/report?id='+encodeURIComponent(r.run_id)+'&format='+fmt);if(!x.ok){toast('cannot export this report');return;}const b=new Blob([x.text],{type:mime});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='osint-'+r.run_id+'.'+ext;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);};
+    const j=el('a',{class:'act',href:'#'},'JSON');j.onclick=e=>{e.preventDefault();dl('json','application/json','json');};
+    const h=el('a',{class:'act',href:'#'},'HTML');h.onclick=e=>{e.preventDefault();dl('html','text/html','html');};
+    acts.append(t,j,h);head.append(acts);
+    out.append(head);
+    OSINT_GROUPS.forEach(([g,title])=>{
+      const fs=(r.findings||[]).filter(f=>f.group===g);
+      if(!fs.length)return;
+      const c=el('div',{class:'card'},el('h2',{},title));
+      fs.forEach(f=>{
+        const row=el('div',{style:'margin:.5rem 0'});
+        row.append(el('div',{},el('b',{},f.title)));
+        row.append(el('div',{},f.evidence));
+        const when=f.event_at?('event '+new Date(f.event_at*1000).toLocaleDateString()+' · '):'';
+        row.append(el('div',{class:'muted',style:'font-size:.78rem'},when+'source '+f.source_id+' · confidence '+f.confidence+(f.confidence_reason?' ('+f.confidence_reason+')':'')+' · retrieved '+new Date(f.observed_at*1000).toLocaleString()));
+        if(f.source_url&&/^https?:\/\//.test(f.source_url)){const a=el('a',{href:f.source_url,target:'_blank',rel:'noopener noreferrer'},f.source_url);row.append(a);}
+        (f.limitations||[]).forEach(l=>row.append(el('div',{class:'muted',style:'font-size:.78rem'},'Limit: '+l)));
+        c.append(row);
+      });
+      out.append(c);
+    });
+    if(!(r.findings||[]).length&&r.state!=='running')out.append(el('div',{class:'card'},el('div',{class:'empty'},'No findings. That does not mean the address is unexposed.')));
+    const cov=el('div',{class:'card'},el('h2',{},'Source coverage'));
+    (r.sources||[]).forEach(s=>cov.append(el('div',{style:'font-size:.85rem'},el('b',{},s.id),' — '+(OSINT_STATE_LABEL[s.state]||s.state)+(s.detail?': '+s.detail:'')+(s.retry_after?' (retry after '+s.retry_after+' s)':''))));
+    (r.limitations||[]).forEach(l=>cov.append(el('div',{class:'muted',style:'font-size:.78rem'},l)));
+    out.append(cov);
+  }
+  async function poll(){
+    const r=await api('/api/delivery/osint/run?id='+encodeURIComponent(curId));
+    if(!v.isConnected){clearInterval(dlvOsintTimer);dlvOsintTimer=null;return;}
+    if(!r||r.error){clearInterval(dlvOsintTimer);dlvOsintTimer=null;runBtn.disabled=false;cancelBtn.style.display='none';out.innerHTML='';out.append(el('div',{class:'note warn'},(r&&r.error)||'no response'));return;}
+    paint(r);
+    if(r.state!=='running'){clearInterval(dlvOsintTimer);dlvOsintTimer=null;runBtn.disabled=!prov.enabled;cancelBtn.style.display='none';}
+  }
+  runBtn.onclick=async()=>{
+    const providers=boxes.filter(b=>b.checked).map(b=>b.dataset.id);
+    const body={address:addr.value.trim(),providers,force:force.checked};
+    if(pre&&pre.context&&pre.context.delivery_run_id&&pre.address===body.address)body.context={delivery_run_id:pre.context.delivery_run_id};
+    const r=await api('/api/delivery/osint/run',{method:'POST',body});
+    if(!r||(r.error&&!r.run_id)){toast((r&&r.error)||'cannot start');return;}
+    if(!v.isConnected)return;
+    curId=r.run_id;curCached=r.cached===true;runBtn.disabled=true;cancelBtn.style.display='';
+    clearInterval(dlvOsintTimer);dlvOsintTimer=setInterval(poll,1500);poll();
+  };
+  cancelBtn.onclick=async()=>{if(curId)await api('/api/delivery/osint/run/cancel',{method:'POST',body:{id:curId}});};
+}
+
 async function renderDmarcReports(v){
   const card=el('div',{class:'card'},el('h2',{},'DMARC reports — who sends mail as your domains'));
   card.append(el('div',{class:'muted',style:'font-size:.8rem;margin-bottom:.6rem'},
@@ -2894,7 +2996,7 @@ async function renderDmarcReports(v){
   load();
 }
 
-const DLV_VIEWS=[['test','Address test'],['accounts','Account DNS'],['dmarc','DMARC reports']];
+const DLV_VIEWS=[['test','Address test'],['accounts','Account DNS'],['dmarc','DMARC reports'],['osint','OSINT']];
 async function renderDelivery(){
   const v=$('#view');v.innerHTML='';
   const pills=el('div',{class:'dlv-views',role:'tablist','aria-label':'Delivery views'});
@@ -2903,13 +3005,13 @@ async function renderDelivery(){
     b.onclick=()=>{if(DLV_VIEW===id)return;DLV_VIEW=id;
       clearInterval(dlvTimer);dlvTimer=null;clearInterval(dlvInboxTimer);dlvInboxTimer=null;
       clearInterval(dlvMailTimer);dlvMailTimer=null;clearInterval(dlvAcctTimer);dlvAcctTimer=null;
-      clearInterval(dlvDmarcTimer);dlvDmarcTimer=null;
+      clearInterval(dlvDmarcTimer);dlvDmarcTimer=null;clearInterval(dlvOsintTimer);dlvOsintTimer=null;
       renderDelivery();};
     pills.append(b);
   });
   const body=el('div',{});
   v.append(pills,body);
-  return ({accounts:renderAcctDns,dmarc:renderDmarcReports}[DLV_VIEW]||renderDeliveryTest)(body);
+  return ({accounts:renderAcctDns,dmarc:renderDmarcReports,osint:renderOsint}[DLV_VIEW]||renderDeliveryTest)(body);
 }
 
 async function renderDeliveryTest(v){
@@ -3027,7 +3129,9 @@ async function renderDeliveryTest(v){
   dlHtml.onclick=async()=>{const t=await apiRaw('/api/delivery/report?id='+encodeURIComponent(runId)+'&format=html');if(t.ok)downloadBlob(`delivery-${addr.value.trim()}-${runId}.html`,textBlob(t.text,'text/html'));};
   const openHtml=el('button',{class:'act plain'},'Open report');
   openHtml.onclick=async()=>{const t=await apiRaw('/api/delivery/report?id='+encodeURIComponent(runId)+'&format=html');if(!t.ok)return;const w=window.open('','_blank');if(w){w.document.open();w.document.write(t.text);w.document.close();}};
-  exportBtns.append(dlJson,dlHtml,openHtml);
+  const invBtn=el('button',{class:'act plain',title:'Public information about this address (OSINT); nothing runs until you press Run there'},'Investigate address');
+  invBtn.onclick=()=>osintFor(addr.value.trim(),runId?{delivery_run_id:runId}:null);
+  exportBtns.append(dlJson,dlHtml,openHtml,invBtn);
 
   // ---- diagnostic inbox ----------------------------------------------------
   // A one-time address; whatever arrives is analysed on the next poll and

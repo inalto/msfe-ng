@@ -69,6 +69,20 @@ impl Request {
         })
     }
 
+    #[cfg(test)]
+    pub fn test(method: &str, path_and_query: &str, body: &str) -> Request {
+        let (path, query) = path_and_query
+            .split_once('?')
+            .unwrap_or((path_and_query, ""));
+        Request {
+            method: method.into(),
+            path: path.into(),
+            query: query.into(),
+            body: body.into(),
+            user: String::new(),
+        }
+    }
+
     /// Look up a query-string parameter, percent-decoded (search text, IPv6
     /// addresses and bracketed client addresses all arrive encoded).
     pub fn query_param(&self, key: &str) -> Option<String> {
@@ -183,6 +197,11 @@ impl Response {
         }
     }
 
+    #[cfg(test)]
+    pub fn body_str(&self) -> &str {
+        &self.body
+    }
+
     pub fn write<W: Write>(&self, mut stream: W) -> io::Result<()> {
         let reason = match self.status {
             200 => "OK",
@@ -231,6 +250,12 @@ mod tests {
             body: String::new(),
             user: user.into(),
         }
+    }
+
+    #[test]
+    fn unprivileged_peer_cannot_reach_osint() {
+        let mut r = path_req("GET", "/api/delivery/osint/providers", "");
+        assert_eq!(peer_scope(&mut r, Some(1001), name_of).unwrap().status, 403);
     }
 
     fn name_of(uid: u32) -> Option<String> {

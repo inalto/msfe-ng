@@ -53,6 +53,8 @@ msfe-ng delivery test <address> [--ip <ip>] [--selector <s>] [--audit] [--days <
 msfe-ng delivery eml <file.eml> [--bounce] [--address <a>] [--ip <ip>] [--selector <s>] [--audit] [--json | --html]   the same for a saved message, or a bounce taken apart
 msfe-ng delivery inbox <install [--dry-run] | uninstall [--dry-run] | status | new | poll <token> [--json] | remove <token> | sweep>   the diagnostic inbox (dt-<token>@<host> addresses via exim.conf.local)
 msfe-ng delivery testmail --from <hosted address> --to <address> [--tag <t>] [--follow <secs>] [--json]   send a real test message and follow it through the Exim log
+msfe-ng delivery osint <address> [--providers a,b] [--json | --html] [--force]   public-information lookup for an address (needs osint_enabled; exit 0 complete, 2 usage, 3 invalid/failed, 4 partial)
+msfe-ng delivery osint <providers [--json] | sweep>   list the sources and what each receives; delete reports past retention
 msfe-ng delivery monitor <list [--json] | add <address> [--interval-mins n] [--audit] [--ip ..] [--selector ..] | remove <id|address> | run [--dry-run] [--id n]>   scheduled re-tests (history in MySQL, regressions to Telegram)
 msfe-ng acctdns scan [--user <u>] [--domain <d>] [--all] [--json]   SPF, DKIM and DMARC for every domain hosted here (subdomains with --all; exit 1 on a failure, 3 on a non-cPanel host)
 msfe-ng acctdns fix <domain> <spf|dkim|dmarc> [--record <r>] [--json]   install the record through cPanel's own installer (exit 1 when it refused)
@@ -84,6 +86,7 @@ Seeded by the installer with comments; editable from the [Config](Config) tab.
 | AbuseIPDB | `abuseipdb_key` (manual reports from the client-IP view and `msfe-ng report`; secret) |
 | DMARC reports | `dmarc_imap_host`, `dmarc_imap_port`, `dmarc_imap_tls`, `dmarc_imap_verify`, `dmarc_imap_user`, `dmarc_imap_pass` (secret), `dmarc_imap_folder`, `dmarc_delete_imported`, `dmarc_retention_days`, `dmarc_alerts`, `dmarc_alert_min_messages` — see [DMARC reports](DMARC-reports) |
 | Delivery test | `delivery_runs_per_min`, `delivery_cache_secs`, `delivery_log_days`, `delivery_max_monitors`, `delivery_helo` |
+| OSINT | `osint_enabled` (false), `osint_runs_per_min`, `osint_max_concurrent`, `osint_deadline_secs`, `osint_max_external_queries`, `osint_cache_secs`, `osint_retention_hours` — see [OSINT](OSINT) |
 
 `mailscanner_conf` is seeded with the engine's conf found at install time
 (`/etc/MailScanner/MailScanner.conf`, or ConfigServer's

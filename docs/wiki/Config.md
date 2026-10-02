@@ -230,3 +230,14 @@ tab of your AbuseIPDB account), used only when you report an address by hand
 from the [client-IP view](Messages#report-to-abuseipdb). Like the bot token it
 is never shown again once saved: the label says *configured*; leave the field
 empty to keep it.
+
+## OSINT settings
+
+The [OSINT](OSINT) view is off until `osint_enabled = true` is set in
+`config.toml` (the installer does not add the `osint_*` keys, and the form editor lists only
+settings already present in the file, so switch the `config.toml` editor to
+**Raw text** and add the line, or edit the file directly). The same file holds its
+limits: `osint_runs_per_min`, `osint_max_concurrent`, `osint_deadline_secs`,
+`osint_max_external_queries`, `osint_cache_secs` and `osint_retention_hours`;
+the defaults are listed on the OSINT page. This release has no OSINT secrets
+and no Config-tab card for them.

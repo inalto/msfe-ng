@@ -17,6 +17,7 @@ mod conf_api;
 mod delivery_api;
 mod dmarc_api;
 mod http;
+mod osint_api;
 mod views;
 
 use msfe_api::{DEFAULT_SOCKET_PATH, VERSION};
@@ -72,6 +73,7 @@ fn main() -> io::Result<()> {
         msfe_core::confstage::sweep(&cfg);
         msfe_core::snapshot::sweep(&cfg);
         msfe_core::deliveryrun::sweep();
+        msfe_core::osintrun::sweep(cfg.osint_retention_hours * 3600);
         msfe_core::diaginbox::sweep();
     }
 
