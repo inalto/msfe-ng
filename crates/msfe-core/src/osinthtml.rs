@@ -47,6 +47,9 @@ pub fn render(r: &OsintReport) -> String {
             f.observed_at,
             escape(&f.evidence)
         ));
+        if f.asset_id.is_some() {
+            h.push_str("<p class=\"muted\">Avatar: present (not embedded)</p>");
+        }
         if let Some(u) = &f.source_url {
             if safe_url(u) {
                 h.push_str(&format!(
@@ -101,6 +104,8 @@ mod tests {
                 title: "T".into(),
                 evidence: evidence.into(),
                 limitations: vec![],
+                asset_id: None,
+                asset_mime: None,
             }],
             delivery_run_id: None,
             limitations: vec!["l".into()],
@@ -138,6 +143,16 @@ mod tests {
         let h = render(&rep("e", None));
         assert!(h.contains("no_match"));
         assert!(h.contains("<li>l</li>"), "limitations are printed");
+    }
+
+    #[test]
+    fn an_avatar_is_noted_but_never_embedded() {
+        let mut report = rep("e", None);
+        report.findings[0].asset_id = Some("0123456789abcdef".into());
+        report.findings[0].asset_mime = Some("image/png".into());
+        let h = render(&report);
+        assert!(h.contains("Avatar: present (not embedded)"));
+        assert!(!h.contains("<img") && !h.contains("data:") && !h.contains("0123456789abcdef.bin"));
     }
 
     #[test]

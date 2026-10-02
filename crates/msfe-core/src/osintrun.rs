@@ -7,7 +7,7 @@
 use crate::config::Config;
 use crate::netguard;
 use crate::osint::*;
-use crate::osintproviders::{self, Outcome, QueryCtx};
+use crate::osintproviders::{self, Asset, Outcome, QueryCtx};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -293,7 +293,8 @@ fn worker(
         std::thread::sleep(Duration::from_millis(400));
     }
     let mut sources = Vec::new();
-    let mut findings = Vec::new();
+    let mut findings: Vec<Finding> = Vec::new();
+    let mut assets: Vec<Asset> = Vec::new();
     let mut ran = 0usize;
     let mut panicked = false;
     for p in &inputs.providers {
@@ -330,15 +331,27 @@ fn worker(
                         detail: "the source lookup failed unexpectedly".into(),
                     },
                     findings: Vec::new(),
+                    assets: Vec::new(),
                 }
             }
         };
         sources.push(o.source);
         findings.extend(o.findings);
+        assets.extend(o.assets);
         with_runs(|runs| {
             if let Some(s) = runs.get_mut(&id) {
                 s.report.sources = sources.clone();
-                s.report.findings = findings.clone();
+                // An image is only referenced once it is stored, which happens
+                // when the run ends.
+                s.report.findings = findings
+                    .iter()
+                    .cloned()
+                    .map(|mut f| {
+                        f.asset_id = None;
+                        f.asset_mime = None;
+                        f
+                    })
+                    .collect();
             }
         });
     }
@@ -361,6 +374,18 @@ fn worker(
     let all_terminal_ok = sources
         .iter()
         .all(|s| matches!(s.state, SourceState::Matched | SourceState::NoMatch));
+    // Images are written only for a run that still exists, under the same lock
+    // `remove()` takes, so a removed run can never leave a file behind.
+    let _persist = PERSIST.lock().unwrap_or_else(|e| e.into_inner());
+    let dead =
+        tombstoned(&id) || with_runs(|runs| runs.get(&id).map(|s| s.removed).unwrap_or(true));
+    let stored = !dead && !assets.is_empty() && store_assets(&assets).is_ok();
+    if !stored {
+        for f in findings.iter_mut() {
+            f.asset_id = None;
+            f.asset_mime = None;
+        }
+    }
     // The cancel flag is read under the registry lock that sets the final
     // state, and cancel() sets it under the same lock: a cancel() that returned
     // true always yields Cancelled.
@@ -387,7 +412,6 @@ fn worker(
         Some(s.report.clone())
     });
     if let Some(r) = report {
-        let _g = PERSIST.lock().unwrap_or_else(|e| e.into_inner());
         if !tombstoned(&id) {
             let _ = persist(&r);
         }
@@ -421,6 +445,62 @@ fn ensure_dir() -> std::io::Result<PathBuf> {
         Err(e) => return Err(e),
     }
     Ok(dir)
+}
+
+fn assets_dir() -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    let dir = ensure_dir()?.join("assets");
+    match std::fs::symlink_metadata(&dir) {
+        Ok(md) => {
+            if !md.is_dir() {
+                return Err(std::io::Error::other("assets dir is not a directory"));
+            }
+            if md.uid() != std::fs::metadata("/proc/self")?.uid() {
+                return Err(std::io::Error::other("assets dir has the wrong owner"));
+            }
+            if md.permissions().mode() & 0o077 != 0 {
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+        }
+        Err(e) => return Err(e),
+    }
+    Ok(dir)
+}
+
+/// Write each image to `assets/<id>.bin` (0600, `create_new`, never through a
+/// symlink). Callers hold `PERSIST` and have checked the run still exists. On
+/// error the files written so far are removed again.
+fn store_assets(assets: &[Asset]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let dir = assets_dir()?;
+    let mut written: Vec<PathBuf> = Vec::new();
+    let result = (|| {
+        for a in assets {
+            if !valid_id(&a.id) {
+                return Err(std::io::Error::other("bad asset id"));
+            }
+            let p = dir.join(format!("{}.bin", a.id));
+            let _ = std::fs::remove_file(&p); // a stale or hostile entry; never write through it
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&p)?;
+            written.push(p);
+            f.write_all(&a.bytes)?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        for p in written {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+    result
 }
 
 fn persist(r: &OsintReport) -> std::io::Result<()> {
@@ -475,6 +555,56 @@ pub fn snapshot(id: &str) -> Option<OsintReport> {
     .or_else(|| load(id))
 }
 
+/// The stored image for `id`: only if a finding of a run that still exists
+/// refers to it, its declared type is PNG/JPEG/WebP and the bytes agree.
+pub fn asset(id: &str) -> Option<(String, Vec<u8>)> {
+    use std::io::Read;
+    if !valid_id(id) {
+        return None;
+    }
+    let owns = |r: &OsintReport| {
+        r.findings
+            .iter()
+            .find(|f| f.asset_id.as_deref() == Some(id))
+            .and_then(|f| f.asset_mime.clone())
+    };
+    let mem = with_runs(|runs| {
+        runs.values()
+            .filter(|s| !s.removed)
+            .find_map(|s| owns(&s.report).map(|m| (s.report.run_id.clone(), m)))
+    });
+    let mime = match mem {
+        Some((rid, m)) if !tombstoned(&rid) => m,
+        Some(_) => return None,
+        None => {
+            let mut found = None;
+            for e in std::fs::read_dir(report_dir()).ok()?.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if let Some(rid) = name.strip_suffix(".json") {
+                    if let Some(m) = load(rid).as_ref().and_then(owns) {
+                        found = Some(m);
+                        break;
+                    }
+                }
+            }
+            found?
+        }
+    };
+    let p = report_dir().join("assets").join(format!("{id}.bin"));
+    let md = std::fs::symlink_metadata(&p).ok()?;
+    if !md.is_file() || md.len() as usize > osintproviders::MAX_AVATAR {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(&p)
+        .ok()?
+        .take(osintproviders::MAX_AVATAR as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let kind = osintproviders::sniff_image(&bytes, Some(&mime))?;
+    Some((kind.to_string(), bytes))
+}
+
 pub fn cancel(id: &str) -> bool {
     with_runs(|runs| match runs.get(id) {
         Some(s) if !s.removed && s.report.state == RunState::Running => {
@@ -517,6 +647,13 @@ pub fn remove(id: &str) -> bool {
     let _g = PERSIST.lock().unwrap_or_else(|e| e.into_inner());
     let p = report_dir().join(format!("{id}.json"));
     let on_disk = p.exists();
+    let asset_ids: Vec<String> = with_runs(|runs| runs.get(id).map(|s| s.report.findings.clone()))
+        .or_else(|| load(id).map(|r| r.findings))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|f| f.asset_id)
+        .filter(|a| valid_id(a))
+        .collect();
     let had_mem = with_runs(|runs| match runs.get_mut(id) {
         Some(s) if s.removed => false,
         Some(s) => {
@@ -536,6 +673,9 @@ pub fn remove(id: &str) -> bool {
         t.push((id.to_string(), Instant::now()));
     }
     let had_file = std::fs::remove_file(&p).is_ok();
+    for a in &asset_ids {
+        let _ = std::fs::remove_file(report_dir().join("assets").join(format!("{a}.bin")));
+    }
     // A worker that finished between the removal above and its persist call is
     // covered by the tombstone check in `worker`.
     let _ = std::fs::remove_file(report_dir().join(format!("{id}.tmp")));
@@ -570,6 +710,7 @@ pub fn sweep(max_age_secs: u64) {
 /// As `sweep`, also deleting orphaned `<16hex>.tmp` files older than
 /// `tmp_age_secs`.
 pub(crate) fn sweep_with_tmp_age(max_age_secs: u64, tmp_age_secs: u64) {
+    sweep_assets(max_age_secs);
     let Ok(rd) = std::fs::read_dir(report_dir()) else {
         return;
     };
@@ -597,6 +738,39 @@ pub(crate) fn sweep_with_tmp_age(max_age_secs: u64, tmp_age_secs: u64) {
         }
     }
 }
+/// Delete `assets/<16hex>.bin` files older than `max_age_secs`; any other
+/// name is never touched.
+fn sweep_assets(max_age_secs: u64) {
+    let dir = report_dir().join("assets");
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let Some(id) = name.strip_suffix(".bin") else {
+            continue;
+        };
+        if !valid_id(id) {
+            continue;
+        }
+        let Ok(md) = std::fs::symlink_metadata(e.path()) else {
+            continue;
+        };
+        if !md.is_file() {
+            continue;
+        }
+        let age = md
+            .modified()
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if age >= max_age_secs {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1046,5 +1220,133 @@ mod tests {
         c.osint_max_external_queries = 5;
         assert_eq!(query_budget(&c, &i.clone().with_query_limit(Some(2))), 2);
         assert_eq!(query_budget(&c, &i.with_query_limit(Some(0))), 1);
+    }
+
+    fn asset_files() -> usize {
+        std::fs::read_dir(report_dir().join("assets"))
+            .map(|d| d.flatten().count())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn avatar_assets_are_stored_served_and_deleted_with_the_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let (c, _g) = setup();
+        let StartOk::Started(id) = start(&c, inp("avatar.one@example.org", true)).unwrap() else {
+            panic!()
+        };
+        let r = wait_done(&id);
+        let aid = r.findings[0].asset_id.clone().expect("asset id");
+        let f = report_dir().join("assets").join(format!("{aid}.bin"));
+        assert!(
+            f.exists(),
+            "the asset is on disk before the report is final"
+        );
+        assert_eq!(
+            std::fs::metadata(&f).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(report_dir().join("assets"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        let (mime, bytes) = asset(&aid).unwrap();
+        assert_eq!(mime, "image/png");
+        assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']));
+        assert!(asset("../etc/passwd").is_none());
+        assert!(asset("0000000000000000").is_none());
+        assert!(remove(&id));
+        assert!(!f.exists(), "the asset goes with the run");
+        assert!(asset(&aid).is_none());
+    }
+
+    #[test]
+    fn an_asset_that_belongs_to_no_run_is_not_served() {
+        let (_c, _g) = setup();
+        let dir = report_dir().join("assets");
+        std::fs::create_dir_all(&dir).unwrap();
+        let orphan = dir.join("aaaaaaaaaaaaaaaa.bin");
+        std::fs::write(&orphan, [0x89, b'P', b'N', b'G']).unwrap();
+        assert!(asset("aaaaaaaaaaaaaaaa").is_none());
+        let _ = std::fs::remove_file(&orphan);
+    }
+
+    #[test]
+    fn a_symlinked_asset_is_refused() {
+        let (c, _g) = setup();
+        let StartOk::Started(id) = start(&c, inp("avatar.link@example.org", true)).unwrap() else {
+            panic!()
+        };
+        let r = wait_done(&id);
+        let aid = r.findings[0].asset_id.clone().unwrap();
+        let f = report_dir().join("assets").join(format!("{aid}.bin"));
+        let target = report_dir().join("assets").join("target.dat");
+        std::fs::write(&target, [0x89, b'P', b'N', b'G']).unwrap();
+        std::fs::remove_file(&f).unwrap();
+        std::os::unix::fs::symlink(&target, &f).unwrap();
+        assert!(asset(&aid).is_none());
+        let _ = std::fs::remove_file(&f);
+        let _ = std::fs::remove_file(&target);
+        remove(&id);
+    }
+
+    #[test]
+    fn a_run_removed_while_running_leaves_no_asset_behind() {
+        let (c, _g) = setup();
+        let before = asset_files();
+        crate::osintproviders::reset_fixture_probe();
+        let StartOk::Started(id) = start(&c, inp("avatar.rm@example.org", true)).unwrap() else {
+            panic!()
+        };
+        // The fixture sleeps 400 ms for ".rm" local parts, deaf to cancel, and
+        // then yields an asset; remove once it is known to be inside that sleep.
+        let end = Instant::now() + Duration::from_secs(5);
+        while !crate::osintproviders::FIXTURE_SLEEPING.load(Ordering::SeqCst)
+            && Instant::now() < end
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(crate::osintproviders::FIXTURE_SLEEPING.load(Ordering::SeqCst));
+        assert!(remove(&id));
+        let end = Instant::now() + Duration::from_secs(10);
+        while running_count() > 0 && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(running_count(), 0, "the worker ended");
+        let aid =
+            crate::osintproviders::last_fixture_asset().expect("the fixture produced an asset");
+        assert_eq!(
+            asset_files(),
+            before,
+            "no file was written for the removed run"
+        );
+        assert!(asset(&aid).is_none());
+        assert!(!report_dir()
+            .join("assets")
+            .join(format!("{aid}.bin"))
+            .exists());
+        assert!(snapshot(&id).is_none());
+    }
+
+    #[test]
+    fn sweep_deletes_old_assets_only_by_exact_name() {
+        let (_c, _g) = setup();
+        let dir = report_dir().join("assets");
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("bbbbbbbbbbbbbbbb.bin");
+        let stranger = dir.join("notes.bin");
+        let other = dir.join("bbbbbbbbbbbbbbbb.txt");
+        for p in [&old, &stranger, &other] {
+            std::fs::write(p, b"x").unwrap();
+        }
+        sweep(0);
+        assert!(!old.exists());
+        assert!(stranger.exists() && other.exists());
+        let _ = std::fs::remove_file(&stranger);
+        let _ = std::fs::remove_file(&other);
     }
 }

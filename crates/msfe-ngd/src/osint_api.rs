@@ -15,6 +15,7 @@ pub fn handle(method: &str, path: &str, req: &Request, cfg: &Config) -> Response
         ("POST", "/api/delivery/osint/run/cancel") => cancel(req),
         ("GET", "/api/delivery/osint/report") => report(req),
         ("GET", "/api/delivery/osint/recent") => recent(),
+        ("GET", "/api/delivery/osint/asset") => asset(req),
         ("POST", "/api/delivery/osint/remove") => remove(req),
         _ => err(404, "not found"),
     }
@@ -181,6 +182,21 @@ fn report(req: &Request) -> Response {
     match req.query_param("format").as_deref() {
         Some("html") => Response::html(200, &msfe_core::osinthtml::render(&r)),
         _ => Response::json(200, &r.to_json().to_string()),
+    }
+}
+
+fn asset(req: &Request) -> Response {
+    let id = req.query_param("id").unwrap_or_default();
+    match osintrun::asset(&id) {
+        Some((mime, bytes)) => Response::json(
+            200,
+            &Json::Object(vec![
+                ("mime".into(), Json::str(&mime)),
+                ("data".into(), Json::str(msfe_core::b64::encode(&bytes))),
+            ])
+            .to_string(),
+        ),
+        None => err(404, "no such image"),
     }
 }
 
@@ -439,5 +455,63 @@ mod tests {
         let r = post("/api/delivery/osint/run", body, &c);
         assert!(r.status == 201 || r.status == 200 || r.status == 429);
         assert!(!r.body_str().contains("evil"));
+    }
+
+    #[test]
+    fn asset_endpoint_serves_a_run_avatar_and_404s_otherwise() {
+        let c = setup();
+        let get = |q: &str| {
+            let u = format!("/api/delivery/osint/asset?id={q}");
+            handle(
+                "GET",
+                "/api/delivery/osint/asset",
+                &crate::http::Request::test("GET", &u, ""),
+                &c,
+            )
+        };
+        assert_eq!(get("0123456789abcdef").status, 404);
+        assert_eq!(get("..%2Fx").status, 404);
+        assert_eq!(get("").status, 404);
+        let body = r#"{"address":"avatar.api@example.org","providers":["fixture"],"force":true}"#;
+        let r = handle(
+            "POST",
+            "/api/delivery/osint/run",
+            &crate::http::Request::test("POST", "/api/delivery/osint/run", body),
+            &c,
+        );
+        assert_eq!(r.status, 201);
+        let id = Json::parse(r.body_str()).unwrap().str_field("run_id");
+        let mut aid = String::new();
+        for _ in 0..200 {
+            let p = handle(
+                "GET",
+                "/api/delivery/osint/run",
+                &crate::http::Request::test("GET", &format!("/api/delivery/osint/run?id={id}"), ""),
+                &c,
+            );
+            let j = Json::parse(p.body_str()).unwrap();
+            if j.str_field("state") == "complete" {
+                aid = j.get("findings").and_then(Json::as_array).unwrap()[0].str_field("asset_id");
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(aid.len(), 16);
+        let a = get(&aid);
+        assert_eq!(a.status, 200);
+        let j = Json::parse(a.body_str()).unwrap();
+        assert_eq!(j.str_field("mime"), "image/png");
+        assert!(!j.str_field("data").is_empty());
+        let _ = handle(
+            "POST",
+            "/api/delivery/osint/remove",
+            &crate::http::Request::test(
+                "POST",
+                "/api/delivery/osint/remove",
+                &format!(r#"{{"id":"{id}"}}"#),
+            ),
+            &c,
+        );
+        assert_eq!(get(&aid).status, 404);
     }
 }

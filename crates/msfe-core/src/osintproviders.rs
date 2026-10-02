@@ -24,9 +24,19 @@ impl QueryCtx<'_> {
     }
 }
 
+/// An image a finding refers to, stored by the controller (never inlined into
+/// the report).
+#[derive(Debug, Clone)]
+pub struct Asset {
+    pub id: String,
+    pub mime: &'static str,
+    pub bytes: Vec<u8>,
+}
+
 pub struct Outcome {
     pub source: SourceStatus,
     pub findings: Vec<Finding>,
+    pub assets: Vec<Asset>,
 }
 
 pub struct Info {
@@ -42,7 +52,7 @@ fn fixture_enabled() -> bool {
 }
 
 pub fn infos(cfg: &Config) -> Vec<Info> {
-    let mut v = vec![hibp_info(cfg)];
+    let mut v = vec![hibp_info(cfg), gravatar_info()];
     if fixture_enabled() {
         v.push(Info {
             id: "fixture",
@@ -55,13 +65,14 @@ pub fn infos(cfg: &Config) -> Vec<Info> {
 }
 
 pub fn is_known(id: &str) -> bool {
-    id == "hibp" || (id == "fixture" && fixture_enabled())
+    id == "hibp" || id == "gravatar" || (id == "fixture" && fixture_enabled())
 }
 
 pub fn run(id: &str, q: &QueryCtx) -> Outcome {
     match id {
         "fixture" => fixture(q),
         "hibp" => hibp(q),
+        "gravatar" => gravatar(q),
         other => Outcome {
             source: SourceStatus {
                 id: other.to_string(),
@@ -70,6 +81,7 @@ pub fn run(id: &str, q: &QueryCtx) -> Outcome {
                 detail: "no such provider".into(),
             },
             findings: Vec::new(),
+            assets: Vec::new(),
         },
     }
 }
@@ -87,6 +99,7 @@ fn outcome(id: &str, state: SourceState, detail: &str) -> Outcome {
     Outcome {
         source: status(id, state, detail),
         findings: Vec::new(),
+        assets: Vec::new(),
     }
 }
 
@@ -112,6 +125,7 @@ fn fixture(q: &QueryCtx) -> Outcome {
                 return Outcome {
                     source: status(SourceState::Inconclusive, "stopped before finishing"),
                     findings: vec![],
+                    assets: vec![],
                 };
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -121,6 +135,7 @@ fn fixture(q: &QueryCtx) -> Outcome {
         return Outcome {
             source: status(SourceState::Failed, "synthetic failure"),
             findings: vec![],
+            assets: vec![],
         };
     }
     if local.contains("breach") {
@@ -136,16 +151,77 @@ fn fixture(q: &QueryCtx) -> Outcome {
             title: "Appears in a synthetic incident".into(),
             evidence: "Incident-wide data classes: Email addresses, Passwords. This does not show that a password for this address was exposed.".into(),
             limitations: vec!["Historical incident; synthetic data.".into()],
+            asset_id: None,
+            asset_mime: None,
         };
         return Outcome {
             source: status(SourceState::Matched, "1 incident"),
             findings: vec![f],
+            assets: vec![],
+        };
+    }
+    if local.contains("avatar") {
+        if local.contains(".rm") {
+            // Test hook: busy and deaf to cancel, so a run can be removed
+            // while it still holds an image it is about to hand over.
+            #[cfg(test)]
+            FIXTURE_SLEEPING.store(true, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(400));
+        }
+        let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        bytes.resize(70, 0);
+        let asset = Asset {
+            id: crate::deliveryrun::new_id(),
+            mime: "image/png",
+            bytes,
+        };
+        #[cfg(test)]
+        {
+            *LAST_FIXTURE_ASSET.lock().unwrap_or_else(|e| e.into_inner()) = Some(asset.id.clone());
+        }
+        let f = Finding {
+            group: Group::Profile,
+            confidence: Confidence::Medium,
+            confidence_reason: "synthetic fixture".into(),
+            severity: Severity::Info,
+            observed_at: now_secs(),
+            event_at: None,
+            source_id: "fixture".into(),
+            source_url: None,
+            title: "Synthetic avatar".into(),
+            evidence: "A synthetic image is published for this address.".into(),
+            limitations: vec![],
+            asset_id: Some(asset.id.clone()),
+            asset_mime: Some(asset.mime.into()),
+        };
+        return Outcome {
+            source: status(SourceState::Matched, "1 avatar"),
+            findings: vec![f],
+            assets: vec![asset],
         };
     }
     Outcome {
         source: status(SourceState::NoMatch, "nothing found in this source"),
         findings: vec![],
+        assets: vec![],
     }
+}
+
+#[cfg(test)]
+pub(crate) static FIXTURE_SLEEPING: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+pub(crate) fn reset_fixture_probe() {
+    FIXTURE_SLEEPING.store(false, Ordering::SeqCst);
+    *LAST_FIXTURE_ASSET.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+#[cfg(test)]
+static LAST_FIXTURE_ASSET: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+#[cfg(test)]
+pub(crate) fn last_fixture_asset() -> Option<String> {
+    LAST_FIXTURE_ASSET
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
 }
 
 // ---- Have I Been Pwned ------------------------------------------------
@@ -287,6 +363,8 @@ fn breach_finding(b: &Json, now: u64) -> Result<Finding, String> {
         title: format!("Appears in breach: {}", clean_text(title, 200)),
         evidence,
         limitations,
+        asset_id: None,
+        asset_mime: None,
     })
 }
 
@@ -340,6 +418,8 @@ fn hibp_findings_range(body: &[u8], suffix_upper: &str, now: u64) -> Result<Vec<
                     "Historical incident; it does not describe the address's current exposure."
                         .into(),
                 ],
+                asset_id: None,
+                asset_mime: None,
             });
         }
     }
@@ -429,6 +509,7 @@ fn hibp(q: &QueryCtx) -> Outcome {
                         &format!("{} incident(s)", f.len()),
                     ),
                     findings: f,
+                    assets: Vec::new(),
                 },
             }
         }
@@ -450,6 +531,7 @@ fn hibp(q: &QueryCtx) -> Outcome {
                 detail: "HIBP rate limit reached".into(),
             },
             findings: Vec::new(),
+            assets: Vec::new(),
         },
         400 => outcome(
             HIBP_ID,
@@ -464,19 +546,160 @@ fn hibp(q: &QueryCtx) -> Outcome {
     }
 }
 
+// ---- Gravatar -----------------------------------------------------------
+
+const GRAVATAR_ID: &str = "gravatar";
+const GRAVATAR_HOST: &str = "gravatar.com";
+pub const MAX_AVATAR: usize = 256 * 1024;
+
+fn gravatar_info() -> Info {
+    Info {
+        id: GRAVATAR_ID,
+        name: "Gravatar",
+        disclosure: "A SHA-256 hash of the lower-cased address is sent to gravatar.com".into(),
+        configured: true,
+    }
+}
+
+/// The image type, if the body's magic bytes and the declared content type
+/// name the same one of PNG, JPEG or WebP. Nothing is decoded.
+pub fn sniff_image(bytes: &[u8], content_type: Option<&str>) -> Option<&'static str> {
+    let declared = content_type?
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let magic = if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        "image/png"
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "image/jpeg"
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        "image/webp"
+    } else {
+        return None;
+    };
+    (declared == magic).then_some(magic)
+}
+
+fn gravatar(q: &QueryCtx) -> Outcome {
+    let remaining = q.deadline.saturating_duration_since(Instant::now());
+    if q.stop() || remaining.is_zero() {
+        return outcome(
+            GRAVATAR_ID,
+            SourceState::Inconclusive,
+            "stopped before this source ran",
+        );
+    }
+    let addr = q.address.trim();
+    let hash = match providerhttp::sha256_hex(addr.to_ascii_lowercase().as_bytes()) {
+        Ok(h) if h.len() == 64 => h,
+        _ => {
+            return outcome(
+                GRAVATAR_ID,
+                SourceState::Failed,
+                "could not compute the address hash",
+            )
+        }
+    };
+    let req = Request {
+        provider: "gravatar",
+        host: GRAVATAR_HOST,
+        path: format!("/avatar/{hash}"),
+        query: vec![("d", "404".into()), ("s", "256".into()), ("r", "g".into())],
+        headers: Vec::new(),
+        timeout: remaining.min(Duration::from_secs(10)),
+        max_body: MAX_AVATAR,
+    };
+    let resp = match providerhttp::fetch(&req) {
+        Ok(r) => r,
+        Err(HttpError::Timeout) => return outcome(GRAVATAR_ID, SourceState::Failed, "timed out"),
+        Err(HttpError::TooLarge) => {
+            return outcome(
+                GRAVATAR_ID,
+                SourceState::Failed,
+                "avatar larger than the 256 KiB limit",
+            )
+        }
+        Err(e) => {
+            let t = providerhttp::redact(&e.to_string(), &[addr, &hash]);
+            return outcome(GRAVATAR_ID, SourceState::Failed, &t);
+        }
+    };
+    match resp.status {
+        200 => {
+            let Some(mime) = sniff_image(&resp.body, resp.content_type.as_deref()) else {
+                return outcome(
+                    GRAVATAR_ID,
+                    SourceState::Failed,
+                    "the answer was not a supported image",
+                );
+            };
+            let asset = Asset {
+                id: crate::deliveryrun::new_id(),
+                mime,
+                bytes: resp.body,
+            };
+            let f = Finding {
+                group: Group::Profile,
+                confidence: Confidence::Medium,
+                confidence_reason: "hash of the normalized address matches; this does not prove who controls the mailbox or that the image is used elsewhere".into(),
+                severity: Severity::Info,
+                observed_at: now_secs(),
+                event_at: None,
+                source_id: GRAVATAR_ID.into(),
+                source_url: Some(format!("https://gravatar.com/{hash}")),
+                title: "Public avatar found through Gravatar".into(),
+                evidence: "A Gravatar image is published for this address (rating G, 256 px).".into(),
+                limitations: vec![
+                    "Absence of an avatar is not evidence of anything.".into(),
+                    "Gravatar's profile data is not queried in this release.".into(),
+                ],
+                asset_id: Some(asset.id.clone()),
+                asset_mime: Some(mime.into()),
+            };
+            Outcome {
+                source: status(GRAVATAR_ID, SourceState::Matched, "1 avatar"),
+                findings: vec![f],
+                assets: vec![asset],
+            }
+        }
+        404 => outcome(
+            GRAVATAR_ID,
+            SourceState::NoMatch,
+            "no public avatar at rating G (a Gravatar may exist at a stricter rating)",
+        ),
+        401 | 403 => outcome(
+            GRAVATAR_ID,
+            SourceState::Restricted,
+            "Gravatar refused the request",
+        ),
+        429 => Outcome {
+            source: SourceStatus {
+                id: GRAVATAR_ID.into(),
+                state: SourceState::RateLimited,
+                retry_after: resp.retry_after,
+                detail: "Gravatar rate limit reached".into(),
+            },
+            findings: Vec::new(),
+            assets: Vec::new(),
+        },
+        n => outcome(
+            GRAVATAR_ID,
+            SourceState::Failed,
+            &format!("Gravatar answered HTTP {n}"),
+        ),
+    }
+}
+
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod testutil {
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::process::Command;
-    use std::sync::Mutex;
-
-    static HIBP_LOCK: Mutex<()> = Mutex::new(());
 
     /// One-shot HTTP stand-in: serves `reply` (raw bytes) to the first
     /// connection and returns the request head it received.
-    fn serve(reply: Vec<u8>) -> (u16, std::thread::JoinHandle<String>) {
+    pub fn serve(reply: Vec<u8>) -> (u16, std::thread::JoinHandle<String>) {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = l.local_addr().unwrap().port();
         let h = std::thread::spawn(move || {
@@ -498,6 +721,17 @@ mod tests {
         });
         (port, h)
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testutil::serve;
+    use super::*;
+    use std::process::Command;
+    use std::sync::Mutex;
+
+    static HIBP_LOCK: Mutex<()> = Mutex::new(());
+    static GRAV_LOCK: Mutex<()> = Mutex::new(());
 
     const DIRECT_BODY: &str = r#"[{"Name":"Adobe","Title":"Adobe","Domain":"adobe.com","BreachDate":"2013-10-04","AddedDate":"2013-12-04T00:00:00Z","PwnCount":152445165,"DataClasses":["Email addresses","Password hints","Passwords"],"IsVerified":true,"IsFabricated":false,"IsSensitive":false,"IsRetired":false,"IsSpamList":false,"IsMalware":false,"Description":"<script>alert(1)</script>"}]"#;
 
@@ -670,5 +904,138 @@ mod tests {
         let h2 = infos(&cfg).into_iter().find(|p| p.id == "hibp").unwrap();
         assert!(h2.disclosure.contains("6-character"));
         assert!(h2.configured);
+    }
+
+    fn png() -> Vec<u8> {
+        let mut v = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        v.extend_from_slice(&[0u8; 64]);
+        v
+    }
+
+    #[test]
+    fn image_validation_requires_matching_type_and_magic() {
+        assert_eq!(sniff_image(&png(), Some("image/png")), Some("image/png"));
+        assert_eq!(
+            sniff_image(
+                &[0xFF, 0xD8, 0xFF, 0xE0, 0, 0],
+                Some("image/jpeg; charset=x")
+            ),
+            Some("image/jpeg")
+        );
+        let mut webp = b"RIFF".to_vec();
+        webp.extend_from_slice(&[0, 0, 0, 0]);
+        webp.extend_from_slice(b"WEBPVP8 ");
+        assert_eq!(sniff_image(&webp, Some("image/webp")), Some("image/webp"));
+        assert_eq!(
+            sniff_image(&png(), Some("image/jpeg")),
+            None,
+            "type and magic must agree"
+        );
+        assert_eq!(
+            sniff_image(
+                b"<svg xmlns='http://www.w3.org/2000/svg'/>",
+                Some("image/svg+xml")
+            ),
+            None
+        );
+        assert_eq!(sniff_image(b"<html>", Some("image/png")), None);
+        assert_eq!(sniff_image(b"GIF89a....", Some("image/gif")), None);
+        assert_eq!(
+            sniff_image(&png()[..4], Some("image/png")),
+            None,
+            "truncated"
+        );
+        assert_eq!(sniff_image(&png(), None), None);
+    }
+
+    #[test]
+    fn gravatar_end_to_end_stores_an_asset_for_a_real_image_only() {
+        let _g = GRAV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        if Command::new("sha256sum").arg("--version").output().is_err() {
+            return;
+        }
+        let img = png();
+        let mut reply = format!("HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", img.len()).into_bytes();
+        reply.extend_from_slice(&img);
+        let (port, h) = serve(reply);
+        std::env::set_var(
+            "MSFE_NG_OSINT_BASE_GRAVATAR",
+            format!("http://127.0.0.1:{port}"),
+        );
+        let cfg = Config::default();
+        let cancel = AtomicBool::new(false);
+        let q = QueryCtx {
+            address: "User@Example.org",
+            cancel: &cancel,
+            deadline: Instant::now() + Duration::from_secs(10),
+            cfg: &cfg,
+        };
+        let o = run("gravatar", &q);
+        let head = h.join().unwrap();
+        assert!(head.starts_with("GET /avatar/"), "{head}");
+        assert!(head.contains("d=404") && head.contains("s=256") && head.contains("r=g"));
+        assert!(
+            !head.to_ascii_lowercase().contains("example.org"),
+            "the address itself must not be sent"
+        );
+        assert_eq!(o.source.state, SourceState::Matched);
+        assert_eq!(o.assets.len(), 1);
+        assert_eq!(
+            o.findings[0].asset_id.as_deref(),
+            Some(o.assets[0].id.as_str())
+        );
+        assert_eq!(o.findings[0].asset_mime.as_deref(), Some("image/png"));
+        assert!(!o.findings[0]
+            .source_url
+            .as_deref()
+            .unwrap()
+            .contains("example.org"));
+        std::env::remove_var("MSFE_NG_OSINT_BASE_GRAVATAR");
+    }
+
+    #[test]
+    fn gravatar_non_image_404_and_oversize_store_nothing() {
+        let _g = GRAV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        if Command::new("sha256sum").arg("--version").output().is_err() {
+            return;
+        }
+        let big = vec![0x89u8; 300 * 1024];
+        let cases: Vec<(Vec<u8>, SourceState)> = vec![
+            (b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 6\r\nConnection: close\r\n\r\n<html>".to_vec(), SourceState::Failed),
+            (b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(), SourceState::NoMatch),
+            ([format!("HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", big.len()).into_bytes(), big].concat(), SourceState::Failed),
+            (b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 9\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(), SourceState::RateLimited),
+            (b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(), SourceState::Restricted),
+        ];
+        for (reply, want) in cases {
+            let (port, _h) = serve(reply);
+            std::env::set_var(
+                "MSFE_NG_OSINT_BASE_GRAVATAR",
+                format!("http://127.0.0.1:{port}"),
+            );
+            let cfg = Config::default();
+            let cancel = AtomicBool::new(false);
+            let q = QueryCtx {
+                address: "u@example.org",
+                cancel: &cancel,
+                deadline: Instant::now() + Duration::from_secs(10),
+                cfg: &cfg,
+            };
+            let o = run("gravatar", &q);
+            assert_eq!(o.source.state, want, "{}", o.source.detail);
+            assert!(o.assets.is_empty() && o.findings.is_empty());
+        }
+        std::env::remove_var("MSFE_NG_OSINT_BASE_GRAVATAR");
+    }
+
+    #[test]
+    fn gravatar_is_always_configured_and_discloses_the_hash() {
+        let i = infos(&Config::default())
+            .into_iter()
+            .find(|p| p.id == "gravatar")
+            .unwrap();
+        assert!(i.configured);
+        assert!(i.disclosure.contains("SHA-256 hash"));
+        assert!(is_known("gravatar"));
     }
 }

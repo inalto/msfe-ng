@@ -159,6 +159,9 @@ pub struct Finding {
     pub title: String,
     pub evidence: String,
     pub limitations: Vec<String>,
+    /// Server-side stored image belonging to this finding (see `osintrun::asset`).
+    pub asset_id: Option<String>,
+    pub asset_mime: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -220,6 +223,8 @@ impl Finding {
             ("title".into(), Json::str(&self.title)),
             ("evidence".into(), Json::str(&self.evidence)),
             ("limitations".into(), strs(&self.limitations)),
+            ("asset_id".into(), opt_str(&self.asset_id)),
+            ("asset_mime".into(), opt_str(&self.asset_mime)),
         ])
     }
     fn from_json(j: &Json) -> Option<Finding> {
@@ -236,6 +241,8 @@ impl Finding {
             title: j.str_field("title"),
             evidence: j.str_field("evidence"),
             limitations: str_list(j.get("limitations")),
+            asset_id: j.get("asset_id").and_then(Json::as_str).map(String::from),
+            asset_mime: j.get("asset_mime").and_then(Json::as_str).map(String::from),
         })
     }
 }
@@ -385,10 +392,35 @@ mod tests {
                 title: "t".into(),
                 evidence: "<b>\"q\"</b>".into(),
                 limitations: vec!["l".into()],
+                asset_id: None,
+                asset_mime: None,
             }],
             delivery_run_id: None,
             limitations: vec!["public sources are incomplete".into()],
         }
+    }
+
+    #[test]
+    fn asset_fields_round_trip_and_old_reports_parse_without_them() {
+        let mut r = sample();
+        r.findings[0].asset_id = Some("0123456789abcdef".into());
+        r.findings[0].asset_mime = Some("image/png".into());
+        let text = r.to_json().to_string();
+        assert!(text.contains("\"asset_id\":\"0123456789abcdef\""));
+        let back = OsintReport::from_json(&Json::parse(&text).unwrap()).unwrap();
+        assert_eq!(
+            back.findings[0].asset_id.as_deref(),
+            Some("0123456789abcdef")
+        );
+        assert_eq!(back.findings[0].asset_mime.as_deref(), Some("image/png"));
+        let plain = sample().to_json().to_string();
+        assert!(plain.contains("\"asset_id\":null"));
+        let old = Json::parse(
+            r#"{"schema_version":1,"kind":"osint","run_id":"0123456789abcdef","address":"a@b.co","started":1,"state":"complete","findings":[{"group":"profile","severity":"info","confidence":"high","title":"t","evidence":"e","source_id":"s","observed_at":5}]}"#,
+        )
+        .unwrap();
+        let o = OsintReport::from_json(&old).unwrap();
+        assert!(o.findings[0].asset_id.is_none() && o.findings[0].asset_mime.is_none());
     }
 
     #[test]
