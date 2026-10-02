@@ -19,6 +19,9 @@ const HEAD_ALLOWANCE: usize = 16 * 1024;
 const STDERR_CAP: usize = 4 * 1024;
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 const UA: &str = "msfe-ng osint";
+/// Trailer written by curl (`-w`) after the body; its last occurrence is the
+/// connected address.
+const IP_MARKER: &str = "\n--msfe-remote-ip:";
 
 /// One outbound request. `path` begins with `/` and is already
 /// percent-encoded (use [`pct_encode`] for dynamic segments).
@@ -115,6 +118,7 @@ pub fn curl_args(
     let mut a: Vec<String> = vec![
         "-q".into(), // first: ignore any curlrc
         "-sS".into(),
+        "-g".into(), // --globoff: {} and [] never expand into several requests
         "--http1.1".into(),
         "--proto".into(),
         if allow_http {
@@ -129,11 +133,13 @@ pub fn curl_args(
         "--max-time".into(),
         timeout_secs.max(1).to_string(),
         "--max-filesize".into(),
-        (max_body + 1).to_string(),
+        max_body.saturating_add(1).to_string(),
         "-A".into(),
         UA.into(),
         "-D".into(),
         "-".into(),
+        "-w".into(),
+        format!("{IP_MARKER}%{{remote_ip}}"),
         "--config".into(),
         "-".into(),
     ];
@@ -239,6 +245,50 @@ fn choose_address(candidates: &[IpAddr]) -> Result<IpAddr, HttpError> {
     Err(HttpError::Blocked(last))
 }
 
+/// Split curl's `-w` trailer off the captured stdout: the last marker is the
+/// trailer, so a body containing the marker text cannot spoof the address.
+fn split_remote_ip(raw: &[u8]) -> Option<(&[u8], String)> {
+    let m = IP_MARKER.as_bytes();
+    let pos = raw.windows(m.len()).rposition(|w| w == m)?;
+    let ip = String::from_utf8_lossy(&raw[pos + m.len()..])
+        .trim()
+        .to_string();
+    Some((&raw[..pos], ip))
+}
+
+/// The connection must have gone to the address that passed the guard.
+fn check_pin(chosen: Option<IpAddr>, remote: &str) -> Result<(), HttpError> {
+    let Some(want) = chosen else { return Ok(()) };
+    match remote.parse::<IpAddr>() {
+        Ok(got) if got == want => Ok(()),
+        _ => Err(HttpError::Blocked(
+            "connected to an address other than the checked one".into(),
+        )),
+    }
+}
+
+/// Errors that take precedence once curl is gone: overflow, then deadline,
+/// then a stdout reader that never reached EOF (a truncated body must not
+/// pass for a complete one).
+fn reader_outcome(overflow: bool, timed_out: bool, eof: bool) -> Result<(), HttpError> {
+    if overflow {
+        Err(HttpError::TooLarge)
+    } else if timed_out {
+        Err(HttpError::Timeout)
+    } else if !eof {
+        Err(HttpError::Other("response read incomplete".into()))
+    } else {
+        Ok(())
+    }
+}
+
+fn path_allowed(path: &str) -> bool {
+    path.starts_with('/')
+        && path.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~' | b'%' | b'/')
+        })
+}
+
 fn resolve(host: &'static str) -> Result<Vec<IpAddr>, HttpError> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -287,8 +337,10 @@ fn kill_group(child: &mut std::process::Child) {
 }
 
 pub fn fetch(req: &Request) -> Result<Response, HttpError> {
-    if !req.path.starts_with('/') {
-        return Err(HttpError::Refused("request path must start with /".into()));
+    if !path_allowed(&req.path) {
+        return Err(HttpError::Refused(
+            "request path must start with / and hold only unreserved characters, % and /".into(),
+        ));
     }
     let mut query = String::new();
     for (k, v) in &req.query {
@@ -313,12 +365,12 @@ pub fn fetch(req: &Request) -> Result<Response, HttpError> {
     let doc = config_doc(&url, &req.headers)?;
     let secrets: Vec<&str> = req.headers.iter().map(|(_, v)| v.as_str()).collect();
 
-    let pin = if over.is_some() {
+    let chosen = if over.is_some() {
         None
     } else {
-        let ip = choose_address(&resolve(req.host)?)?;
-        Some(format!("{}:443:{ip}", req.host))
+        Some(choose_address(&resolve(req.host)?)?)
     };
+    let pin = chosen.map(|ip| format!("{}:443:{ip}", req.host));
     let args = curl_args(
         req.timeout.as_secs().max(1),
         req.max_body,
@@ -340,17 +392,30 @@ pub fn fetch(req: &Request) -> Result<Response, HttpError> {
         });
     }
 
-    let cap = req.max_body + HEAD_ALLOWANCE + 1;
+    let cap = req
+        .max_body
+        .saturating_add(HEAD_ALLOWANCE)
+        .saturating_add(1);
     let out_buf = Arc::new(Mutex::new(Vec::new()));
     let overflow = Arc::new(AtomicBool::new(false));
+    let out_eof = Arc::new(AtomicBool::new(false));
     let (done_tx, done_rx) = mpsc::channel::<()>();
     if let Some(mut p) = child.stdout.take() {
-        let (buf, flag, tx) = (Arc::clone(&out_buf), Arc::clone(&overflow), done_tx.clone());
+        let (buf, flag, eof, tx) = (
+            Arc::clone(&out_buf),
+            Arc::clone(&overflow),
+            Arc::clone(&out_eof),
+            done_tx.clone(),
+        );
         std::thread::spawn(move || {
             let mut chunk = [0u8; 8192];
             loop {
                 match p.read(&mut chunk) {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) => {
+                        eof.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    Err(_) => break,
                     Ok(n) => {
                         let mut b = buf.lock().unwrap();
                         let room = cap.saturating_sub(b.len());
@@ -419,11 +484,18 @@ pub fn fetch(req: &Request) -> Result<Response, HttpError> {
             break;
         }
     }
-    if cut || overflow.load(Ordering::SeqCst) {
-        return Err(HttpError::TooLarge);
+    // the stdout reader's EOF can trail curl's exit under load: give it a
+    // bounded extra moment before calling the read incomplete
+    let eof_by = Instant::now() + Duration::from_millis(500);
+    while !out_eof.load(Ordering::SeqCst)
+        && !overflow.load(Ordering::SeqCst)
+        && Instant::now() < eof_by
+    {
+        std::thread::sleep(Duration::from_millis(5));
     }
-    if timed_out {
-        return Err(HttpError::Timeout);
+    let ov = cut || overflow.load(Ordering::SeqCst);
+    if ov || timed_out {
+        reader_outcome(ov, timed_out, true)?;
     }
     let status = status.ok_or_else(|| HttpError::Other("curl did not finish".into()))?;
     let stderr_text = {
@@ -443,8 +515,12 @@ pub fn fetch(req: &Request) -> Result<Response, HttpError> {
             _ => HttpError::Other(stderr_text),
         });
     }
-    let raw = out_buf.lock().unwrap().clone();
-    let (st, headers, off) = parse_head(&raw).map_err(HttpError::Other)?;
+    reader_outcome(false, false, out_eof.load(Ordering::SeqCst))?;
+    let all = out_buf.lock().unwrap().clone();
+    let (raw, remote_ip) =
+        split_remote_ip(&all).ok_or_else(|| HttpError::Other("response read incomplete".into()))?;
+    check_pin(chosen, &remote_ip)?;
+    let (st, headers, off) = parse_head(raw).map_err(HttpError::Other)?;
     let body = raw[off..].to_vec();
     if body.len() > req.max_body {
         return Err(HttpError::TooLarge);
@@ -731,5 +807,74 @@ mod tests {
         })
         .unwrap();
         assert_eq!(r.status, 200);
+    }
+
+    #[test]
+    fn trailer_is_split_exactly_and_cannot_be_spoofed_by_the_body() {
+        let (b, ip) =
+            split_remote_ip(b"HEAD\r\n\r\nbody\n\n\n--msfe-remote-ip:203.0.113.9").unwrap();
+        assert_eq!(b, b"HEAD\r\n\r\nbody\n\n");
+        assert_eq!(ip, "203.0.113.9");
+        let (b, ip) =
+            split_remote_ip(b"x\n--msfe-remote-ip:6.6.6.6 more\n--msfe-remote-ip:1.2.3.4").unwrap();
+        assert_eq!(ip, "1.2.3.4");
+        assert!(b.ends_with(b"more"));
+        assert!(split_remote_ip(b"no trailer").is_none());
+    }
+
+    #[test]
+    fn a_connection_to_another_address_is_blocked() {
+        let want: IpAddr = "8.8.8.8".parse().unwrap();
+        assert!(check_pin(Some(want), "8.8.8.8").is_ok());
+        assert!(matches!(
+            check_pin(Some(want), "9.9.9.9"),
+            Err(HttpError::Blocked(_))
+        ));
+        assert!(matches!(
+            check_pin(Some(want), ""),
+            Err(HttpError::Blocked(_))
+        ));
+        assert!(check_pin(None, "127.0.0.1").is_ok());
+    }
+
+    #[test]
+    fn an_unfinished_reader_is_an_incomplete_read_not_a_body() {
+        assert_eq!(reader_outcome(true, true, false), Err(HttpError::TooLarge));
+        assert_eq!(reader_outcome(false, true, false), Err(HttpError::Timeout));
+        assert_eq!(
+            reader_outcome(false, false, false),
+            Err(HttpError::Other("response read incomplete".into()))
+        );
+        assert!(reader_outcome(false, false, true).is_ok());
+    }
+
+    #[test]
+    fn paths_outside_the_safe_set_are_refused_and_globbing_is_off() {
+        assert!(curl_args(10, 1, None, false).contains(&"-g".to_string()));
+        for bad in [
+            "x", "/a{b,c}", "/a[1-3]", "/a b", "/a?x=1", "/a\n", "/a#f", "/a\\b",
+        ] {
+            let mut r = req("t6", bad);
+            r.path = bad.into();
+            assert!(matches!(fetch(&r), Err(HttpError::Refused(_))), "{bad:?}");
+        }
+        assert!(path_allowed("/api/v3/breachedaccount/a%40b.org"));
+    }
+
+    #[test]
+    fn a_body_ending_in_newlines_survives_the_trailer() {
+        if !curl_available() {
+            return;
+        }
+        let (port, _h) = serve(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nab\n\n\n".to_vec(),
+        );
+        std::env::set_var("MSFE_NG_OSINT_BASE_T7", format!("http://127.0.0.1:{port}"));
+        let r = fetch(&Request {
+            provider: "t7",
+            ..req("t7", "/x")
+        })
+        .unwrap();
+        assert_eq!(r.body, b"ab\n\n\n");
     }
 }
