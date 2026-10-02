@@ -76,9 +76,11 @@ CLI's rate and concurrency limits are separate from the daemon's.
 
 Set the HIBP key in **Config -> OSINT providers**. The key is write-only in the
 page: once saved the label says *configured*, a blank field keeps it, and
-**Clear key** removes it. It is stored in `config.toml` (readable by root only),
-is included in configuration snapshots, and is visible in the Config tab's raw
-view, so treat those as secrets. It is passed to the lookup on standard input,
+**Clear key** removes it. It is stored in `config.toml`, which is readable by
+root and by the `mail` group (the MailScanner logging plugin runs in that group
+and needs the file). Like the AbuseIPDB and Telegram secrets, it is also visible
+in the Config tab's raw view, its history and snapshot exports, so treat those
+as secrets. It is passed to the lookup on standard input,
 not on a command line, and is redacted from error text.
 
 HIBP has two modes (`osint_hibp_mode`):

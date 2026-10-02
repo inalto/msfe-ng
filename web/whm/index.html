@@ -2716,7 +2716,7 @@ function osintAvatar(f,cache){
       if(good===false)c.failed=true;
       const w=c.waiting;c.waiting=[];
       w.forEach(fn=>fn());
-    });
+    }).catch(()=>{if(!c.blob)c.failed=true;const w=c.waiting;c.waiting=[];w.forEach(fn=>fn());});
   }
   c.waiting.push(()=>{if(slot.isConnected&&c.blob){const u=URL.createObjectURL(c.blob);OSINT_BLOBS.push(u);show(u);}});
   return slot;

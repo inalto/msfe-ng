@@ -379,7 +379,15 @@ fn worker(
     let _persist = PERSIST.lock().unwrap_or_else(|e| e.into_inner());
     let dead =
         tombstoned(&id) || with_runs(|runs| runs.get(&id).map(|s| s.removed).unwrap_or(true));
-    let stored = !dead && !assets.is_empty() && store_assets(&assets).is_ok();
+    let stored = !dead
+        && !assets.is_empty()
+        && match store_assets(&assets) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("osint: could not store images for run {id}: {e}");
+                false
+            }
+        };
     if !stored {
         for f in findings.iter_mut() {
             f.asset_id = None;
@@ -413,7 +421,12 @@ fn worker(
     });
     if let Some(r) = report {
         if !tombstoned(&id) {
-            let _ = persist(&r);
+            if let Err(e) = persist(&r) {
+                eprintln!(
+                    "osint: could not store the report for run {}: {e}",
+                    r.run_id
+                );
+            }
         }
     }
 }

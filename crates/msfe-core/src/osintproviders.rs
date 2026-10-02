@@ -103,6 +103,15 @@ fn outcome(id: &str, state: SourceState, detail: &str) -> Outcome {
     }
 }
 
+/// A valid 1x1 PNG (one RGB pixel), so a real browser can decode the fixture avatar.
+const FIXTURE_PNG: [u8; 69] = [
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
+    0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x30, 0x68, 0xb8, 0x00,
+    0x00, 0x02, 0x64, 0x01, 0x81, 0xd9, 0xf1, 0x9e, 0x7e, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e,
+    0x44, 0xae, 0x42, 0x60, 0x82,
+];
+
 fn fixture(q: &QueryCtx) -> Outcome {
     let local = q
         .address
@@ -168,8 +177,7 @@ fn fixture(q: &QueryCtx) -> Outcome {
             FIXTURE_SLEEPING.store(true, Ordering::SeqCst);
             std::thread::sleep(Duration::from_millis(400));
         }
-        let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
-        bytes.resize(70, 0);
+        let bytes = FIXTURE_PNG.to_vec();
         let asset = Asset {
             id: crate::deliveryrun::new_id(),
             mime: "image/png",
@@ -373,7 +381,7 @@ fn hibp_findings_direct(body: &[u8], now: u64) -> Result<Vec<Finding>, String> {
     let mut out = Vec::new();
     for b in arr.iter() {
         let f = breach_finding(b, now)?;
-        if out.len() < MAX_FINDINGS {
+        if out.len() <= MAX_FINDINGS {
             out.push(f);
         }
     }
@@ -398,7 +406,7 @@ fn hibp_findings_range(body: &[u8], suffix_upper: &str, now: u64) -> Result<Vec<
                 .as_str()
                 .filter(|n| !n.is_empty())
                 .ok_or("unexpected answer")?;
-            if out.len() >= MAX_FINDINGS {
+            if out.len() > MAX_FINDINGS {
                 break;
             }
             out.push(Finding {
@@ -497,6 +505,25 @@ fn hibp(q: &QueryCtx) -> Outcome {
             };
             match parsed {
                 Err(_) => unexpected(),
+                Ok(mut f) if f.len() > MAX_FINDINGS => {
+                    // The helpers keep one extra row so a cut-off is detectable.
+                    f.truncate(MAX_FINDINGS);
+                    let note = format!(
+                        "Showing the first {MAX_FINDINGS} incidents; the source returned more."
+                    );
+                    for x in f.iter_mut() {
+                        x.limitations.push(note.clone());
+                    }
+                    Outcome {
+                        source: status(
+                            HIBP_ID,
+                            SourceState::Matched,
+                            &format!("{MAX_FINDINGS} incident(s) shown; the source returned more"),
+                        ),
+                        findings: f,
+                        assets: Vec::new(),
+                    }
+                }
                 Ok(f) if f.is_empty() => outcome(
                     HIBP_ID,
                     SourceState::NoMatch,
@@ -521,7 +548,10 @@ fn hibp(q: &QueryCtx) -> Outcome {
         401 | 403 => outcome(
             HIBP_ID,
             SourceState::Restricted,
-            "the API key was rejected or the plan does not include this lookup",
+            &format!(
+                "HTTP {}: the API key was rejected or the plan does not include this lookup (a proxy or firewall page can also cause this)",
+                resp.status
+            ),
         ),
         429 => Outcome {
             source: SourceStatus {
@@ -672,7 +702,7 @@ fn gravatar(q: &QueryCtx) -> Outcome {
         401 | 403 => outcome(
             GRAVATAR_ID,
             SourceState::Restricted,
-            "Gravatar refused the request",
+            &format!("HTTP {}: Gravatar refused the request", resp.status),
         ),
         429 => Outcome {
             source: SourceStatus {
@@ -754,6 +784,59 @@ mod tests {
         );
         assert_eq!(f.event_at, Some(1380844800)); // 2013-10-04 UTC
         assert!(f.limitations.iter().any(|l| l.contains("2013-10-04")));
+    }
+
+    #[test]
+    fn findings_over_the_cap_are_cut_with_a_limitation_line() {
+        let one = r#"{"Name":"N","Title":"T","BreachDate":"2013-10-04"}"#;
+        let body = format!("[{}]", vec![one; MAX_FINDINGS + 5].join(","));
+        let fs = hibp_findings_direct(body.as_bytes(), 1).unwrap();
+        assert_eq!(
+            fs.len(),
+            MAX_FINDINGS + 1,
+            "one extra row marks the cut-off"
+        );
+        let _g = HIBP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let reply = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        let (port, _h) = serve(reply.into_bytes());
+        std::env::set_var(
+            "MSFE_NG_OSINT_BASE_HIBP",
+            format!("http://127.0.0.1:{port}"),
+        );
+        let cfg = Config {
+            osint_hibp_key: "K".into(),
+            ..Config::default()
+        };
+        let cancel = AtomicBool::new(false);
+        let q = QueryCtx {
+            address: "a@example.org",
+            cancel: &cancel,
+            deadline: Instant::now() + Duration::from_secs(10),
+            cfg: &cfg,
+        };
+        let o = run("hibp", &q);
+        std::env::remove_var("MSFE_NG_OSINT_BASE_HIBP");
+        assert_eq!(o.findings.len(), MAX_FINDINGS);
+        assert!(
+            o.source.detail.contains("returned more"),
+            "{}",
+            o.source.detail
+        );
+        assert!(o.findings[0]
+            .limitations
+            .iter()
+            .any(|l| l.contains("first 100 incidents")));
+    }
+
+    #[test]
+    fn fixture_png_is_a_well_formed_1x1_image() {
+        let p = &FIXTURE_PNG;
+        assert_eq!(&p[..8], &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
+        assert_eq!(&p[12..16], b"IHDR");
+        assert_eq!(u32::from_be_bytes(p[16..20].try_into().unwrap()), 1);
+        assert_eq!(u32::from_be_bytes(p[20..24].try_into().unwrap()), 1);
+        assert_eq!(&p[p.len() - 8..p.len() - 4], b"IEND");
+        assert_eq!(&p[p.len() - 4..], &[0xAE, 0x42, 0x60, 0x82]);
     }
 
     #[test]
@@ -852,6 +935,15 @@ mod tests {
                 assert_eq!(o.source.retry_after, Some(7));
             }
             assert!(!o.source.detail.contains("SECRETKEY123"));
+            if status.starts_with("401") || status.starts_with("403") {
+                assert!(
+                    o.source
+                        .detail
+                        .starts_with(&format!("HTTP {}", &status[..3])),
+                    "{}",
+                    o.source.detail
+                );
+            }
         }
         std::env::remove_var("MSFE_NG_OSINT_BASE_HIBP");
     }
@@ -999,7 +1091,8 @@ mod tests {
         if Command::new("sha256sum").arg("--version").output().is_err() {
             return;
         }
-        let big = vec![0x89u8; 300 * 1024];
+        let mut big = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        big.resize(300 * 1024, 0);
         let cases: Vec<(Vec<u8>, SourceState)> = vec![
             (b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 6\r\nConnection: close\r\n\r\n<html>".to_vec(), SourceState::Failed),
             (b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(), SourceState::NoMatch),
@@ -1008,6 +1101,7 @@ mod tests {
             (b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(), SourceState::Restricted),
         ];
         for (reply, want) in cases {
+            let reply_len = reply.len();
             let (port, _h) = serve(reply);
             std::env::set_var(
                 "MSFE_NG_OSINT_BASE_GRAVATAR",
@@ -1024,6 +1118,13 @@ mod tests {
             let o = run("gravatar", &q);
             assert_eq!(o.source.state, want, "{}", o.source.detail);
             assert!(o.assets.is_empty() && o.findings.is_empty());
+            if reply_len > 100 * 1024 {
+                assert!(o.source.detail.contains("256 KiB"), "{}", o.source.detail);
+            }
+            if want == SourceState::Restricted {
+                assert!(o.source.detail.contains("HTTP 403"), "{}", o.source.detail);
+                assert!(!o.source.detail.contains("API key"), "{}", o.source.detail);
+            }
         }
         std::env::remove_var("MSFE_NG_OSINT_BASE_GRAVATAR");
     }
