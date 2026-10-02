@@ -126,7 +126,11 @@ static RUNS: Mutex<Option<HashMap<String, Slot>>> = Mutex::new(None);
 static STARTS: Mutex<Vec<Instant>> = Mutex::new(Vec::new());
 /// Ids removed while a worker may still be running: a late worker must not
 /// recreate the run or its file.
-static TOMBS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static TOMBS: Mutex<Vec<(String, Instant)>> = Mutex::new(Vec::new());
+/// Held by `remove()` and by the tombstone-check-plus-persist section of the
+/// worker, so a late persist can never land after a remove.
+static PERSIST: Mutex<()> = Mutex::new(());
+const TOMB_TTL: Duration = Duration::from_secs(3600);
 
 fn with_runs<T>(f: impl FnOnce(&mut HashMap<String, Slot>) -> T) -> T {
     let mut g = RUNS.lock().unwrap_or_else(|e| e.into_inner());
@@ -138,7 +142,30 @@ fn tombstoned(id: &str) -> bool {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .iter()
-        .any(|t| t == id)
+        .any(|(t, at)| t == id && at.elapsed() < TOMB_TTL)
+}
+
+/// Window admission. Pushes `now` on success; on refusal returns the seconds
+/// until the oldest entry leaves the window.
+fn admit(window: &mut Vec<Instant>, per_min: usize, now: Instant) -> Result<(), u64> {
+    if let Some(cutoff) = now.checked_sub(Duration::from_secs(60)) {
+        window.retain(|t| *t > cutoff);
+    }
+    if window.len() >= per_min {
+        let oldest = window.iter().min().copied().unwrap_or(now);
+        let waited = now.saturating_duration_since(oldest).as_secs();
+        return Err(60u64.saturating_sub(waited).max(1));
+    }
+    window.push(now);
+    Ok(())
+}
+
+/// Take back an admission whose start was then rejected.
+fn unadmit(at: Instant) {
+    let mut g = STARTS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(i) = g.iter().position(|t| *t == at) {
+        g.remove(i);
+    }
 }
 
 /// Cache identity: exact subject representation, sorted sources, schema
@@ -153,7 +180,7 @@ pub fn start(cfg: &Config, inputs: Inputs) -> Result<StartOk, StartError> {
     if !cfg.osint_enabled {
         return Err(StartError::Disabled);
     }
-    sweep_memory();
+    sweep_memory(Duration::from_secs(cfg.osint_cache_secs).max(EVICT_AFTER));
     let key = cache_key(&inputs);
     if !inputs.force {
         let hit = with_runs(|runs| {
@@ -171,42 +198,16 @@ pub fn start(cfg: &Config, inputs: Inputs) -> Result<StartOk, StartError> {
             return Ok(StartOk::Cached(id));
         }
     }
-    // Busy and concurrency are checked together with registration so two
-    // simultaneous starts cannot both pass.
     let id = crate::deliveryrun::new_id();
     let cancel = Arc::new(AtomicBool::new(false));
     let max_conc = cfg.osint_max_concurrent.max(1) as usize;
-    let rejected = with_runs(|runs| {
-        if let Some(s) = runs
-            .values()
-            .find(|s| s.report.state == RunState::Running && s.report.address == inputs.address)
-        {
-            return Some(StartError::Busy(s.report.run_id.clone()));
-        }
-        if runs
-            .values()
-            .filter(|s| s.report.state == RunState::Running)
-            .count()
-            >= max_conc
-        {
-            return Some(StartError::TooManyRuns);
-        }
-        None
-    });
-    if let Some(e) = rejected {
-        return Err(e);
-    }
+    // Rate window first; a start rejected below hands its entry back so
+    // rejections never burn the window.
+    let admitted_at = Instant::now();
     {
         let per_min = cfg.osint_runs_per_min.max(1) as usize;
         let mut g = STARTS.lock().unwrap_or_else(|e| e.into_inner());
-        let cutoff = Instant::now() - Duration::from_secs(60);
-        g.retain(|t| *t > cutoff);
-        if g.len() >= per_min {
-            let oldest = g.iter().min().copied().unwrap_or_else(Instant::now);
-            let retry = 60u64.saturating_sub(oldest.elapsed().as_secs()).max(1);
-            return Err(StartError::RateLimited(retry));
-        }
-        g.push(Instant::now());
+        admit(&mut g, per_min, admitted_at).map_err(StartError::RateLimited)?;
     }
     let report = OsintReport {
         run_id: id.clone(),
@@ -226,13 +227,22 @@ pub fn start(cfg: &Config, inputs: Inputs) -> Result<StartOk, StartError> {
                 .into(),
         ],
     };
-    // Re-check Busy under the same lock as the insert.
-    let busy = with_runs(|runs| {
+    // Busy, the concurrency ceiling and the insert happen under one lock, so
+    // two simultaneous starts cannot both pass.
+    let rejected = with_runs(|runs| {
         if let Some(s) = runs
             .values()
             .find(|s| s.report.state == RunState::Running && s.report.address == inputs.address)
         {
-            return Some(s.report.run_id.clone());
+            return Some(StartError::Busy(s.report.run_id.clone()));
+        }
+        if runs
+            .values()
+            .filter(|s| s.report.state == RunState::Running)
+            .count()
+            >= max_conc
+        {
+            return Some(StartError::TooManyRuns);
         }
         runs.insert(
             id.clone(),
@@ -245,13 +255,21 @@ pub fn start(cfg: &Config, inputs: Inputs) -> Result<StartOk, StartError> {
         );
         None
     });
-    if let Some(b) = busy {
-        return Err(StartError::Busy(b));
+    if let Some(e) = rejected {
+        unadmit(admitted_at);
+        return Err(e);
     }
     let deadline = Instant::now() + Duration::from_secs(cfg.osint_deadline_secs);
     let max_q = cfg.osint_max_external_queries.max(1) as usize;
     let id2 = id.clone();
-    std::thread::spawn(move || worker(id2, inputs, cancel, deadline, max_q));
+    let spawned = std::thread::Builder::new()
+        .name("osint-run".into())
+        .spawn(move || worker(id2, inputs, cancel, deadline, max_q));
+    if spawned.is_err() {
+        with_runs(|runs| runs.remove(&id));
+        unadmit(admitted_at);
+        return Err(StartError::Invalid("could not start the lookup".into()));
+    }
     Ok(StartOk::Started(id))
 }
 
@@ -299,6 +317,9 @@ fn fixture(q: &QueryCtx) -> Outcome {
         retry_after: None,
         detail: detail.into(),
     };
+    if local.contains("panic") {
+        panic!("synthetic provider panic");
+    }
     if local.contains("slow") {
         for _ in 0..40 {
             if q.stop() {
@@ -345,6 +366,7 @@ fn worker(id: String, inputs: Inputs, cancel: Arc<AtomicBool>, deadline: Instant
     let mut sources = Vec::new();
     let mut findings = Vec::new();
     let mut ran = 0usize;
+    let mut panicked = false;
     for p in &inputs.providers {
         if cancel.load(Ordering::Relaxed) || Instant::now() >= deadline {
             break;
@@ -364,7 +386,22 @@ fn worker(id: String, inputs: Inputs, cancel: Arc<AtomicBool>, deadline: Instant
             cancel: &cancel,
             deadline,
         };
-        let o = run_provider(p, &q);
+        let o = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_provider(p, &q)))
+        {
+            Ok(o) => o,
+            Err(_) => {
+                panicked = true;
+                Outcome {
+                    source: SourceStatus {
+                        id: p.clone(),
+                        state: SourceState::Failed,
+                        retry_after: None,
+                        detail: "the source lookup failed unexpectedly".into(),
+                    },
+                    findings: Vec::new(),
+                }
+            }
+        };
         sources.push(o.source);
         findings.extend(o.findings);
         with_runs(|runs| {
@@ -393,15 +430,20 @@ fn worker(id: String, inputs: Inputs, cancel: Arc<AtomicBool>, deadline: Instant
     let all_terminal_ok = sources
         .iter()
         .all(|s| matches!(s.state, SourceState::Matched | SourceState::NoMatch));
-    let state = if cancelled {
-        RunState::Cancelled
-    } else if all_terminal_ok {
-        RunState::Complete
-    } else {
-        RunState::Partial
-    };
+    // The cancel flag is read under the registry lock that sets the final
+    // state, and cancel() sets it under the same lock: a cancel() that returned
+    // true always yields Cancelled.
     let report = with_runs(|runs| {
         let s = runs.get_mut(&id)?;
+        let state = if cancel.load(Ordering::Relaxed) {
+            RunState::Cancelled
+        } else if panicked {
+            RunState::Failed
+        } else if all_terminal_ok {
+            RunState::Complete
+        } else {
+            RunState::Partial
+        };
         s.report.sources = sources;
         s.report.findings = findings;
         s.report.state = state;
@@ -410,6 +452,7 @@ fn worker(id: String, inputs: Inputs, cancel: Arc<AtomicBool>, deadline: Instant
         Some(s.report.clone())
     });
     if let Some(r) = report {
+        let _g = PERSIST.lock().unwrap_or_else(|e| e.into_inner());
         if !tombstoned(&id) {
             let _ = persist(&r);
         }
@@ -445,6 +488,9 @@ fn persist(r: &OsintReport) -> std::io::Result<()> {
 
 fn load(id: &str) -> Option<OsintReport> {
     if !valid_id(id) {
+        return None;
+    }
+    if tombstoned(id) {
         return None;
     }
     let p = report_dir().join(format!("{id}.json"));
@@ -501,10 +547,9 @@ pub fn remove(id: &str) -> bool {
     if !valid_id(id) {
         return false;
     }
-    TOMBS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push(id.to_string());
+    let _g = PERSIST.lock().unwrap_or_else(|e| e.into_inner());
+    let p = report_dir().join(format!("{id}.json"));
+    let on_disk = p.exists();
     let had_mem = with_runs(|runs| match runs.remove(id) {
         Some(s) => {
             s.cancel.store(true, Ordering::Relaxed);
@@ -512,7 +557,11 @@ pub fn remove(id: &str) -> bool {
         }
         None => false,
     });
-    let p = report_dir().join(format!("{id}.json"));
+    if had_mem || on_disk {
+        let mut t = TOMBS.lock().unwrap_or_else(|e| e.into_inner());
+        t.retain(|(_, at)| at.elapsed() < TOMB_TTL);
+        t.push((id.to_string(), Instant::now()));
+    }
     let had_file = std::fs::remove_file(&p).is_ok();
     // A worker that finished between the removal above and its persist call is
     // covered by the tombstone check in `worker`.
@@ -520,11 +569,11 @@ pub fn remove(id: &str) -> bool {
     had_mem || had_file
 }
 
-fn sweep_memory() {
+fn sweep_memory(keep_finished: Duration) {
     with_runs(|runs| {
         runs.retain(|_, s| {
             s.finished_at
-                .map(|t| t.elapsed() < EVICT_AFTER)
+                .map(|t| t.elapsed() < keep_finished)
                 .unwrap_or(true)
         });
     });
@@ -573,7 +622,7 @@ mod tests {
         });
         let c = Config {
             osint_enabled: true,
-            osint_runs_per_min: 30,
+            osint_runs_per_min: 1000,
             osint_max_concurrent: 8,
             ..Config::default()
         };
@@ -781,5 +830,89 @@ mod tests {
         sweep(0);
         assert!(other.exists(), "only <16hex>.json files are ours to delete");
         let _ = std::fs::remove_file(other);
+    }
+
+    #[test]
+    fn admit_window_and_release() {
+        let now = Instant::now();
+        let mut w = Vec::new();
+        assert!(admit(&mut w, 1, now).is_ok());
+        assert!(matches!(admit(&mut w, 1, now), Err(s) if s >= 1));
+        assert!(admit(&mut w, 1, now + Duration::from_secs(61)).is_ok());
+    }
+
+    #[test]
+    fn rejected_starts_do_not_burn_the_rate_window() {
+        let (mut c, _g) = setup();
+        c.osint_max_concurrent = 1;
+        c.osint_runs_per_min = 1000;
+        let StartOk::Started(id) = start(&c, inp("slow.burn1@example.org", true)).unwrap() else {
+            panic!()
+        };
+        let before = STARTS.lock().unwrap().len();
+        assert_eq!(
+            start(&c, inp("slow.burn2@example.org", true)).unwrap_err(),
+            StartError::TooManyRuns
+        );
+        assert!(matches!(
+            start(&c, inp("slow.burn1@example.org", true)),
+            Err(StartError::Busy(_))
+        ));
+        assert_eq!(STARTS.lock().unwrap().len(), before);
+        cancel(&id);
+        wait_done(&id);
+    }
+
+    #[test]
+    fn a_cancel_that_succeeded_always_yields_cancelled() {
+        let (mut c, _g) = setup();
+        c.osint_runs_per_min = 1000;
+        for i in 0..30 {
+            let a = format!("quiet.race{i}@example.org");
+            let StartOk::Started(id) = start(&c, inp(&a, true)).unwrap() else {
+                panic!()
+            };
+            if cancel(&id) {
+                assert_eq!(wait_done(&id).state, RunState::Cancelled, "run {i}");
+            } else {
+                wait_done(&id);
+            }
+        }
+    }
+
+    #[test]
+    fn removed_run_does_not_come_back() {
+        let (c, _g) = setup();
+        let StartOk::Started(id) = start(&c, inp("slow.gone@example.org", true)).unwrap() else {
+            panic!()
+        };
+        assert!(remove(&id));
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(snapshot(&id).is_none());
+        assert!(!report_dir().join(format!("{id}.json")).exists());
+        assert!(recent(100).iter().all(|r| r.run_id != id));
+    }
+
+    #[test]
+    fn unknown_ids_are_not_tombstoned() {
+        let (_c, _g) = setup();
+        let before = TOMBS.lock().unwrap().len();
+        assert!(!remove("0123456789abcdef"));
+        assert_eq!(TOMBS.lock().unwrap().len(), before);
+    }
+
+    #[test]
+    fn a_panicking_provider_finalises_the_run_as_failed() {
+        let (c, _g) = setup();
+        let StartOk::Started(id) = start(&c, inp("panic.one@example.org", true)).unwrap() else {
+            panic!()
+        };
+        let r = wait_done(&id);
+        assert_eq!(r.state, RunState::Failed);
+        assert!(r.finished.is_some());
+        assert!(matches!(
+            start(&c, inp("panic.one@example.org", true)),
+            Ok(StartOk::Started(_))
+        ));
     }
 }
