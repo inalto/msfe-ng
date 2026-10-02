@@ -1027,9 +1027,40 @@ fn broken(s: &SourceState) -> bool {
 /// requested, unknown) are ignored, and a source that did not answer now
 /// never makes its earlier findings "gone".
 pub fn diff_reports(prev: &OsintReport, cur: &OsintReport) -> Delta {
+    diff_reports_with(prev, cur, &[])
+}
+
+/// Like [`diff_reports`], with `older` runs of the same monitor (newest
+/// first) that bridge a source the baseline run did not hear from: its
+/// earlier findings count as known, so a provider that missed a run (rate
+/// limited, failed, not configured, ...) does not re-announce every old item
+/// when it recovers. A finding is "new" only when its source answered in the
+/// baseline (or in a bridging run); a genuinely new item that first shows up
+/// exactly at a recovery with nothing to bridge from is picked up on the next
+/// run, once the source has answered twice.
+pub fn diff_reports_with(prev: &OsintReport, cur: &OsintReport, older: &[OsintReport]) -> Delta {
     let mut d = Delta::default();
+    let mut base: Vec<Finding> = prev.findings.clone();
+    let mut base_answered: Vec<String> = prev
+        .sources
+        .iter()
+        .filter(|s| answered(&s.state))
+        .map(|s| s.id.clone())
+        .collect();
+    for c in cur.sources.iter().filter(|c| answered(&c.state)) {
+        if base_answered.contains(&c.id) {
+            continue;
+        }
+        let bridge = older
+            .iter()
+            .find(|o| o.sources.iter().any(|s| s.id == c.id && answered(&s.state)));
+        if let Some(o) = bridge {
+            base_answered.push(c.id.clone());
+            base.extend(o.findings.iter().filter(|f| f.source_id == c.id).cloned());
+        }
+    }
     let mut prev_keys: Vec<String> = Vec::new();
-    for f in &prev.findings {
+    for f in &base {
         let k = finding_key(f);
         if !prev_keys.contains(&k) {
             prev_keys.push(k);
@@ -1041,13 +1072,13 @@ pub fn diff_reports(prev: &OsintReport, cur: &OsintReport) -> Delta {
         if cur_keys.contains(&k) {
             continue;
         }
-        if !prev_keys.contains(&k) {
+        if !prev_keys.contains(&k) && base_answered.contains(&f.source_id) {
             d.new_findings.push(finding_ref(f));
         }
         cur_keys.push(k);
     }
     let mut seen: Vec<String> = Vec::new();
-    for f in &prev.findings {
+    for f in &base {
         let k = finding_key(f);
         if seen.contains(&k) {
             continue;
@@ -1323,6 +1354,33 @@ fn baseline_report(store: &dyn Store, m: &Monitor, run_id: u32) -> Option<OsintR
     })
 }
 
+/// Earlier runs (newest first, at most the last 10) that can vouch for a
+/// source the baseline run did not hear from; empty (and no reads) when every
+/// source that answered now also answered in the baseline.
+fn bridging_runs(
+    store: &dyn Store,
+    m: &Monitor,
+    run_id: u32,
+    prev: &OsintReport,
+    cur: &OsintReport,
+) -> Vec<OsintReport> {
+    let gap = cur.sources.iter().any(|c| {
+        answered(&c.state)
+            && !prev
+                .sources
+                .iter()
+                .any(|p| p.id == c.id && answered(&p.state))
+    });
+    if !gap {
+        return Vec::new();
+    }
+    let rows = store.runs(m.id, 10).unwrap_or_default();
+    rows.iter()
+        .filter(|r| r.id < run_id)
+        .filter_map(|r| store.run_report(r.id).ok().flatten())
+        .collect()
+}
+
 pub fn run_due_with(
     cfg: &Config,
     store: &dyn Store,
@@ -1497,7 +1555,8 @@ pub fn run_due_with(
             continue;
         };
         notes.push(format!("osint monitor {addr}: {summary}"));
-        let delta = diff_reports(&prev, &report);
+        let older = bridging_runs(store, &m, run_id, &prev, &report);
+        let delta = diff_reports_with(&prev, &report, &older);
         let texts = alert_texts(&host, &addr, &delta);
         // false when a needed alert was held back or failed to send: the
         // baseline then stays and the change is raised again
@@ -2211,6 +2270,25 @@ mod change_tests {
     }
 
     #[test]
+    fn a_source_unanswered_in_the_baseline_makes_nothing_new() {
+        let a = rep(&[("hibp", SourceState::RateLimited)], vec![]);
+        let b = rep(&ok(), vec![f("hibp", Group::Exposure, Some("u1"), "t")]);
+        assert!(diff_reports(&a, &b).new_findings.is_empty());
+        // with an earlier answering run the old items are known, a real new one is not
+        let old = rep(&ok(), vec![f("hibp", Group::Exposure, Some("u1"), "t")]);
+        let b2 = rep(
+            &ok(),
+            vec![
+                f("hibp", Group::Exposure, Some("u1"), "t"),
+                f("hibp", Group::Exposure, Some("u2"), "t"),
+            ],
+        );
+        let d = diff_reports_with(&a, &b2, std::slice::from_ref(&old));
+        assert_eq!(d.new_findings.len(), 1);
+        assert_eq!(d.new_findings[0].source_url.as_deref(), Some("u2"));
+    }
+
+    #[test]
     fn baseline_missing_is_none() {
         let a = rep(&ok(), vec![]);
         assert!(diff_or_baseline(None, &a).is_none());
@@ -2654,6 +2732,92 @@ mod sched_tests {
             pass(&s, &r, &n);
         }
         assert_eq!(n.sent(), 0);
+    }
+
+    fn new_item_alerts(n: &FakeNotifier) -> usize {
+        n.sent
+            .borrow()
+            .iter()
+            .filter(|t| t.contains("new public item"))
+            .count()
+    }
+
+    #[test]
+    fn a_provider_missing_one_run_does_not_re_alert_its_old_findings() {
+        let urls = ["https://e.org/a", "https://e.org/b"];
+        for miss in [
+            SourceState::RateLimited,
+            SourceState::Inconclusive,
+            SourceState::NotConfigured,
+            SourceState::Failed,
+            SourceState::Restricted,
+        ] {
+            let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+            mon(&s, "a@x.org", &["gravatar"]);
+            r.push(Ok(rpt(st(SourceState::Matched), &urls)));
+            pass(&s, &r, &n);
+            r.push(Ok(rpt(st(miss.clone()), &[])));
+            pass(&s, &r, &n);
+            r.push(Ok(rpt(st(SourceState::Matched), &urls)));
+            pass(&s, &r, &n);
+            assert_eq!(new_item_alerts(&n), 0, "{miss:?}: {:?}", n.sent.borrow());
+        }
+        // two missed runs in a row are bridged as well
+        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+        mon(&s, "a@x.org", &["gravatar"]);
+        r.push(Ok(rpt(st(SourceState::Matched), &urls)));
+        pass(&s, &r, &n);
+        for state in [SourceState::RateLimited, SourceState::Failed] {
+            r.push(Ok(rpt(st(state), &[])));
+            pass(&s, &r, &n);
+        }
+        r.push(Ok(rpt(st(SourceState::Matched), &urls)));
+        pass(&s, &r, &n);
+        assert_eq!(new_item_alerts(&n), 0, "{:?}", n.sent.borrow());
+    }
+
+    #[test]
+    fn a_failed_episode_alerts_the_problem_once_and_not_the_findings() {
+        let urls = ["https://e.org/a"];
+        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+        mon(&s, "a@x.org", &["gravatar"]);
+        r.push(Ok(rpt(st(SourceState::Matched), &urls)));
+        pass(&s, &r, &n);
+        r.push(Ok(rpt(st(SourceState::Failed), &[])));
+        pass(&s, &r, &n);
+        assert_eq!(n.sent(), 1);
+        assert!(n.sent.borrow()[0].contains("source problem"));
+        r.push(Ok(rpt(st(SourceState::Matched), &urls)));
+        pass(&s, &r, &n);
+        assert_eq!(new_item_alerts(&n), 0, "{:?}", n.sent.borrow());
+    }
+
+    #[test]
+    fn a_genuinely_new_finding_still_alerts_once() {
+        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+        mon(&s, "a@x.org", &["gravatar"]);
+        r.push(Ok(rpt(st(SourceState::Matched), &["https://e.org/a"])));
+        pass(&s, &r, &n);
+        r.push(Ok(rpt(
+            st(SourceState::Matched),
+            &["https://e.org/a", "https://e.org/bb"],
+        )));
+        pass(&s, &r, &n);
+        assert_eq!(new_item_alerts(&n), 1, "{:?}", n.sent.borrow());
+        r.push(Ok(rpt(
+            st(SourceState::Matched),
+            &["https://e.org/a", "https://e.org/bb"],
+        )));
+        pass(&s, &r, &n);
+        assert_eq!(new_item_alerts(&n), 1);
+        // an answering source with no findings that gains one
+        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+        mon(&s, "a@x.org", &["gravatar"]);
+        for urls in [&[][..], &[][..], &["https://e.org/a"][..]] {
+            r.push(Ok(rpt(st(SourceState::NoMatch), urls)));
+            pass(&s, &r, &n);
+        }
+        assert_eq!(new_item_alerts(&n), 1, "{:?}", n.sent.borrow());
     }
 
     #[test]
