@@ -64,8 +64,8 @@ can use it.
 | `osint_retention_hours` | 24 | how long a report and its avatar are kept (1-720) |
 
 A run request may carry `external_query_limit` to lower the outside-lookup budget
-for that run; it is clamped to `osint_max_external_queries` and never raises it. The shell runs the controller in its own process, so the CLI's rate and
-concurrency limits are separate from the daemon's.
+for that run; it is clamped to `osint_max_external_queries` and never raises it. The shell runs the controller in its own process, so the
+CLI's rate and concurrency limits are separate from the daemon's.
 
 ## Sources and keys
 
@@ -96,13 +96,14 @@ HIBP has two modes (`osint_hibp_mode`):
 - **HIBP, range mode**: only a 6-character SHA-1 prefix of the address.
 - **Gravatar**: only a SHA-256 hash of the lower-cased address, sent to
   `gravatar.com`, asking for an avatar at rating G, 256 px. A 404 answer means
-  there is no avatar at that rating (one may exist at a stricter rating). No
+  there is no avatar at that rating (one may exist at a higher, more mature rating). No
   Gravatar profile data is queried.
 - the **fixture** source (only with `MSFE_NG_OSINT_FIXTURE`) receives nothing.
 
 Outbound lookups go only to those two fixed hosts, over HTTPS, without
-following redirects, and only to public addresses (the daemon checks the
-address it actually connects to). Nothing else leaves the server.
+following redirects, and only to public addresses (the process doing the lookup,
+the daemon or the CLI, checks the address it actually connects to). Nothing else
+leaves the server.
 
 ## Avatars
 
@@ -128,9 +129,10 @@ avatars. Avatars are removed together with their report.
 
 Each run is stored as a report under `/var/cache/msfe-ng/osint` (directory mode
 `0700`, files `0600`) and deleted after `osint_retention_hours` (24 h by
-default); the same applies to avatars. Expired items are swept when a run
-starts, by the daily housekeeping, and by `delivery osint sweep`. Only the normalised findings and minimal evidence are kept, never raw
-provider replies. A report can be downloaded as JSON or as a standalone HTML
+default); the same applies to avatars. Expired items are swept when the daemon
+starts, by `msfe-ng housekeeping` (run daily by cron), and by
+`delivery osint sweep`. Only the normalised findings and minimal evidence are
+kept, never raw provider replies. A report can be downloaded as JSON or as a standalone HTML
 page. The view works without the database.
 
 ## From the shell
@@ -141,7 +143,9 @@ msfe-ng delivery osint providers [--json]
 msfe-ng delivery osint sweep
 ```
 
-`providers` lists the sources and what each receives; `sweep` deletes reports
+`providers` prints one line per source (tab-separated: id, name,
+`configured` or `not configured`, and what it receives; `--json` has a
+`configured` field); `sweep` deletes reports
 older than the retention time. The first form runs the lookup, waits for it and
 prints the report (text, or `--json` / `--html`); `--force` skips the cache.
 

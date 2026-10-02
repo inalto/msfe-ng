@@ -241,7 +241,6 @@ optional **Have I Been Pwned API key** (`osint_hibp_key`) and the lookup mode
 never shown again once saved (the label says *configured*), an empty field keeps it,
 and **Clear key** removes it. Only letters, digits, `-` and `_` are accepted. The
 key is stored in `config.toml` (root-readable), is included in snapshots and shows in
-the Config tab's raw view. The
-`config.toml` file holds the limits: `osint_runs_per_min`, `osint_max_concurrent`,
+the Config tab's raw view. The `config.toml` file holds the limits: `osint_runs_per_min`, `osint_max_concurrent`,
 `osint_deadline_secs`, `osint_max_external_queries`, `osint_cache_secs` and
 `osint_retention_hours`; the defaults are listed on the OSINT page.

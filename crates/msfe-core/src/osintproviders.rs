@@ -667,7 +667,7 @@ fn gravatar(q: &QueryCtx) -> Outcome {
         404 => outcome(
             GRAVATAR_ID,
             SourceState::NoMatch,
-            "no public avatar at rating G (a Gravatar may exist at a stricter rating)",
+            "no public avatar at rating G (a Gravatar may exist at a higher, more mature rating)",
         ),
         401 | 403 => outcome(
             GRAVATAR_ID,
