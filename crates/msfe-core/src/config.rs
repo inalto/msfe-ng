@@ -45,6 +45,14 @@ pub struct Config {
     pub delivery_runs_per_min: u32,
     /// A finished report is served again for this long (seconds).
     pub delivery_cache_secs: u64,
+    /// OSINT view (Delivery → OSINT). Off until the operator enables it.
+    pub osint_enabled: bool,
+    pub osint_runs_per_min: u32,
+    pub osint_max_concurrent: u32,
+    pub osint_deadline_secs: u64,
+    pub osint_max_external_queries: u32,
+    pub osint_cache_secs: u64,
+    pub osint_retention_hours: u64,
     /// Days of Exim logs the server audit scans by default (1–7).
     pub delivery_log_days: u32,
     pub delivery_max_monitors: u32,
@@ -171,6 +179,13 @@ impl Default for Config {
             geoip_url: "https://ipwho.is/{ip}".into(),
             delivery_runs_per_min: 6,
             delivery_cache_secs: 600,
+            osint_enabled: false,
+            osint_runs_per_min: 3,
+            osint_max_concurrent: 2,
+            osint_deadline_secs: 30,
+            osint_max_external_queries: 5,
+            osint_cache_secs: 3600,
+            osint_retention_hours: 24,
             delivery_log_days: 2,
             delivery_max_monitors: 20,
             delivery_helo: String::new(),
@@ -295,6 +310,21 @@ impl Config {
                     c.delivery_runs_per_min = v.parse().unwrap_or(6).clamp(1, 60)
                 }
                 "delivery_cache_secs" => c.delivery_cache_secs = v.parse().unwrap_or(600),
+                "osint_enabled" => c.osint_enabled = truthy(&v),
+                "osint_runs_per_min" => c.osint_runs_per_min = v.parse().unwrap_or(3).clamp(1, 30),
+                "osint_max_concurrent" => {
+                    c.osint_max_concurrent = v.parse().unwrap_or(2).clamp(1, 8)
+                }
+                "osint_deadline_secs" => {
+                    c.osint_deadline_secs = v.parse().unwrap_or(30).clamp(5, 120)
+                }
+                "osint_max_external_queries" => {
+                    c.osint_max_external_queries = v.parse().unwrap_or(5).clamp(1, 20)
+                }
+                "osint_cache_secs" => c.osint_cache_secs = v.parse().unwrap_or(3600),
+                "osint_retention_hours" => {
+                    c.osint_retention_hours = v.parse().unwrap_or(24).clamp(1, 720)
+                }
                 "delivery_log_days" => c.delivery_log_days = v.parse().unwrap_or(2).clamp(1, 7),
                 "delivery_max_monitors" => c.delivery_max_monitors = v.parse().unwrap_or(20),
                 "delivery_helo" => c.delivery_helo = v,
@@ -399,6 +429,31 @@ impl Config {
             (
                 "delivery_cache_secs".into(),
                 Json::Int(self.delivery_cache_secs as i64),
+            ),
+            ("osint_enabled".into(), Json::Bool(self.osint_enabled)),
+            (
+                "osint_runs_per_min".into(),
+                Json::Int(self.osint_runs_per_min as i64),
+            ),
+            (
+                "osint_max_concurrent".into(),
+                Json::Int(self.osint_max_concurrent as i64),
+            ),
+            (
+                "osint_deadline_secs".into(),
+                Json::Int(self.osint_deadline_secs as i64),
+            ),
+            (
+                "osint_max_external_queries".into(),
+                Json::Int(self.osint_max_external_queries as i64),
+            ),
+            (
+                "osint_cache_secs".into(),
+                Json::Int(self.osint_cache_secs as i64),
+            ),
+            (
+                "osint_retention_hours".into(),
+                Json::Int(self.osint_retention_hours as i64),
             ),
             (
                 "delivery_log_days".into(),
@@ -581,6 +636,19 @@ fn unquote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn osint_defaults_and_clamps() {
+        let d = Config::default();
+        assert!(!d.osint_enabled);
+        assert_eq!((d.osint_runs_per_min, d.osint_max_concurrent), (3, 2));
+        let c = Config::from_toml_str(
+            "osint_enabled = true\nosint_runs_per_min = 999\nosint_deadline_secs = 1\n",
+        );
+        assert!(c.osint_enabled);
+        assert_eq!(c.osint_runs_per_min, 30);
+        assert_eq!(c.osint_deadline_secs, 5);
+    }
 
     #[test]
     fn public_json_never_carries_the_dmarc_password() {

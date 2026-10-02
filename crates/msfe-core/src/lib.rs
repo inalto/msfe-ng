@@ -69,6 +69,7 @@ pub mod mtasts;
 pub mod mxchecks;
 pub mod netguard;
 pub mod osint;
+pub mod osintrun;
 pub mod panel;
 pub mod psl;
 pub mod quarantine;
