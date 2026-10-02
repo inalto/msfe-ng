@@ -58,6 +58,7 @@ pub fn infos(cfg: &Config) -> Vec<Info> {
         hibp_info(cfg),
         gravatar_info(),
         rdap_info(),
+        search_info(cfg),
         delivery_info(),
     ];
     if fixture_enabled() {
@@ -75,6 +76,7 @@ pub fn is_known(id: &str) -> bool {
     id == "hibp"
         || id == "gravatar"
         || id == "rdap"
+        || id == SEARCH_ID
         || id == DELIVERY_ID
         || (id == "fixture" && fixture_enabled())
 }
@@ -85,6 +87,7 @@ pub fn run(id: &str, q: &QueryCtx) -> Outcome {
         "hibp" => hibp(q),
         "gravatar" => gravatar(q),
         "rdap" => rdap(q),
+        SEARCH_ID => search(q),
         DELIVERY_ID => delivery(q),
         other => Outcome {
             source: SourceStatus {
@@ -1341,6 +1344,187 @@ fn rdap(q: &QueryCtx) -> Outcome {
     }
 }
 
+// ---- Web search (Brave Search) -------------------------------------------
+
+const SEARCH_ID: &str = "search";
+const SEARCH_HOST: &str = "api.search.brave.com";
+const SEARCH_MAX_BODY: usize = 512 * 1024;
+const SEARCH_MAX_RESULTS: usize = 10;
+
+fn search_info(cfg: &Config) -> Info {
+    Info {
+        id: SEARCH_ID,
+        name: "Web search (Brave Search)",
+        disclosure: "the full address, in quotes, is sent to api.search.brave.com".into(),
+        configured: !cfg.osint_search_key.trim().is_empty(),
+    }
+}
+
+fn rate_limited(id: &str, retry_after: Option<u64>, detail: &str) -> Outcome {
+    Outcome {
+        source: SourceStatus {
+            id: id.into(),
+            state: SourceState::RateLimited,
+            retry_after,
+            detail: detail.into(),
+        },
+        findings: Vec::new(),
+        assets: Vec::new(),
+    }
+}
+
+/// Usable results (http/https URL, not a duplicate), at most
+/// [`SEARCH_MAX_RESULTS`]; the flag says more usable results were dropped.
+fn search_findings(body: &[u8], now: u64) -> Result<(Vec<Finding>, bool), String> {
+    let text = std::str::from_utf8(body).map_err(|_| "unexpected answer".to_string())?;
+    let j = Json::parse(text).map_err(|_| "unexpected answer".to_string())?;
+    let results = j
+        .get("web")
+        .and_then(|w| w.get("results"))
+        .and_then(|r| r.as_array())
+        .ok_or_else(|| "unexpected answer".to_string())?;
+    let mut out: Vec<Finding> = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
+    let mut capped = false;
+    for r in results {
+        let Some(url) = str_of(r, "url") else {
+            continue;
+        };
+        if !crate::osinthtml::safe_url(url) || seen.contains(&url) {
+            continue;
+        }
+        if out.len() >= SEARCH_MAX_RESULTS {
+            capped = true;
+            break;
+        }
+        seen.push(url);
+        let title = clean_text(str_of(r, "title").unwrap_or(""), 120);
+        let snippet = clean_text(str_of(r, "description").unwrap_or(""), 300);
+        out.push(Finding {
+            group: Group::Reference,
+            confidence: Confidence::Low,
+            confidence_reason: "a search snippet only: the page was not fetched, so it was not confirmed to contain this address".into(),
+            severity: Severity::Info,
+            observed_at: now,
+            event_at: None,
+            source_id: SEARCH_ID.into(),
+            source_url: Some(url.to_string()),
+            title: if title.is_empty() { "Search result".into() } else { title },
+            evidence: format!("Search snippet: {snippet}"),
+            limitations: vec![
+                "A search engine's coverage is incomplete.".into(),
+                "Snippets can be stale or mis-attributed; open the page to confirm.".into(),
+            ],
+            asset_id: None,
+            asset_mime: None,
+        });
+    }
+    Ok((out, capped))
+}
+
+fn search(q: &QueryCtx) -> Outcome {
+    let key = q.cfg.osint_search_key.trim().to_string();
+    if key.is_empty() {
+        return outcome(
+            SEARCH_ID,
+            SourceState::NotConfigured,
+            "no search API key is set (Config \u{2192} OSINT providers)",
+        );
+    }
+    let remaining = q.deadline.saturating_duration_since(Instant::now());
+    if q.stop() || remaining.is_zero() {
+        return outcome(
+            SEARCH_ID,
+            SourceState::Inconclusive,
+            "stopped before this source ran",
+        );
+    }
+    let addr = q.address.trim();
+    let req = Request {
+        provider: "search",
+        host: SEARCH_HOST.to_string(),
+        path: "/res/v1/web/search".to_string(),
+        query: vec![
+            ("q", format!("\"{addr}\"")),
+            ("count", "10".to_string()),
+            ("safesearch", "moderate".to_string()),
+        ],
+        headers: vec![
+            ("x-subscription-token", key.clone()),
+            ("accept", "application/json".to_string()),
+        ],
+        timeout: remaining.min(Duration::from_secs(10)),
+        max_body: SEARCH_MAX_BODY,
+    };
+    let resp = match providerhttp::fetch(&req) {
+        Ok(r) => r,
+        Err(HttpError::Timeout) => return outcome(SEARCH_ID, SourceState::Failed, "timed out"),
+        Err(e) => {
+            let t = providerhttp::redact(&e.to_string(), &[&key, addr]);
+            return outcome(SEARCH_ID, SourceState::Failed, &t);
+        }
+    };
+    match resp.status {
+        200 => match search_findings(&resp.body, now_secs()) {
+            Err(_) => outcome(
+                SEARCH_ID,
+                SourceState::Failed,
+                "unexpected answer from the search provider",
+            ),
+            Ok((f, _)) if f.is_empty() => outcome(
+                SEARCH_ID,
+                SourceState::NoMatch,
+                "no public page found by this search engine",
+            ),
+            Ok((mut f, capped)) => {
+                let detail = if capped {
+                    format!(
+                        "{} result(s) shown; the search returned more",
+                        SEARCH_MAX_RESULTS
+                    )
+                } else {
+                    format!("{} result(s)", f.len())
+                };
+                if capped {
+                    for x in f.iter_mut() {
+                        x.limitations.push(format!(
+                            "Showing the first {SEARCH_MAX_RESULTS} results; the search returned more."
+                        ));
+                    }
+                }
+                Outcome {
+                    source: status(SEARCH_ID, SourceState::Matched, &detail),
+                    findings: f,
+                    assets: Vec::new(),
+                }
+            }
+        },
+        401 | 403 => outcome(
+            SEARCH_ID,
+            SourceState::Restricted,
+            &format!(
+                "HTTP {}: the search API key was rejected or the plan does not allow this",
+                resp.status
+            ),
+        ),
+        422 => outcome(
+            SEARCH_ID,
+            SourceState::Failed,
+            "the search provider rejected the query",
+        ),
+        429 => rate_limited(
+            SEARCH_ID,
+            resp.retry_after,
+            "search provider rate limit reached",
+        ),
+        n => outcome(
+            SEARCH_ID,
+            SourceState::Failed,
+            &format!("the search provider answered HTTP {n}"),
+        ),
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod testutil {
     use std::io::{Read, Write};
@@ -2305,5 +2489,176 @@ mod tests {
         assert!(f.title.contains("tested@example.com"));
         assert!(f.evidence.contains("other@example.org"), "{}", f.evidence);
         assert!(f.evidence.contains("a different address"));
+    }
+
+    // ---- search (Brave) ------------------------------------------------
+
+    static SEARCH_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Removes a stand-in override variable even when an assertion panics.
+    struct EnvGuard(&'static str);
+    impl EnvGuard {
+        fn set(name: &'static str, port: u16) -> EnvGuard {
+            std::env::set_var(name, format!("http://127.0.0.1:{port}"));
+            EnvGuard(name)
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var(self.0);
+        }
+    }
+
+    fn run_with(id: &str, cfg: &Config, address: &str) -> Outcome {
+        let cancel = AtomicBool::new(false);
+        let q = QueryCtx {
+            address,
+            cancel: &cancel,
+            deadline: Instant::now() + Duration::from_secs(10),
+            cfg,
+            delivery_run_id: None,
+        };
+        run(id, &q)
+    }
+
+    const SEARCH_BODY: &str = r#"{"query":{"original":"x"},"web":{"results":[
+        {"title":"A <strong>page</strong> &amp; more","url":"https://one.example/p","description":"Contact <script>alert(1)</script>a+b@example.org\u0007 here","age":"2 days ago"},
+        {"title":"Bad scheme","url":"javascript:alert(1)","description":"x"},
+        {"title":"Dup","url":"https://one.example/p","description":"again"},
+        {"title":"Plain","url":"http://two.example/","description":"snippet"}]}}"#;
+
+    #[test]
+    fn search_parses_cleans_dedups_and_drops_bad_urls() {
+        let (fs, capped) = search_findings(SEARCH_BODY.as_bytes(), 1_000).unwrap();
+        assert!(!capped);
+        assert_eq!(fs.len(), 2);
+        let f = &fs[0];
+        assert_eq!(f.group, Group::Reference);
+        assert_eq!(f.confidence, Confidence::Low);
+        assert!(f.confidence_reason.contains("snippet only"));
+        assert_eq!(f.title, "A page & more");
+        assert_eq!(f.source_url.as_deref(), Some("https://one.example/p"));
+        assert!(f.evidence.starts_with("Search snippet: "), "{}", f.evidence);
+        for bad in ["<", ">", "<script", "\u{7}"] {
+            assert!(!f.evidence.contains(bad), "{}", f.evidence);
+        }
+        assert!(!f.title.contains('<'));
+        assert_eq!(f.event_at, None);
+        assert_eq!(f.limitations.len(), 2);
+        assert_eq!(fs[1].source_url.as_deref(), Some("http://two.example/"));
+    }
+
+    #[test]
+    fn search_caps_text_and_results() {
+        let long = "x".repeat(5000);
+        let mut items = String::new();
+        for i in 0..12 {
+            if i > 0 {
+                items.push(',');
+            }
+            items.push_str(&format!(
+                r#"{{"title":"{long}","url":"https://h{i}.example/","description":"{long}"}}"#
+            ));
+        }
+        let body = format!(r#"{{"web":{{"results":[{items}]}}}}"#);
+        let (fs, capped) = search_findings(body.as_bytes(), 1).unwrap();
+        assert!(capped);
+        assert_eq!(fs.len(), 10);
+        assert!(fs[0].title.chars().count() <= 120);
+        assert!(fs[0].evidence.chars().count() <= "Search snippet: ".len() + 300);
+    }
+
+    #[test]
+    fn search_malformed_or_missing_web_is_failed_empty_is_no_match() {
+        assert!(search_findings(b"not json", 1).is_err());
+        assert!(search_findings(br#"{"query":{}}"#, 1).is_err());
+        assert!(search_findings(br#"{"web":{}}"#, 1).is_err());
+        let (fs, _) = search_findings(br#"{"web":{"results":[]}}"#, 1).unwrap();
+        assert!(fs.is_empty());
+    }
+
+    #[test]
+    fn search_without_a_key_is_not_configured_and_sends_nothing() {
+        let _g = SEARCH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (port, h) = serve(http("200 OK", SEARCH_BODY));
+        let _e = EnvGuard::set("MSFE_NG_OSINT_BASE_SEARCH", port);
+        let o = run_with("search", &Config::default(), "a@example.org");
+        assert_eq!(o.source.state, SourceState::NotConfigured);
+        assert!(o.findings.is_empty());
+        // Nothing connected: release the listener by connecting ourselves.
+        let _ = std::net::TcpStream::connect(("127.0.0.1", port));
+        assert!(!h.join().unwrap().contains("GET"));
+    }
+
+    #[test]
+    fn search_status_mapping_end_to_end_sends_the_quoted_address_and_the_token_header() {
+        let _g = SEARCH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cases: Vec<(&str, &str, SourceState)> = vec![
+            ("200 OK", SEARCH_BODY, SourceState::Matched),
+            ("200 OK", r#"{"web":{"results":[]}}"#, SourceState::NoMatch),
+            ("200 OK", "garbage", SourceState::Failed),
+            ("401 Unauthorized", "", SourceState::Restricted),
+            ("403 Forbidden", "", SourceState::Restricted),
+            ("422 Unprocessable Entity", "", SourceState::Failed),
+            ("429 Too Many Requests", "", SourceState::RateLimited),
+            ("503 Service Unavailable", "", SourceState::Failed),
+        ];
+        for (status, body, want) in cases {
+            let (port, h) = serve(http(status, body));
+            let _e = EnvGuard::set("MSFE_NG_OSINT_BASE_SEARCH", port);
+            let cfg = Config {
+                osint_search_key: "BRAVESECRET99".into(),
+                ..Config::default()
+            };
+            let o = run_with("search", &cfg, " a+b@example.org ");
+            let head = h.join().unwrap();
+            assert_eq!(o.source.state, want, "{status} {body}: {}", o.source.detail);
+            assert!(head.starts_with("GET /res/v1/web/search?"), "{head}");
+            let line = head.lines().next().unwrap();
+            assert!(line.contains("q=%22a%2Bb%40example.org%22"), "{line}");
+            assert!(line.contains("count=10") && line.contains("safesearch=moderate"));
+            let low = head.to_ascii_lowercase();
+            assert!(
+                low.contains("x-subscription-token: bravesecret99"),
+                "{head}"
+            );
+            assert!(low.contains("accept: application/json"), "{head}");
+            assert!(!line.contains("BRAVESECRET99"));
+            assert!(!o.source.detail.contains("BRAVESECRET99"));
+            for f in &o.findings {
+                assert!(!format!("{f:?}").contains("BRAVESECRET99"));
+            }
+            if status.starts_with("429") {
+                assert_eq!(o.source.retry_after, Some(7));
+            }
+            if status.starts_with("401") || status.starts_with("403") {
+                assert!(
+                    o.source.detail.contains(&status[..3]),
+                    "{}",
+                    o.source.detail
+                );
+            }
+            if want == SourceState::Matched {
+                assert_eq!(o.source.detail, "2 result(s)");
+            }
+        }
+    }
+
+    #[test]
+    fn search_is_listed_with_its_disclosure_and_configured_follows_the_key() {
+        let mut cfg = Config::default();
+        let i = infos(&cfg).into_iter().find(|p| p.id == "search").unwrap();
+        assert!(!i.configured);
+        assert!(i.disclosure.contains("in quotes"), "{}", i.disclosure);
+        assert!(i.disclosure.contains("api.search.brave.com"));
+        cfg.osint_search_key = "k".into();
+        assert!(
+            infos(&cfg)
+                .into_iter()
+                .find(|p| p.id == "search")
+                .unwrap()
+                .configured
+        );
+        assert!(is_known("search"));
     }
 }
