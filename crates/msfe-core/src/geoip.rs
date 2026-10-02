@@ -81,11 +81,11 @@ fn field(v: &Json, keys: &[&str]) -> Option<String> {
         }
     };
     for k in keys {
-        if let Some(x) = v.get(k).and_then(&render) {
+        if let Some(x) = v.get(k).and_then(render) {
             return Some(x);
         }
         for nest in ["connection", "asn", "company"] {
-            if let Some(x) = v.get(nest).and_then(|n| n.get(k)).and_then(&render) {
+            if let Some(x) = v.get(nest).and_then(|n| n.get(k)).and_then(render) {
                 return Some(x);
             }
         }
