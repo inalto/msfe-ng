@@ -2750,6 +2750,13 @@ async function renderOsint(v){
       });
       out.append(c);
     });
+    const known=OSINT_GROUPS.map(g=>g[0]);
+    const other=(r.findings||[]).filter(f=>!known.includes(f.group));
+    if(other.length){
+      const c=el('div',{class:'card'},el('h2',{},'Other findings'));
+      other.forEach(f=>{const row=el('div',{style:'margin:.5rem 0'});row.append(el('div',{},el('b',{},f.title)));row.append(el('div',{},f.evidence));row.append(el('div',{class:'muted',style:'font-size:.78rem'},'source '+f.source_id+' · '+f.group));c.append(row);});
+      out.append(c);
+    }
     if(!(r.findings||[]).length&&r.state!=='running')out.append(el('div',{class:'card'},el('div',{class:'empty'},'No findings. That does not mean the address is unexposed.')));
     const cov=el('div',{class:'card'},el('h2',{},'Source coverage'));
     (r.sources||[]).forEach(s=>cov.append(el('div',{style:'font-size:.85rem'},el('b',{},s.id),' — '+(OSINT_STATE_LABEL[s.state]||s.state)+(s.detail?': '+s.detail:'')+(s.retry_after?' (retry after '+s.retry_after+' s)':''))));

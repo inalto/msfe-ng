@@ -29,12 +29,72 @@ macro_rules! simple_enum {
     };
 }
 
-simple_enum!(Group {
-    Exposure => "exposure", Profile => "profile", Reference => "reference",
-    Domain => "domain", Validation => "validation", Context => "context",
-});
+/// Finding group. Unknown strings are kept verbatim so a newer writer's
+/// findings are not dropped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Group {
+    Exposure,
+    Profile,
+    Reference,
+    Domain,
+    Validation,
+    Context,
+    Unknown(String),
+}
+impl Group {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Group::Exposure => "exposure",
+            Group::Profile => "profile",
+            Group::Reference => "reference",
+            Group::Domain => "domain",
+            Group::Validation => "validation",
+            Group::Context => "context",
+            Group::Unknown(s) => s,
+        }
+    }
+    pub fn parse(s: &str) -> Group {
+        match s {
+            "exposure" => Group::Exposure,
+            "profile" => Group::Profile,
+            "reference" => Group::Reference,
+            "domain" => Group::Domain,
+            "validation" => Group::Validation,
+            "context" => Group::Context,
+            other => Group::Unknown(other.to_string()),
+        }
+    }
+}
 simple_enum!(Confidence { High => "high", Medium => "medium", Low => "low", Unknown => "unknown" });
-simple_enum!(Severity { Info => "info", Low => "low", Medium => "medium", High => "high" });
+/// Finding severity. Unknown strings are kept verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Severity {
+    Info,
+    Low,
+    Medium,
+    High,
+    Unknown(String),
+}
+impl Severity {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Severity::Info => "info",
+            Severity::Low => "low",
+            Severity::Medium => "medium",
+            Severity::High => "high",
+            Severity::Unknown(s) => s,
+        }
+    }
+    pub fn parse(s: &str) -> Severity {
+        match s {
+            "info" => Severity::Info,
+            "low" => Severity::Low,
+            "medium" => Severity::Medium,
+            "high" => Severity::High,
+            other => Severity::Unknown(other.to_string()),
+        }
+    }
+}
 simple_enum!(RunState {
     Running => "running", Complete => "complete", Partial => "partial",
     Cancelled => "cancelled", Failed => "failed",
@@ -164,11 +224,11 @@ impl Finding {
     }
     fn from_json(j: &Json) -> Option<Finding> {
         Some(Finding {
-            group: Group::parse(&j.str_field("group"))?,
+            group: Group::parse(&j.str_field("group")),
             confidence: Confidence::parse(&j.str_field("confidence"))
                 .unwrap_or(Confidence::Unknown),
             confidence_reason: j.str_field("confidence_reason"),
-            severity: Severity::parse(&j.str_field("severity")).unwrap_or(Severity::Info),
+            severity: Severity::parse(&j.str_field("severity")),
             observed_at: j.get("observed_at").and_then(Json::as_i64).unwrap_or(0) as u64,
             event_at: j.get("event_at").and_then(Json::as_i64).map(|n| n as u64),
             source_id: j.str_field("source_id"),
@@ -231,6 +291,11 @@ impl OsintReport {
         if j.str_field("kind") != "osint" {
             return Err("not an OSINT report".into());
         }
+        if let Some(v) = j.get("schema_version").and_then(Json::as_i64) {
+            if v > SCHEMA_VERSION {
+                return Err(format!("report written by a newer version (schema {v})"));
+            }
+        }
         Ok(OsintReport {
             run_id: j.str_field("run_id"),
             address: j.str_field("address"),
@@ -260,6 +325,37 @@ impl OsintReport {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn unknown_group_and_severity_survive_a_round_trip() {
+        let j = Json::parse(
+            r#"{"schema_version":1,"kind":"osint","run_id":"0123456789abcdef","address":"a@b.co","started":1,"state":"complete","findings":[{"group":"brand_new","severity":"catastrophic","confidence":"high","title":"t","evidence":"e","source_id":"s","observed_at":5}]}"#,
+        ).unwrap();
+        let r = OsintReport::from_json(&j).unwrap();
+        assert_eq!(
+            r.findings.len(),
+            1,
+            "an unknown group must not drop the finding"
+        );
+        assert_eq!(r.findings[0].group, Group::Unknown("brand_new".into()));
+        assert_eq!(
+            r.findings[0].severity,
+            Severity::Unknown("catastrophic".into())
+        );
+        let again =
+            OsintReport::from_json(&Json::parse(&r.to_json().to_string()).unwrap()).unwrap();
+        assert_eq!(again.findings[0].group.as_str(), "brand_new");
+        assert_eq!(again.findings[0].severity.as_str(), "catastrophic");
+    }
+
+    #[test]
+    fn a_newer_schema_version_is_refused() {
+        let j = Json::parse(r#"{"schema_version":2,"kind":"osint","run_id":"0123456789abcdef","address":"a@b.co","started":1,"state":"complete"}"#).unwrap();
+        assert!(OsintReport::from_json(&j).is_err());
+        let ok = Json::parse(r#"{"schema_version":1,"kind":"osint","run_id":"0123456789abcdef","address":"a@b.co","started":1,"state":"complete"}"#).unwrap();
+        assert!(OsintReport::from_json(&ok).is_ok());
+    }
+
     use super::*;
 
     fn sample() -> OsintReport {
