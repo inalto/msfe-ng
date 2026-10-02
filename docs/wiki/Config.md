@@ -241,8 +241,8 @@ optional **Have I Been Pwned API key** (`osint_hibp_key`) and the lookup mode
 never shown again once saved (the label says *configured*), an empty field keeps it,
 and **Clear key** removes it. Only letters, digits, `-` and `_` are accepted. The card
 also takes a **Search key (Brave Search API)** (`osint_search_key`; the full address is
-sent in quotes to Brave Search) and a **Validation key (Hunter)** (`osint_validation_key`;
-the full address is sent to Hunter and uses the account's paid quota), each with its own
+sent in quotes to Brave Search, results are candidates only) and a **Validation key (Hunter)** (`osint_validation_key`;
+the full address is sent to Hunter, which checks the mailbox itself and uses the account's paid quota; the result is a vendor assertion, and Hunter is unticked by default on the OSINT view), each with its own
 **Clear** button and the same rules. The
 keys are stored in `config.toml`, which is readable by root and by the `mail` group (the
 MailScanner logging plugin needs it). Like the AbuseIPDB and Telegram secrets they are also

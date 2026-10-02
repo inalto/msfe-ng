@@ -28,7 +28,7 @@ the discontinued ConfigServer MSFE.
 - [Delivery test](Delivery-test) — deliverability diagnostic for an address: DNS, SPF/DKIM/DMARC, MX and TLS, MTA-STS/DANE, blocklists; cPanel audit, message/bounce analysis, diagnostic inbox, test message, monitors
 - [Account DNS](Account-DNS) — the second view of the same tab: SPF, DKIM and DMARC for every domain hosted here, in one scan, with repair through cPanel's own installers
 - [DMARC reports](DMARC-reports) — the third view: the receivers' daily DMARC reports read from a mailbox — who sends as your domains, spoofing sources, and when a domain is ready for a stricter policy
-- [OSINT](OSINT) — the fourth view: public information about an address, run only when you press Run; off by default; the sources are Have I Been Pwned (needs a paid API key) and Gravatar
+- [OSINT](OSINT) — the fourth view: public information about an address, run only when you press Run; off by default; eight sources: the linked Delivery report, Gravatar, RDAP, GitHub, OpenPGP (keyless), and Have I Been Pwned, Brave web search and Hunter (each needs a key); each source lists what it is sent
 - [Quarantine](Quarantine) — what is on disk, purge
 - [Config](Config) — every MailScanner configuration file with validation, history and a tester; snapshots; DB & Bayes maintenance, queue auto-clean, auto-ban of spam sources (csf) and match rules, Telegram alerts
 

@@ -7,12 +7,15 @@ glass beside the recipient in the Messages list and beside the sender and
 recipient in the queue, and the **Investigate address**
 button on an Address test result.
 
-Two sources ship: **Have I Been Pwned** (HIBP, breach exposure) and
-**Gravatar** (a public avatar). Each is listed with exactly what it is sent
-before you run it, see [What each source receives](#what-each-source-receives).
-A synthetic *fixture* source exists only for tests and demos (it appears when
-the environment variable `MSFE_NG_OSINT_FIXTURE` is set, makes no network
-request and returns invented data).
+Eight sources ship, listed in this order: **Delivery test context** (the linked
+Delivery report, nothing leaves the server), **Gravatar**, **RDAP domain
+registration**, **GitHub public-email profile**, **OpenPGP key**, **Have I Been
+Pwned** (HIBP, breach exposure), **Web search** (Brave Search) and **Hunter email
+verification**. Each is listed with exactly what it is sent before you run it,
+see [What each source receives](#what-each-source-receives). A synthetic *fixture*
+source exists only for tests and demos (it appears when the environment variable
+`MSFE_NG_OSINT_FIXTURE` is set, makes no network request and returns invented
+data).
 
 > **Privacy.** An investigated email address is personal data, and a lookup
 > sends it (or a hash or prefix of it) to a third party. Review the providers'
@@ -28,8 +31,13 @@ request and returns invented data).
 - **A breach is history.** An address that appeared in an old data breach was
   exposed at some point; it says nothing about who is using it now. Old
   breaches are labelled as historical.
-- **Guessed identities are candidates.** A name or profile inferred from an
-  address is a lead to check, not a fact.
+- **Candidates are not verified.** A name or profile inferred from an address
+  is a lead to check, not a fact. Web search results are search snippets only:
+  the pages are not fetched or checked, so they are candidates. A GitHub match is
+  stronger (the profile publishes this exact address) but is still a public claim
+  by that profile, and a published OpenPGP key only shows that its owner verified
+  the address with the key server. Hunter's answer is a vendor assertion, never
+  proof.
 - **Nothing changes mail handling.** The view never alters scanning, blocklists,
   whitelists, quarantine or delivery, and a finding does not change a CLI exit
   code. It is information for a person to read.
@@ -44,7 +52,7 @@ request and returns invented data).
 
 OSINT is off by default. Tick **OSINT lookups** in the **OSINT providers** card
 of the Config tab (it writes `osint_enabled = true`; the key can also be set in
-`config.toml`). HIBP additionally needs an API key, see
+`config.toml`). The keyless sources then work at once; HIBP, Web search and Hunter each need their own key, see
 [Sources and keys](#sources-and-keys).
 
 With it off, the view still opens and lists the sources, but a run is refused.
@@ -63,7 +71,13 @@ can use it.
 | `osint_cache_secs` | 3600 | a repeat of the same lookup inside this time reuses the earlier report; *Fresh lookup* bypasses it |
 | `osint_retention_hours` | 24 | how long a report and its avatar are kept (1-720) |
 
-Only configured outside sources use this budget; a source with no key is reported as not configured without spending it. In the shell every configured source is ticked by default except Hunter, whose paid mailbox check you tick for the runs where you want it.
+Only configured outside sources use the per-run query budget. A source whose key
+is missing is reported as **not configured** without spending any of it (and makes
+the run partial), and the **Delivery test context** source never leaves the server
+so it is exempt too; neither can crowd out a later source. In the shell every
+configured source is ticked by default, except **Hunter**, whose paid mailbox check
+you tick for the runs where you want it. Delivery test context is ticked only when
+the view was opened from a linked Address test.
 
 A run request may carry `external_query_limit` to lower the outside-lookup budget
 for that run; it is clamped to `osint_max_external_queries` and never raises it. The shell runs the controller in its own process, so the
@@ -71,12 +85,22 @@ CLI's rate and concurrency limits are separate from the daemon's.
 
 ## Sources and keys
 
-| Source | Needs | Returns |
+| Source (id) | Needs | Returns |
 |---|---|---|
-| Have I Been Pwned | a paid HIBP API key | the breaches the address appears in (name, date, data classes, link) |
-| Gravatar | nothing | whether a public avatar exists for the address, and the image |
+| Delivery test context (`delivery`) | nothing | the linked Address test's findings, next to the OSINT result |
+| Gravatar (`gravatar`) | nothing | whether a public avatar exists for the address, and the image |
+| RDAP domain registration (`rdap`) | nothing | the domain's registrar and technical registration facts; registrant details are never shown |
+| GitHub public-email profile (`github`) | nothing | profiles that publish this exact address as their public email |
+| OpenPGP key (`openpgp`) | nothing | whether a published, owner-verified key exists for the address |
+| Have I Been Pwned (`hibp`) | a paid HIBP API key | the breaches the address appears in (name, date, data classes, link) |
+| Web search (`search`) | a Brave Search API key | search snippets that mention the address: candidates only |
+| Hunter email verification (`hunter`) | a Hunter API key | Hunter's own verdict on the mailbox: a vendor assertion, never proof |
 
-Set the HIBP key in **Config -> OSINT providers**. The key is write-only in the
+The keyless sources need no configuration. Rate limits to expect: GitHub allows
+10 unauthenticated requests per minute, Hunter about 10 per second; a refused
+request shows in *Source coverage* and makes the run partial.
+
+Set the three keys (HIBP, Search, Validation) in **Config -> OSINT providers**, each in its own row with its own **Clear** button. A key is write-only in the
 page: once saved the label says *configured*, a blank field keeps it, and
 **Clear key** removes it. It is stored in `config.toml`, which is readable by
 root and by the `mail` group (the MailScanner logging plugin runs in that group
@@ -96,18 +120,55 @@ HIBP has two modes (`osint_hibp_mode`):
 
 ## What each source receives
 
-- **HIBP, direct mode**: the full email address, sent to `haveibeenpwned.com`.
-- **HIBP, range mode**: only a 6-character SHA-1 prefix of the address.
+- **Delivery test context**: nothing leaves the server; it reads the linked
+  Delivery report.
 - **Gravatar**: only a SHA-256 hash of the lower-cased address, sent to
   `gravatar.com`, asking for an avatar at rating G, 256 px. A 404 answer means
   there is no avatar at that rating (one may exist at a higher, more mature rating). No
   Gravatar profile data is queried.
+- **RDAP**: only the **domain** (never the full address), sent to the registry's
+  RDAP server found through the IANA bootstrap file. Registrar and technical
+  facts only; registrant details are never shown.
+- **GitHub**: the full address, sent to `api.github.com`. It matches only
+  profiles that publish this exact address as their public email. The
+  unauthenticated limit is 10 requests per minute.
+- **OpenPGP**: the full address, sent to `keys.openpgp.org`. Only the presence of
+  a published, owner-verified key is reported; the key is not parsed or stored.
+- **HIBP, direct mode**: the full email address, sent to `haveibeenpwned.com`.
+- **HIBP, range mode**: only a 6-character SHA-1 prefix of the address.
+- **Web search**: the full address in quotes, sent to `api.search.brave.com`. The
+  results are search snippets only; the pages themselves are not fetched or
+  verified, so they are candidates.
+- **Hunter**: the full address, sent to Hunter. Hunter performs its own checks of
+  the recipient's mail server and uses paid quota. The result is a vendor
+  assertion, never proof. It is unticked by default and chosen per run.
 - the **fixture** source (only with `MSFE_NG_OSINT_FIXTURE`) receives nothing.
 
-Outbound lookups go only to those two fixed hosts, over HTTPS, without
+Outbound lookups go only to the fixed hosts above, over HTTPS, without
 following redirects, and only to public addresses (the process doing the lookup,
 the daemon or the CLI, checks the address it actually connects to). Nothing else
 leaves the server.
+
+## Delivery context and Investigate buttons
+
+The **Investigate address** buttons (the magnifying glass in the Messages list
+and queue, the buttons in the message and queue details, and the button on an
+Address test result) only open the OSINT view with the address filled in; nothing
+runs until you press **Run**. When opened from an Address test result, the view
+links that run, and the **Delivery test context** card shows that report's
+findings next to the public-information results. Reading it makes no outside
+request.
+
+## What is deliberately not included
+
+- **Passive DNS and Certificate Transparency**: the data is licensed or
+  unreliable, and it describes domains, not one address.
+- **HIBP stealer-log metadata**: needs a verified domain and a qualifying
+  subscription.
+- **GitHub commit search**: needs an authenticated token.
+- **OpenPGP key parsing**: a root daemon does not parse untrusted key packets, so
+  only presence is reported.
+- **Page crawling**: search hits are never fetched.
 
 ## Avatars
 
@@ -125,9 +186,12 @@ avatars. Avatars are removed together with their report.
 - HIBP's public search may omit findings from breaches it flags as sensitive
   or retired, so a missing breach is not proof of absence.
 - Range mode has no per-incident detail.
-- The real-provider code paths were exercised against stand-in servers and,
-  for Gravatar's no-avatar answer, one live request; they have not been tried
-  with a real HIBP key.
+- Testing, stated plainly: Web search (Brave) and Hunter were exercised only
+  against stand-in servers (no keys were available), and HIBP likewise. RDAP,
+  GitHub, OpenPGP and Gravatar's no-avatar answer were exercised with live keyless
+  lookups of documentation-example addresses and domains. The Delivery context
+  finding was verified by Rust tests; the browser check of its card used stubbed
+  data.
 
 ## Reports and export
 
@@ -148,7 +212,7 @@ msfe-ng delivery osint sweep
 ```
 
 `providers` prints one line per source (tab-separated: id, name,
-`configured` or `not configured`, and what it receives; `--json` has a
+`configured` or `not configured`, and what it receives, for every source above; `--json` has a
 `configured` field); `sweep` deletes reports
 older than the retention time. The first form runs the lookup, waits for it and
 prints the report (text, or `--json` / `--html`); `--force` skips the cache.
