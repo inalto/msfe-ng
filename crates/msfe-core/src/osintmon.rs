@@ -645,6 +645,7 @@ pub struct FakeState {
     /// (monitor id, period, reserved, final, run key, created_at)
     pub usage: Vec<(u32, String, u32, Option<u32>, String, u64)>,
     pub kv: std::collections::BTreeMap<String, String>,
+    pub fail_store_run: bool,
     next_monitor: u32,
     next_run: u32,
 }
@@ -763,6 +764,9 @@ impl Store for FakeStore {
         strip_assets(&mut r);
         let (ok, bad) = source_counts(&r);
         let mut s = self.st.borrow_mut();
+        if s.fail_store_run {
+            return Err("disk full".into());
+        }
         s.next_run += 1;
         let id = s.next_run;
         s.runs.push((
@@ -1409,13 +1413,33 @@ pub fn run_due_with(
         let mut report = match runner.run(cfg, &m.address, &m.sources) {
             Ok(r) => r,
             Err(skip) => {
-                let _ = store.usage_release(&run_key);
+                match skip {
+                    // nothing was started: try again on the next pass
+                    RunSkip::Busy | RunSkip::RateLimited | RunSkip::TooManyRuns => {
+                        let _ = store.usage_release(&run_key);
+                    }
+                    // OSINT is off: touch nothing, take no slot
+                    RunSkip::Disabled => {
+                        let _ = store.usage_release(&run_key);
+                        started -= 1;
+                    }
+                    RunSkip::Invalid(_) => {
+                        let _ = store.usage_release(&run_key);
+                        let _ = store.touch_last_run(m.id, now);
+                    }
+                    // providers may have been queried: charge the reservation
+                    RunSkip::Failed(_) => {
+                        let _ = store.usage_settle(&run_key, units);
+                        let _ = store.touch_last_run(m.id, now);
+                    }
+                }
                 notes.push(runner_skip_note(&addr, &skip));
                 continue;
             }
         };
         if report.state == RunState::Failed || report.state == RunState::Cancelled {
-            let _ = store.usage_release(&run_key);
+            let _ = store.usage_settle(&run_key, units);
+            let _ = store.touch_last_run(m.id, now);
             notes.push(format!(
                 "osint monitor {addr}: run {}, nothing stored",
                 report.state.as_str()
@@ -1453,6 +1477,8 @@ pub fn run_due_with(
         let run_id = match store.store_run(m.id, &report, duration_ms, &summary) {
             Ok(id) => id,
             Err(e) => {
+                // the units were really used: no retry storm
+                let _ = store.touch_last_run(m.id, now);
                 notes.push(format!(
                     "osint monitor {addr}: cannot store the run: {}",
                     clean_text(&e, 160)
@@ -2712,34 +2738,128 @@ mod sched_tests {
     }
 
     #[test]
-    fn a_run_that_cannot_start_releases_and_is_retried() {
-        for skip in [
-            RunSkip::Busy,
-            RunSkip::RateLimited,
-            RunSkip::TooManyRuns,
-            RunSkip::Disabled,
-            RunSkip::Invalid("bad".into()),
-            RunSkip::Failed("down".into()),
-        ] {
+    fn a_run_that_did_not_start_is_released_and_retried_next_pass() {
+        for skip in [RunSkip::Busy, RunSkip::RateLimited, RunSkip::TooManyRuns] {
             let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
             mon(&s, "a@x.org", &["gravatar"]);
             r.push(Err(skip.clone()));
-            let notes = pass(&s, &r, &n);
+            let notes = run_due_with(&cfg(), &s, &r, &n, false);
             assert_eq!(notes.len(), 1, "{skip:?} {notes:?}");
+            assert!(has(&notes, "retry"), "{notes:?}");
             assert!(s.st.borrow().usage.is_empty(), "{skip:?}");
             assert!(s.st.borrow().runs.is_empty(), "{skip:?}");
+            assert_eq!(s.st.borrow().monitors[0].last_run_at, 0, "{skip:?}");
             assert_eq!(n.sent(), 0);
+            // the next pass tries again
+            r.push(Ok(rpt(st(SourceState::Matched), &[])));
+            run_due_with(&cfg(), &s, &r, &n, false);
+            assert_eq!(s.runs(1, 5).unwrap().len(), 1, "{skip:?}");
         }
-        // last_run_at is untouched, so the next pass tries again
+    }
+
+    #[test]
+    fn disabled_runner_touches_nothing_and_takes_no_slot() {
+        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+        for i in 0..3 {
+            mon(&s, &format!("u{i}@x.org"), &["gravatar"]);
+        }
+        r.push(Err(RunSkip::Disabled));
+        r.push(Err(RunSkip::Disabled));
+        r.push(Err(RunSkip::Disabled));
+        run_due_with(&cfg(), &s, &r, &n, false);
+        assert_eq!(r.calls.borrow().len(), 3, "no slot was used up");
+        assert!(s.st.borrow().usage.is_empty());
+        assert!(s.st.borrow().monitors.iter().all(|m| m.last_run_at == 0));
+    }
+
+    #[test]
+    fn a_stuck_monitor_waits_its_interval_and_does_not_starve_others() {
+        for skip in [
+            RunSkip::Invalid("source gone".into()),
+            RunSkip::Failed("timed out".into()),
+        ] {
+            let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+            mon(&s, "stuck@x.org", &["gravatar", "rdap"]);
+            for i in 0..2 {
+                mon(&s, &format!("ok{i}@x.org"), &["gravatar"]);
+            }
+            // the stuck one is the oldest, so it goes first and takes a slot
+            s.touch_last_run(1, 10).unwrap();
+            s.touch_last_run(2, 20).unwrap();
+            s.touch_last_run(3, 30).unwrap();
+            r.push(Err(skip.clone()));
+            r.push(Ok(rpt(st(SourceState::Matched), &[])));
+            run_due_with(&cfg(), &s, &r, &n, false);
+            assert_eq!(r.calls.borrow().len(), 2, "{skip:?}");
+            assert_eq!(s.st.borrow().monitors[0].last_run_at, T0, "{skip:?}");
+            // next pass: the stuck monitor is not due, the third monitor runs
+            n.now.set(T0 + 300);
+            r.push(Ok(rpt(st(SourceState::Matched), &[])));
+            r.push(Ok(rpt(st(SourceState::Matched), &[])));
+            run_due_with(&cfg(), &s, &r, &n, false);
+            let c = r.calls.borrow();
+            assert_eq!(c.len(), 3, "{skip:?}");
+            assert_eq!(c[2].0, "ok1@x.org", "{skip:?}");
+            assert!(c.iter().skip(1).all(|x| x.0 != "stuck@x.org"));
+        }
+    }
+
+    #[test]
+    fn a_timed_out_run_is_charged_and_a_failing_monitor_cannot_burn_the_budget() {
+        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+        mon(&s, "a@x.org", &["gravatar", "rdap"]);
+        let period = period_for(T0);
+        r.push(Err(RunSkip::Failed("timed out".into())));
+        s.touch_last_run(1, 0).unwrap();
+        run_due_with(&cfg(), &s, &r, &n, false);
+        assert_eq!(s.usage_month(&period).unwrap(), 2, "reserved units settled");
+        assert!(s.st.borrow().runs.is_empty());
+        // many passes within the interval: no further attempts, same usage
+        for k in 1..=12 {
+            n.now.set(T0 + k * 300);
+            r.push(Err(RunSkip::Failed("timed out".into())));
+            run_due_with(&cfg(), &s, &r, &n, false);
+        }
+        assert_eq!(r.calls.borrow().len(), 1);
+        assert_eq!(s.usage_month(&period).unwrap(), 2);
+        // an Invalid skip never charges anything
         let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
         mon(&s, "a@x.org", &["gravatar"]);
-        r.push(Err(RunSkip::Busy));
-        let notes = run_due_with(&cfg(), &s, &r, &n, false);
-        assert!(has(&notes, "retry"), "{notes:?}");
-        assert_eq!(s.st.borrow().monitors[0].last_run_at, 0);
-        r.push(Ok(rpt(st(SourceState::Matched), &[])));
+        r.push(Err(RunSkip::Invalid("x".into())));
         run_due_with(&cfg(), &s, &r, &n, false);
-        assert_eq!(s.runs(1, 5).unwrap().len(), 1);
+        assert_eq!(s.usage_month(&period).unwrap(), 0);
+        assert_eq!(s.st.borrow().monitors[0].last_run_at, T0);
+    }
+
+    #[test]
+    fn a_failed_or_cancelled_report_is_charged_and_not_retried_at_once() {
+        for state in [RunState::Failed, RunState::Cancelled] {
+            let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+            mon(&s, "a@x.org", &["gravatar", "rdap"]);
+            let mut rep = rpt(st(SourceState::Failed), &[]);
+            rep.state = state;
+            r.push(Ok(rep));
+            run_due_with(&cfg(), &s, &r, &n, false);
+            assert_eq!(s.usage_month(&period_for(T0)).unwrap(), 2);
+            assert_eq!(s.st.borrow().monitors[0].last_run_at, T0);
+            assert!(s.st.borrow().runs.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_store_error_settles_usage_and_advances_the_schedule() {
+        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+        mon(&s, "a@x.org", &["gravatar"]);
+        s.st.borrow_mut().fail_store_run = true;
+        r.push(Ok(rpt(st(SourceState::Matched), &[])));
+        let notes = run_due_with(&cfg(), &s, &r, &n, false);
+        assert!(has(&notes, "cannot store the run"), "{notes:?}");
+        assert_eq!(s.usage_month(&period_for(T0)).unwrap(), 1);
+        assert_eq!(s.st.borrow().monitors[0].last_run_at, T0);
+        n.now.set(T0 + 300);
+        run_due_with(&cfg(), &s, &r, &n, false);
+        assert_eq!(r.calls.borrow().len(), 1, "no retry storm");
+        assert_eq!(s.usage_month(&period_for(T0)).unwrap(), 1);
     }
 
     #[test]
@@ -2827,22 +2947,17 @@ mod sched_tests {
 
     #[test]
     fn a_missing_baseline_falls_back_to_the_previous_run() {
-        let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
-        mon(&s, "a@x.org", &["gravatar"]);
-        r.push(Ok(rpt(st(SourceState::Matched), &[])));
-        pass(&s, &r, &n);
         for bad in ["999", "junk", ""] {
+            let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
+            mon(&s, "a@x.org", &["gravatar"]);
+            r.push(Ok(rpt(st(SourceState::Matched), &[])));
+            pass(&s, &r, &n);
             s.kv_set("osint_base_1", bad).unwrap();
-            let before = n.sent();
             r.push(Ok(rpt(st(SourceState::Matched), &["https://e.org/x"])));
-            // the previous run is the one just before this one
-            let notes = pass(&s, &r, &n);
-            let _ = notes;
-            // the first bad pass diffs against run 1 and alerts; later ones
-            // already contain the finding
-            if bad == "999" {
-                assert_eq!(n.sent(), before + 1);
-            }
+            pass(&s, &r, &n);
+            // diffed against run 1 (the previous run): one alert, pointer advanced
+            assert_eq!(n.sent(), 1, "pointer {bad:?}");
+            assert_eq!(ptr(&s, 1).as_deref(), Some("2"), "pointer {bad:?}");
         }
         // a baseline that points at another monitor's run is invalid too
         let (s, r, n) = (FakeStore::default(), FakeRunner::new(), FakeNotifier::new());
