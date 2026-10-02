@@ -193,6 +193,32 @@ pub fn exec_stdin(cfg: &Config, sql: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Like `exec_stdin`, but the client's stderr is captured and carried in the
+/// error (so callers can tell a duplicate key from a dead server). The client
+/// stops at the first failing statement; callers that need all-or-nothing
+/// wrap their script in a transaction, which the closing session rolls back.
+pub fn exec_stdin_captured(cfg: &Config, sql: &str) -> io::Result<()> {
+    let df = defaults_file(cfg)?;
+    let mut child = base_cmd(cfg, &df)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .expect("stdin piped")
+        .write_all(sql.as_bytes())?;
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        return Err(io::Error::other(format!(
+            "mysql exited non-zero: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

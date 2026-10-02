@@ -337,16 +337,16 @@ impl Parser<'_> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn surrogate_pairs_decode_to_one_character() {
-        let j = super::Json::parse(r#""a\ud83d\ude00b""#).unwrap();
+        let j = Json::parse(r#""a\ud83d\ude00b""#).unwrap();
         assert_eq!(j.as_str(), Some("a\u{1F600}b"));
         // a lone surrogate is still replaced, not an error
-        let j = super::Json::parse(r#""\ud83dx""#).unwrap();
+        let j = Json::parse(r#""\ud83dx""#).unwrap();
         assert_eq!(j.as_str(), Some("\u{fffd}x"));
     }
-
-    use super::*;
 
     #[test]
     fn escapes_strings() {

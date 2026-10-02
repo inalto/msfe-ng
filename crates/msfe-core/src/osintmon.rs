@@ -177,6 +177,22 @@ pub fn bmp_only(s: &str) -> String {
         .collect()
 }
 
+/// A summary as stored: no characters beyond the BMP, at most 255 characters
+/// (the column is VARCHAR(255); a longer value would fail the UPDATE).
+pub fn summary_for_column(s: &str) -> String {
+    bmp_only(s).chars().take(255).collect()
+}
+
+/// The mysql client's duplicate-key error for `usage_reserve` becomes the
+/// same message the in-memory store gives.
+pub fn map_usage_error(e: &str) -> String {
+    if e.contains("Duplicate entry") || e.contains("ERROR 1062") {
+        "duplicate run id".to_string()
+    } else {
+        e.to_string()
+    }
+}
+
 fn valid_period(p: &str) -> bool {
     p.len() == 6 && p.bytes().all(|b| b.is_ascii_digit())
 }
@@ -275,8 +291,8 @@ pub fn sql_store_run(
     summary: &str,
 ) -> String {
     format!(
-        "INSERT INTO osint_runs (monitor_id, started_at, duration_ms, state, n_findings, n_sources_ok, n_sources_bad, report) VALUES ({monitor_id}, {started_at}, {duration_ms}, {}, {n_findings}, {n_ok}, {n_bad}, {});\n\
-         UPDATE osint_monitors SET last_run_at = {last_run_at}, last_summary = {} WHERE id = {monitor_id};\n{}",
+        "START TRANSACTION;\nINSERT INTO osint_runs (monitor_id, started_at, duration_ms, state, n_findings, n_sources_ok, n_sources_bad, report) VALUES ({monitor_id}, {started_at}, {duration_ms}, {}, {n_findings}, {n_ok}, {n_bad}, {});\n\
+         UPDATE osint_monitors SET last_run_at = {last_run_at}, last_summary = {} WHERE id = {monitor_id};\n{}COMMIT;\n",
         db::quote(state),
         db::quote(report_json),
         db::quote(summary),
@@ -510,9 +526,9 @@ impl Store for MysqlStore<'_> {
             ok,
             bad,
             r.finished.unwrap_or(r.started),
-            &bmp_only(summary),
+            &summary_for_column(summary),
         );
-        db::exec_stdin(self.cfg, &sql).map_err(io)?;
+        db::exec_stdin_captured(self.cfg, &sql).map_err(io)?;
         let rows = db::query(self.cfg, &sql_latest_run_id(monitor_id)).map_err(io)?;
         rows.first()
             .and_then(|r| r.first())
@@ -589,7 +605,7 @@ impl Store for MysqlStore<'_> {
             return Err("invalid usage key".into());
         }
         let sql = sql_usage_reserve(monitor_id, period, units, run_id, crate::osint::now_secs());
-        db::exec_stdin(self.cfg, &sql).map_err(io)
+        db::exec_stdin_captured(self.cfg, &sql).map_err(|e| map_usage_error(&e.to_string()))
     }
 
     fn usage_settle(&self, run_id: &str, final_units: u32) -> Result<(), String> {
@@ -625,8 +641,8 @@ pub struct FakeState {
     pub monitors: Vec<Monitor>,
     /// (run id, monitor id, row, report json)
     pub runs: Vec<(RunRow, String)>,
-    /// (monitor id, period, reserved, final, run key)
-    pub usage: Vec<(u32, String, u32, Option<u32>, String)>,
+    /// (monitor id, period, reserved, final, run key, created_at)
+    pub usage: Vec<(u32, String, u32, Option<u32>, String, u64)>,
     pub kv: std::collections::BTreeMap<String, String>,
     next_monitor: u32,
     next_run: u32,
@@ -846,8 +862,14 @@ impl Store for FakeStore {
         if s.usage.iter().any(|u| u.4 == run_id) {
             return Err("duplicate run id".into());
         }
-        s.usage
-            .push((monitor_id, period.into(), units, None, run_id.into()));
+        s.usage.push((
+            monitor_id,
+            period.into(),
+            units,
+            None,
+            run_id.into(),
+            crate::osint::now_secs(),
+        ));
         Ok(())
     }
     fn usage_settle(&self, run_id: &str, final_units: u32) -> Result<(), String> {
@@ -882,22 +904,29 @@ impl Store for FakeStore {
         Ok(())
     }
     fn prune(&self, days: u32) -> Result<(), String> {
-        let cutoff = crate::osint::now_secs().saturating_sub(days as u64 * 86_400);
-        let mut s = self.st.borrow_mut();
-        let latest: Vec<u32> = s
-            .monitors
-            .iter()
-            .filter_map(|m| {
-                s.runs
-                    .iter()
-                    .filter(|(r, _)| r.monitor_id == m.id)
-                    .map(|(r, _)| r.id)
-                    .max()
-            })
-            .collect();
-        s.runs
-            .retain(|(r, _)| r.started_at >= cutoff || latest.contains(&r.id));
+        self.prune_at(crate::osint::now_secs(), days);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl FakeStore {
+    /// Same semantics as `sql_prune`: runs older than `days` go except the
+    /// latest run of every monitor id present in the runs; usage rows older
+    /// than 400 days go.
+    pub fn prune_at(&self, now: u64, days: u32) {
+        let cutoff = now.saturating_sub(days as u64 * 86_400);
+        let usage_cutoff = now.saturating_sub(400 * 86_400);
+        let mut s = self.st.borrow_mut();
+        let mut latest: std::collections::BTreeMap<u32, u32> = Default::default();
+        for (r, _) in &s.runs {
+            let e = latest.entry(r.monitor_id).or_insert(r.id);
+            *e = (*e).max(r.id);
+        }
+        let keep: Vec<u32> = latest.values().copied().collect();
+        s.runs
+            .retain(|(r, _)| r.started_at >= cutoff || keep.contains(&r.id));
+        s.usage.retain(|u| u.5 >= usage_cutoff);
     }
 }
 
@@ -1104,9 +1133,9 @@ mod tests {
             103,
             "2 findings 'x'",
         );
-        assert!(s.starts_with("INSERT INTO osint_runs (monitor_id, started_at, duration_ms, state, n_findings, n_sources_ok, n_sources_bad, report) VALUES (7, 100, 3000, 'partial', 2, 1, 1, '{\"a\":\"it''s\"}');\n"));
+        assert!(s.starts_with("START TRANSACTION;\nINSERT INTO osint_runs (monitor_id, started_at, duration_ms, state, n_findings, n_sources_ok, n_sources_bad, report) VALUES (7, 100, 3000, 'partial', 2, 1, 1, '{\"a\":\"it''s\"}');\n"));
         assert!(s.contains("UPDATE osint_monitors SET last_run_at = 103, last_summary = '2 findings ''x''' WHERE id = 7;\n"));
-        assert!(s.ends_with(&sql_trim_runs(7)));
+        assert!(s.ends_with(&format!("{}COMMIT;\n", sql_trim_runs(7))));
     }
 
     #[test]
@@ -1277,5 +1306,90 @@ mod tests {
         assert_eq!(st.kv_get("k"), None);
         st.kv_set("k", "v").unwrap();
         assert_eq!(st.kv_get("k").as_deref(), Some("v"));
+    }
+
+    #[test]
+    fn long_multibyte_summaries_are_cut_to_255_characters() {
+        let long = "é日😀".repeat(400);
+        let cut = summary_for_column(&long);
+        assert_eq!(cut.chars().count(), 255);
+        assert!(!cut.chars().any(|c| c as u32 > 0xFFFF));
+        assert_eq!(summary_for_column("short"), "short");
+    }
+
+    #[test]
+    fn store_run_sql_is_one_transaction() {
+        let s = sql_store_run(7, "{}", 1, 1, "complete", 0, 0, 0, 1, "s");
+        assert!(s.starts_with("START TRANSACTION;\nINSERT INTO osint_runs"));
+        assert!(s.ends_with("COMMIT;\n"));
+        assert_eq!(s.matches("COMMIT;").count(), 1);
+    }
+
+    #[test]
+    fn duplicate_usage_error_is_mapped() {
+        let e = "mysql exited non-zero: ERROR 1062 (23000) at line 1: Duplicate entry 'r1' for key 'osint_usage_run'";
+        assert_eq!(map_usage_error(e), "duplicate run id");
+        assert_eq!(
+            map_usage_error("mysql exited non-zero: ERROR 2002"),
+            "mysql exited non-zero: ERROR 2002"
+        );
+    }
+
+    #[test]
+    fn fake_prune_spares_the_latest_run_per_monitor_and_drops_old_usage() {
+        let st = FakeStore::default();
+        let now = 500 * 86_400;
+        // monitor 1: two old runs and a recent one; monitor 2: only old runs;
+        // monitor 9 has runs but no monitor row (still spared once)
+        let o1 = st.store_run(1, &report(now - 200 * 86_400), 1, "").unwrap();
+        let o2 = st.store_run(1, &report(now - 100 * 86_400), 1, "").unwrap();
+        let r3 = st.store_run(1, &report(now - 86_400), 1, "").unwrap();
+        let p1 = st.store_run(2, &report(now - 300 * 86_400), 1, "").unwrap();
+        let p2 = st.store_run(2, &report(now - 250 * 86_400), 1, "").unwrap();
+        let q1 = st.store_run(9, &report(now - 400 * 86_400), 1, "").unwrap();
+        st.usage_reserve(1, "202601", 1, "old").unwrap();
+        st.usage_reserve(1, "202602", 1, "new").unwrap();
+        for u in st.st.borrow_mut().usage.iter_mut() {
+            u.5 = if u.4 == "old" {
+                now - 401 * 86_400
+            } else {
+                now - 399 * 86_400
+            };
+        }
+        st.prune_at(now, 90);
+        let ids = |m| {
+            st.runs(m, 100)
+                .unwrap()
+                .iter()
+                .map(|r| r.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(1), vec![r3]);
+        assert_eq!(ids(2), vec![p2]);
+        assert_eq!(ids(9), vec![q1]);
+        let _ = (o1, o2, p1);
+        let usage: Vec<String> = st.st.borrow().usage.iter().map(|u| u.4.clone()).collect();
+        assert_eq!(usage, vec!["new".to_string()]);
+        // a run inside the window is kept even when it is not the latest
+        let st = FakeStore::default();
+        let a = st.store_run(1, &report(now - 50 * 86_400), 1, "").unwrap();
+        let b = st.store_run(1, &report(now - 10 * 86_400), 1, "").unwrap();
+        st.prune_at(now, 90);
+        assert_eq!(ids_of(&st, 1), vec![b, a]);
+    }
+
+    fn ids_of(st: &FakeStore, m: u32) -> Vec<u32> {
+        st.runs(m, 100).unwrap().iter().map(|r| r.id).collect()
+    }
+
+    #[test]
+    fn sql_prune_statement_is_exact() {
+        assert_eq!(
+            sql_prune(10_000_000, 90),
+            "DELETE FROM osint_runs WHERE started_at < 2224000 AND id NOT IN (SELECT mx FROM (SELECT MAX(id) AS mx FROM osint_runs GROUP BY monitor_id) AS latest);\n\
+             DELETE FROM osint_usage WHERE created_at < 0;\n"
+        );
+        assert!(sql_prune(40_000_000, 90)
+            .contains("DELETE FROM osint_usage WHERE created_at < 5440000;"));
     }
 }
