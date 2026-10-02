@@ -266,8 +266,11 @@ Migration `0006_osint_monitors.sql` adds three tables:
 
 Monitor runs are the exception to "reports are only files for 24 h": they are
 kept for `osint_history_days` (default 90) and at most 100 per monitor, pruned by
-the daily `msfe-ng housekeeping`. The latest run of each monitor is always kept,
-because it is the comparison baseline. Usage rows are kept for 400 days.
+the daily `msfe-ng housekeeping`. The daily prune spares only the newest run of
+each monitor. The comparison baseline is a pointer to the run last compared
+against, which can be older than the newest run and can be removed by the
+100-run trim or by the prune; a missing baseline falls back to the run just
+before the one being compared. Usage rows are kept for 400 days.
 Opening a stored run shows it like any report; its HTML export is a download.
 
 ### Monthly budget
@@ -289,12 +292,19 @@ resumes next month or when you raise the cap.
 
 ### What counts as a change
 
-- **The first run is a baseline** and never alerts. Neither does a run whose
-  baseline was pruned.
+- **The first run is a baseline** and never alerts. When the baseline run has
+  been removed, the comparison falls back to the previous stored run, which can
+  alert; only a monitor with no earlier run at all stores a new baseline
+  silently.
 - A finding is identified by its source, its group and its URL (normalised:
   lower-case scheme and host, no fragment, no trailing slash) or, with no URL, its
   title. Observation time, evidence, confidence and severity do not make a
-  finding "new".
+  finding "new". A finding counts as new
+  only when its source answered in the run compared against (or in one of the
+  last 10 earlier runs, when the baseline run had no answer from it), so a source
+  that missed a run does not re-announce its old findings when it recovers.
+  Providers cap their result lists (Brave top 10, HIBP 100, GitHub 3), so a
+  list that reorders can occasionally raise a spurious "new" alert.
 - A finding that is **new** and in the group exposure, profile, reference or domain
   is alerted. Hunter's validation verdicts and context findings are recorded in
   the history but **never alerted**.
