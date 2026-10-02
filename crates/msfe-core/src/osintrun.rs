@@ -384,6 +384,12 @@ fn fixture(q: &QueryCtx) -> Outcome {
 }
 
 fn worker(id: String, inputs: Inputs, cancel: Arc<AtomicBool>, deadline: Instant, max_q: usize) {
+    #[cfg(test)]
+    if inputs.address.to_ascii_lowercase().starts_with("deaf") {
+        // Test hook: the worker is busy and deaf to cancel for a fixed window,
+        // so tests can observe a removed-but-still-running slot.
+        std::thread::sleep(Duration::from_millis(400));
+    }
     let mut sources = Vec::new();
     let mut findings = Vec::new();
     let mut ran = 0usize;
@@ -1080,21 +1086,18 @@ mod tests {
     fn removing_a_running_run_keeps_its_concurrency_slot_until_the_worker_ends() {
         let (mut c, _g) = setup();
         c.osint_max_concurrent = 1;
-        let StartOk::Started(id) = start(&c, inp("slow.rmslot@example.org", true)).unwrap() else {
+        let StartOk::Started(id) = start(&c, inp("deaf.rmslot@example.org", true)).unwrap() else {
             panic!()
         };
         assert!(remove(&id));
         assert!(snapshot(&id).is_none(), "removed run is invisible");
-        // The worker has not noticed the cancel yet or has only just; either
-        // way a new start must never exceed the ceiling of 1.
-        let second = start(&c, inp("quiet.rmslot2@example.org", true));
-        match second {
-            Ok(StartOk::Started(id2)) => {
-                wait_done(&id2);
-            }
-            Err(StartError::TooManyRuns) => {}
-            other => panic!("unexpected {other:?}"),
-        }
+        // The fixture ignores cancel for 400 ms, so the worker is certainly
+        // still running here.
+        assert_eq!(running_count(), 1, "the removed slot is still held");
+        assert_eq!(
+            start(&c, inp("quiet.rmslot2@example.org", true)).unwrap_err(),
+            StartError::TooManyRuns
+        );
         let end = Instant::now() + Duration::from_secs(5);
         while Instant::now() < end && running_count() > 0 {
             std::thread::sleep(Duration::from_millis(20));
@@ -1104,6 +1107,11 @@ mod tests {
             0,
             "the removed slot is released when the worker ends"
         );
+        let StartOk::Started(id3) = start(&c, inp("quiet.rmslot3@example.org", true)).unwrap()
+        else {
+            panic!("a third start must now succeed")
+        };
+        wait_done(&id3);
         assert!(
             !report_dir().join(format!("{id}.json")).exists(),
             "a removed run is never persisted"
