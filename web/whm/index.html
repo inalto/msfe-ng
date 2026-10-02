@@ -2730,7 +2730,7 @@ async function renderOsint(v){
   v.append(card);
   const prov=await api('/api/delivery/osint/providers');
   if(!prov||prov.error){card.append(el('div',{class:'note warn'},(prov&&prov.error)||'no response'));return;}
-  if(!prov.enabled){card.append(el('div',{class:'note warn'},'OSINT is switched off. Set osint_enabled = true in config.toml (Config tab) to use it.'));}
+  if(!prov.enabled){card.append(el('div',{class:'note warn'},'OSINT is switched off. Tick "OSINT lookups" in the OSINT providers card of the Config tab to use it.'));}
   const pre=OSINT_PREFILL;OSINT_PREFILL=null;
   const addr=el('input',{type:'text',placeholder:'user@example.org',style:'min-width:18rem',value:pre?pre.address:''});
   const force=el('input',{type:'checkbox'});
