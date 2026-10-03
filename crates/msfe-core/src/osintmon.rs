@@ -152,31 +152,7 @@ pub fn strip_assets(r: &mut OsintReport) {
     }
 }
 
-/// The `mysql` client connects with a 3-byte UTF-8 charset, which rejects
-/// characters beyond the BMP (emoji in a profile name, say). In JSON text
-/// they are written as `\\uD83D\\uDE00` escapes instead, which parse back
-/// to the same character.
-pub fn bmp_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        if (c as u32) > 0xFFFF {
-            let mut b = [0u16; 2];
-            for u in c.encode_utf16(&mut b) {
-                out.push_str(&format!("\\u{u:04x}"));
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// Plain text for a column: characters beyond the BMP become U+FFFD.
-pub fn bmp_only(s: &str) -> String {
-    s.chars()
-        .map(|c| if (c as u32) > 0xFFFF { '\u{fffd}' } else { c })
-        .collect()
-}
+pub use crate::db::{bmp_escape, bmp_only};
 
 /// A summary as stored: no characters beyond the BMP, at most 255 characters
 /// (the column is VARCHAR(255); a longer value would fail the UPDATE).

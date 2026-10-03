@@ -103,9 +103,47 @@ fn unescape_batch(cell: &str) -> String {
     s
 }
 
+/// The `mysql` client connects with a 3-byte UTF-8 character set (it follows
+/// the locale), so a statement carrying a character beyond the Basic
+/// Multilingual Plane (an emoji) fails with `ERROR 1366` even though the
+/// tables are `utf8mb4`. The connection character set is deliberately left
+/// alone (forcing utf8mb4 could turn rows written through a latin1-mode
+/// client into mojibake). Instead no statement ever carries such a character:
+/// plain text goes through `bmp_only`, JSON text through `bmp_escape`.
+///
+/// Every character above U+FFFF becomes U+FFFD (lossy; for plain text).
+pub fn bmp_only(s: &str) -> String {
+    s.chars()
+        .map(|c| if (c as u32) > 0xFFFF { '\u{fffd}' } else { c })
+        .collect()
+}
+
+/// Every character above U+FFFF written as a `\uXXXX\uXXXX` surrogate-pair
+/// escape. ONLY valid for text that is JSON: the escapes are read back by a
+/// JSON parser, never by SQL, so the result is exact for a JSON document.
+pub fn bmp_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if (c as u32) > 0xFFFF {
+            let mut b = [0u16; 2];
+            for u in c.encode_utf16(&mut b) {
+                out.push_str(&format!("\\u{u:04x}"));
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// SQL single-quote a string literal (quotes doubled, backslashes escaped).
+/// Characters beyond the BMP are replaced (see `bmp_only`); a JSON document
+/// must be passed through `bmp_escape` first to keep them.
 pub fn quote(s: &str) -> String {
-    format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''"))
+    format!(
+        "'{}'",
+        bmp_only(s).replace('\\', "\\\\").replace('\'', "''")
+    )
 }
 
 /// A quoted `LIKE` pattern matching `needle` anywhere, with the wildcard
@@ -146,9 +184,9 @@ pub fn kv_set(cfg: &Config, ckey: &str, cvalue: &str) -> io::Result<()> {
     {
         return Err(io::Error::other("invalid kv key"));
     }
-    let v = cvalue.replace('\\', "\\\\").replace('\'', "''");
+    let v = quote(cvalue);
     let sql = format!(
-        "INSERT INTO msfe_config (scope, scope_id, ckey, cvalue) VALUES ('global','','{ckey}','{v}') \
+        "INSERT INTO msfe_config (scope, scope_id, ckey, cvalue) VALUES ('global','','{ckey}',{v}) \
          ON DUPLICATE KEY UPDATE cvalue = VALUES(cvalue);\n"
     );
     exec_stdin(cfg, &sql)
@@ -222,6 +260,51 @@ pub fn exec_stdin_captured(cfg: &Config, sql: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const EMOJI: &str = "\u{1F600}";
+
+    #[test]
+    fn bmp_only_replaces_astral_characters() {
+        assert_eq!(bmp_only(""), "");
+        assert_eq!(bmp_only("plain \u{e9}\u{65e5}"), "plain \u{e9}\u{65e5}");
+        assert_eq!(bmp_only("a\u{1F600}b"), "a\u{fffd}b");
+        assert_eq!(bmp_only("\u{FFFF}"), "\u{FFFF}");
+        assert_eq!(bmp_only("\u{10000}"), "\u{fffd}");
+        assert_eq!(bmp_only("\u{10FFFF}x\u{1F600}"), "\u{fffd}x\u{fffd}");
+    }
+
+    #[test]
+    fn bmp_escape_writes_surrogate_pairs() {
+        assert_eq!(bmp_escape(""), "");
+        assert_eq!(bmp_escape("plain \u{e9}\u{65e5}"), "plain \u{e9}\u{65e5}");
+        assert_eq!(bmp_escape("\u{FFFF}"), "\u{FFFF}");
+        assert_eq!(bmp_escape("\u{10000}"), "\\ud800\\udc00");
+        assert_eq!(bmp_escape("a\u{1F600}b"), "a\\ud83d\\ude00b");
+        assert_eq!(bmp_escape("\u{10FFFF}"), "\\udbff\\udfff");
+    }
+
+    #[test]
+    fn quote_never_carries_an_astral_character() {
+        let q = quote(&format!("it's {EMOJI} \\ \u{10000}"));
+        assert!(q.chars().all(|c| (c as u32) <= 0xFFFF), "{q}");
+        assert_eq!(q, "'it''s \u{fffd} \\\\ \u{fffd}'");
+        assert!(like_contains(EMOJI).chars().all(|c| (c as u32) <= 0xFFFF));
+    }
+
+    #[test]
+    fn a_json_document_with_an_emoji_survives_the_escape() {
+        let doc = crate::json::Json::Object(vec![(
+            "t".into(),
+            crate::json::Json::str(format!("x {EMOJI} \"q\" \\ y")),
+        )]);
+        let stored = bmp_escape(&doc.to_string());
+        assert!(stored.chars().all(|c| (c as u32) <= 0xFFFF));
+        // through the SQL literal and back (the server undoes the quoting)
+        let lit = quote(&stored);
+        assert!(lit.chars().all(|c| (c as u32) <= 0xFFFF));
+        let back = crate::json::Json::parse(&stored).unwrap();
+        assert_eq!(back.to_string(), doc.to_string());
+    }
 
     #[test]
     fn like_contains_escapes_wildcards_and_quotes() {

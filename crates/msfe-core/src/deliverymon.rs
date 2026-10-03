@@ -141,13 +141,7 @@ pub fn add(
         ("audit".into(), Json::Bool(inputs.audit)),
     ]);
     let now = crate::delivery::now_secs();
-    let sql = format!(
-        "INSERT INTO delivery_monitors (address, owner, options, interval_mins, enabled, created_at) VALUES ({}, {}, {}, {interval}, 1, {now}) \
-         ON DUPLICATE KEY UPDATE options = VALUES(options), interval_mins = VALUES(interval_mins), enabled = 1;\n",
-        db::quote(&addr),
-        db::quote(owner),
-        db::quote(&options.to_string())
-    );
+    let sql = sql_add_monitor(&addr, owner, &options.to_string(), interval, now);
     db::exec_stdin(cfg, &sql).map_err(|e| e.to_string())?;
     list(cfg, None)
         .map_err(|e| e.to_string())?
@@ -222,19 +216,37 @@ pub fn summary_line(r: &Report) -> String {
     format!("{f} fail, {w} warn, {u} unknown, {p} pass")
 }
 
-/// Store a run and trim the history.
-pub fn store_run(cfg: &Config, monitor_id: u32, r: &Report) -> std::io::Result<u32> {
+/// The statement that adds a monitor. `options` is a JSON document, so it is
+/// escaped (not replaced) for the 3-byte client connection.
+fn sql_add_monitor(addr: &str, owner: &str, options_json: &str, interval: u32, now: u64) -> String {
+    format!(
+        "INSERT INTO delivery_monitors (address, owner, options, interval_mins, enabled, created_at) VALUES ({}, {}, {}, {interval}, 1, {now}) \
+         ON DUPLICATE KEY UPDATE options = VALUES(options), interval_mins = VALUES(interval_mins), enabled = 1;\n",
+        db::quote(addr),
+        db::quote(owner),
+        db::quote(&db::bmp_escape(options_json))
+    )
+}
+
+/// The statements that store a run (the report is JSON, so it is escaped
+/// rather than replaced, keeping emoji exactly) and trim the history.
+fn sql_store_run(monitor_id: u32, r: &Report) -> String {
     let (p, w, f, u) = totals(r);
     let dur = r.finished.unwrap_or(r.started).saturating_sub(r.started) * 1000;
-    let sql = format!(
+    format!(
         "INSERT INTO delivery_runs (monitor_id, started_at, duration_ms, n_pass, n_warn, n_fail, n_unknown, report) VALUES ({monitor_id}, {}, {dur}, {p}, {w}, {f}, {u}, {});\n\
          UPDATE delivery_monitors SET last_run_at = {}, last_summary = {} WHERE id = {monitor_id};\n\
          DELETE FROM delivery_runs WHERE monitor_id = {monitor_id} AND id NOT IN (SELECT id FROM (SELECT id FROM delivery_runs WHERE monitor_id = {monitor_id} ORDER BY started_at DESC LIMIT {KEEP_RUNS}) AS keep);\n",
         r.started,
-        db::quote(&r.to_json().to_string()),
+        db::quote(&db::bmp_escape(&r.to_json().to_string())),
         r.finished.unwrap_or(r.started),
         db::quote(&summary_line(r))
-    );
+    )
+}
+
+/// Store a run and trim the history.
+pub fn store_run(cfg: &Config, monitor_id: u32, r: &Report) -> std::io::Result<u32> {
+    let sql = sql_store_run(monitor_id, r);
     db::exec_stdin(cfg, &sql)?;
     let rows = db::query(
         cfg,
@@ -507,6 +519,37 @@ mod tests {
             tool_notes: vec![],
             cached: false,
         }
+    }
+
+    #[test]
+    fn store_run_sql_keeps_an_emoji_in_the_report_and_never_sends_one() {
+        let mut r = report(vec![("a", None, Verdict::Pass)]);
+        r.checks[0].title = "mail \u{1F600} ok".into();
+        let sql = sql_store_run(5, &r);
+        assert!(sql.chars().all(|c| (c as u32) <= 0xFFFF), "{sql}");
+        assert!(sql.contains("\\\\ud83d\\\\ude00"), "{sql}");
+        // the stored text (after the server undoes the literal) parses back
+        let lit = sql.split("'{").nth(1).unwrap();
+        let json = format!("{{{}", lit.split("}'").next().unwrap()) + "}";
+        let json = json.replace("\\\\", "\\").replace("''", "'");
+        let back = Report::from_json(&Json::parse(&json).unwrap()).unwrap();
+        assert_eq!(back.checks[0].title, "mail \u{1F600} ok");
+    }
+
+    #[test]
+    fn store_run_summary_is_plain_text() {
+        let r = report(vec![("a", None, Verdict::Pass)]);
+        let sql = sql_store_run(5, &r);
+        assert!(sql.contains("last_summary = '0 fail, 0 warn, 0 unknown, 1 pass'"));
+        assert!(sql.starts_with("INSERT INTO delivery_runs (monitor_id,"));
+    }
+
+    #[test]
+    fn add_monitor_sql_escapes_the_options_json() {
+        let sql = sql_add_monitor("a@x.test", "o\u{1F600}", "{\"s\":\"\u{1F600}\"}", 60, 9);
+        assert!(sql.chars().all(|c| (c as u32) <= 0xFFFF), "{sql}");
+        assert!(sql.contains("'o\u{fffd}'"));
+        assert!(sql.contains("\\\\ud83d\\\\ude00"), "{sql}");
     }
 
     #[test]

@@ -30,7 +30,7 @@ pub fn load_digestdomains(policy_dir: &Path) -> Vec<DigestDomain> {
 }
 
 fn sql_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
+    crate::db::quote(s)
 }
 
 /// Messages held for `domain` in the last `hours`.

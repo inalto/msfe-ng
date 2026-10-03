@@ -412,7 +412,7 @@ pub fn run(cfg: &Config, opt: &Options) -> Summary {
     };
     run_locked(cfg, opt, &mut s);
     if !opt.dry {
-        let _ = db::kv_set(cfg, LAST_RUN_KEY, &s.to_json().to_string());
+        let _ = db::kv_set(cfg, LAST_RUN_KEY, &db::bmp_escape(&s.to_json().to_string()));
     }
     s
 }
