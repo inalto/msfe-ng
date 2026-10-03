@@ -909,18 +909,13 @@ mod tests {
         let conf = msfe.join("config.toml");
         std::fs::write(&conf, "panel = \"x\"\n").unwrap();
         let bin = base.join("fake");
-        std::fs::write(
+        crate::testutil::write_script_ready(
             &bin,
-            format!(
+            &format!(
                 "#!/bin/sh\nc=\"${{2:-{live}}}\"\necho \"Reading configuration file $c\"\nd=$(dirname \"$c\")\nif grep -rq BREAKME \"$d\"; then echo \"Error in line 1 of $d/rules/bounce.rules\"; exit 1; fi\necho ok\n",
                 live = etc.join("MailScanner.conf").display()
             ),
-        )
-        .unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        );
         let cfg = Config {
             mailscanner_conf: etc.join("MailScanner.conf").display().to_string(),
             backup_dir: base.join("backups").display().to_string(),

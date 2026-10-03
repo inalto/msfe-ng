@@ -1286,11 +1286,7 @@ mod tests {
         let conf = msfe.join("config.toml");
         std::fs::write(&conf, "").unwrap();
         let bin = base.join("fake-mailscanner");
-        std::fs::write(&bin, "#!/bin/sh\necho \"Reading configuration file\"\necho \"SpamAssassin reported no errors.\"\n").unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::testutil::write_script_ready(&bin, "#!/bin/sh\necho \"Reading configuration file\"\necho \"SpamAssassin reported no errors.\"\n");
         let cfg = Config {
             mailscanner_conf: etc.join("MailScanner.conf").display().to_string(),
             backup_dir: base.join("backups").display().to_string(),
@@ -1519,11 +1515,10 @@ mod tests {
         let conf = msfe.join("config.toml");
         std::fs::write(&conf, "").unwrap();
         let bin = base.join("fake-mailscanner");
-        std::fs::write(&bin, "#!/bin/sh\necho \"Reading configuration file\"\n").unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::testutil::write_script_ready(
+            &bin,
+            "#!/bin/sh\necho \"Reading configuration file\"\n",
+        );
         let cfg = Config {
             mailscanner_conf: etc.join("MailScanner.conf").display().to_string(),
             backup_dir: base.join("backups").display().to_string(),

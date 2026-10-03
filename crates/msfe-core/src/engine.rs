@@ -1769,8 +1769,8 @@ if [ $CURLORWGET = 'curl' ]; then\n  curl -S -A \"msv5 Update Script v0.3.1\" -z
         std::fs::write(&shim, "#!/bin/sh\n").unwrap();
         std::env::set_var("MSFE_NG_EXIM_SHIM", &shim);
         let updater = base.join("ms-update-phishing");
-        std::fs::write(&updater, UPDATER).unwrap();
-        std::fs::set_permissions(&updater, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // only patched, never run here: no readiness probe
+        crate::testutil::write_script(&updater, UPDATER);
         std::env::set_var("MSFE_NG_PHISHING_UPDATER", &updater);
 
         let cfg = Config {

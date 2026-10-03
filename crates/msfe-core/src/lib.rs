@@ -94,6 +94,8 @@ pub mod stats;
 pub mod sync;
 pub mod telegram;
 pub mod testmail;
+#[cfg(test)]
+pub(crate) mod testutil;
 pub mod tlsprobe;
 pub mod tschecks;
 pub mod units;

@@ -843,18 +843,13 @@ mod tests {
         std::fs::write(msfe.join("policy/msconfig.txt"), "highscore=10\n").unwrap();
         std::fs::write(msfe.join("policy/domains/a.example"), "spam=yes\n").unwrap();
         let bin = base.join("fake");
-        std::fs::write(
+        crate::testutil::write_script_ready(
             &bin,
-            format!(
+            &format!(
                 "#!/bin/sh\nc=\"${{2:-{live}}}\"\necho \"Reading configuration file $c\"\nd=$(dirname \"$c\")\nif grep -rq BREAKME \"$d\"; then echo \"Cannot open ruleset file BREAKME\"; exit 1; fi\necho ok\n",
                 live = etc.join("MailScanner.conf").display()
             ),
-        )
-        .unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        );
         let cfg = Config {
             mailscanner_conf: etc.join("MailScanner.conf").display().to_string(),
             mailscanner_rules_dir: etc.join("rules").display().to_string(),

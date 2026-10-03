@@ -827,21 +827,16 @@ mod tests {
         let conf = msfe.join("config.toml");
         std::fs::write(&conf, "panel = \"x\"\n").unwrap();
         let bin = base.join("fake-mailscanner");
-        std::fs::write(
+        crate::testutil::write_script_ready(
             &bin,
-            format!(
+            &format!(
                 "#!/bin/sh\nif [ -n \"$2\" ]; then d=$(dirname \"$2\"); else d={etc}; fi\n\
                  echo \"Reading configuration file $d/MailScanner.conf\"\n\
                  if grep -rq BREAKME \"$d\"; then echo \"Cannot open ruleset file BREAKME, No such file or directory at /usr/share/MailScanner/perl/MailScanner/Config.pm line 2633.\"; exit 1; fi\n\
                  echo \"SpamAssassin reported no errors.\"\n",
                 etc = etc.display()
             ),
-        )
-        .unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        );
         let cfg = Config {
             mailscanner_conf: etc.join("MailScanner.conf").display().to_string(),
             backup_dir: base.join("backups").display().to_string(),
