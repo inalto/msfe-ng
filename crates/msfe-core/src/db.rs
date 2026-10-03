@@ -7,9 +7,10 @@
 //! queries; a real driver can replace this later without changing callers.
 
 use crate::config::Config;
+use std::ffi::OsString;
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -48,10 +49,29 @@ fn defaults_file(cfg: &Config) -> io::Result<DefaultsFile> {
     Ok(DefaultsFile(path))
 }
 
+/// The statement every client session starts with. [`quote`] escapes a
+/// backslash by doubling it, which is only right while backslash escapes are
+/// active; a server running with `NO_BACKSLASH_ESCAPES` in its `sql_mode`
+/// would store every backslash (JSON `\"`, `\uXXXX`) doubled. So the session
+/// drops that one flag and keeps the rest: the list is wrapped in commas,
+/// `,NO_BACKSLASH_ESCAPES,` becomes a single comma, and the outer commas are
+/// trimmed again (so an emptied list is the valid empty mode).
+fn session_init_sql() -> String {
+    "SET SESSION sql_mode=TRIM(BOTH ',' FROM REPLACE(CONCAT(',',@@SESSION.sql_mode,','),',NO_BACKSLASH_ESCAPES,',','))".to_string()
+}
+
+/// Arguments of every `mysql` invocation, before the caller's own.
+fn client_args(defaults_file: &Path, db_name: &str) -> Vec<OsString> {
+    vec![
+        OsString::from(format!("--defaults-extra-file={}", defaults_file.display())),
+        OsString::from(format!("--init-command={}", session_init_sql())),
+        OsString::from(db_name),
+    ]
+}
+
 fn base_cmd(cfg: &Config, df: &DefaultsFile) -> Command {
     let mut c = Command::new("mysql");
-    c.arg(format!("--defaults-extra-file={}", df.0.display()));
-    c.arg(&cfg.db_name);
+    c.args(client_args(&df.0, &cfg.db_name));
     c
 }
 
@@ -335,6 +355,41 @@ mod tests {
     fn batch_unescape_leaves_unknown_escapes_alone() {
         assert_eq!(unescape_batch("a\\qb\\"), "a\\qb\\");
         assert_eq!(unescape_batch("plain"), "plain");
+    }
+
+    #[test]
+    fn session_init_removes_only_the_backslash_flag() {
+        let sql = session_init_sql();
+        assert!(sql.starts_with("SET SESSION sql_mode="), "{sql}");
+        assert_eq!(sql.matches("NO_BACKSLASH_ESCAPES").count(), 1, "{sql}");
+        // commas are trimmed, so an emptied list is a valid empty mode
+        assert!(sql.contains("TRIM(BOTH ',' FROM"), "{sql}");
+        assert!(sql.contains("@@SESSION.sql_mode"), "{sql}");
+    }
+
+    #[test]
+    fn every_mysql_command_carries_the_init_command() {
+        let args = client_args(std::path::Path::new("/tmp/x.cnf"), "msdb");
+        let strs: Vec<String> = args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(strs[0], "--defaults-extra-file=/tmp/x.cnf");
+        assert_eq!(strs[1], format!("--init-command={}", session_init_sql()));
+        assert_eq!(strs.last().unwrap(), "msdb");
+        let df = DefaultsFile(PathBuf::from("/tmp/y.cnf"));
+        let cfg = Config::default();
+        let cmd = base_cmd(&cfg, &df);
+        let got: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            got.iter()
+                .any(|a| a.starts_with("--init-command=SET SESSION sql_mode=")),
+            "{got:?}"
+        );
+        std::mem::forget(df); // nothing was written; do not unlink a stranger's file
     }
 
     #[test]
