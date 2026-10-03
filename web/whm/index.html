@@ -3270,7 +3270,7 @@ async function renderDeliveryTest(v){
   const dlHtml=el('button',{class:'act plain'},'Download HTML');
   dlHtml.onclick=async()=>{const t=await apiRaw('/api/delivery/report?id='+encodeURIComponent(runId)+'&format=html');if(t.ok)downloadBlob(`delivery-${addr.value.trim()}-${runId}.html`,textBlob(t.text,'text/html'));};
   const openHtml=el('button',{class:'act plain'},'Open report');
-  openHtml.onclick=async()=>{const t=await apiRaw('/api/delivery/report?id='+encodeURIComponent(runId)+'&format=html');if(!t.ok)return;const w=window.open('','_blank');if(w){w.document.open();w.document.write(t.text);w.document.close();}};
+  openHtml.onclick=async()=>{const id=runId;const t=await apiRaw('/api/delivery/report?id='+encodeURIComponent(id)+'&format=html');if(!t.ok){toast('cannot load');return;}const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([t.text],{type:'text/html'}));a.download='delivery-'+id+'.html';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);};
   const invBtn=el('button',{class:'act plain',title:'Public information about this address (OSINT); nothing runs until you press Run there'},'Investigate address');
   invBtn.onclick=()=>osintFor(addr.value.trim(),runId?{delivery_run_id:runId}:null);
   exportBtns.append(dlJson,dlHtml,openHtml,invBtn);
@@ -3426,7 +3426,7 @@ async function renderDeliveryTest(v){
       const open=el('button',{class:'linkbtn'},'open');
       open.onclick=async()=>{const rep=await api('/api/delivery/monitors/report?run='+r.id);if(!rep||rep.error){toast('cannot load');return;}md.close();runId=null;renderer.reset();prog.style.display='';addr.value=rep.inputs.address;renderer.add(rep.checks||[]);showProgress(rep);exportBtns.style.display='none';window.scrollTo({top:0,behavior:'smooth'});};
       const html=el('button',{class:'linkbtn'},'html');
-      html.onclick=async()=>{const t=await apiRaw('/api/delivery/monitors/report?run='+r.id+'&format=html');if(!t.ok)return;const w=window.open('','_blank');if(w){w.document.open();w.document.write(t.text);w.document.close();}};
+      html.onclick=async()=>{const t=await apiRaw('/api/delivery/monitors/report?run='+r.id+'&format=html');if(!t.ok){toast('cannot load');return;}const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([t.text],{type:'text/html'}));a.download='delivery-monitor-run-'+r.id+'.html';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);};
       t.append(el('tr',{},el('td',{},fmtTime(r.started_at)),el('td',{},Math.round(r.duration_ms/1000)+' s'),el('td',{class:r.fail?'chip fail':''},String(r.fail)),el('td',{},String(r.warn)),el('td',{},String(r.unknown)),el('td',{},String(r.pass)),el('td',{},open,' ',html)));
     });
     if(!(d.runs||[]).length)t.append(el('tr',{},el('td',{colspan:'7',class:'muted'},'No runs yet.')));
