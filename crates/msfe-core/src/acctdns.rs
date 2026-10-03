@@ -45,7 +45,7 @@ use crate::service::run_with_timeout;
 use crate::{dkim, dmarc, spf};
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -2063,10 +2063,37 @@ fn persist(scan: &Scan) {
             return;
         }
     }
-    if crate::sync::atomic_write(&path, scan.to_json().to_string().as_bytes()).is_ok() {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    let _ = write_private(&path, scan.to_json().to_string().as_bytes());
+}
+
+/// Write `data` to `path` so the file is never readable by others: the temp
+/// file is created 0600 (exclusively, after removing any stale one, so a
+/// planted symlink is never followed) and renamed over the target.
+fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let tmp = path.with_extension("tmp.msfe-ng");
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
     }
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    let res = f.write_all(data).and_then(|()| f.flush());
+    drop(f);
+    if let Err(e) = res {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    let res = std::fs::rename(&tmp, path);
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    res
 }
 
 fn load() -> Option<Scan> {
@@ -3454,6 +3481,48 @@ mod tests {
         assert!(!accepts(What::Dkim, &c, "v=DKIM1; k=rsa; p=OTHERKEY"));
         c.suggested_value = None;
         assert!(accepts(What::Dkim, &c, "v=DKIM1; p=anything"));
+    }
+
+    #[test]
+    fn persisted_result_is_created_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmpdir("private-0600");
+        let f = dir.join("acctdns.json");
+        write_private(&f, b"{}").unwrap();
+        assert_eq!(
+            std::fs::metadata(&f).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // a pre-existing world-readable target is replaced by a 0600 file
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_private(&f, b"{\"a\":1}").unwrap();
+        assert_eq!(
+            std::fs::metadata(&f).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(std::fs::read(&f).unwrap(), b"{\"a\":1}");
+        assert!(!dir.join("acctdns.tmp.msfe-ng").exists());
+    }
+
+    #[test]
+    fn persisted_result_never_follows_a_planted_temp() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmpdir("private-symlink");
+        let f = dir.join("acctdns.json");
+        let victim = dir.join("victim");
+        std::fs::write(&victim, "keep").unwrap();
+        std::os::unix::fs::symlink(&victim, dir.join("acctdns.tmp.msfe-ng")).unwrap();
+        write_private(&f, b"data").unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+        assert_eq!(std::fs::read(&f).unwrap(), b"data");
+        assert_eq!(
+            std::fs::metadata(&f).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // a stale regular temp is replaced too
+        std::fs::write(dir.join("acctdns.tmp.msfe-ng"), "stale").unwrap();
+        write_private(&f, b"again").unwrap();
+        assert_eq!(std::fs::read(&f).unwrap(), b"again");
     }
 
     #[test]
