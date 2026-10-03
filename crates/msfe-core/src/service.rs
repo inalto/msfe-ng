@@ -1412,16 +1412,40 @@ mod tests {
         d
     }
 
+    /// Write an executable script so that no write fd is open when it is
+    /// exec'd: temp name, close, chmod, rename into place.
+    fn write_script(path: &Path, body: &str) {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = path.with_extension("tmp");
+        {
+            let mut f = std::fs::File::create(&tmp).unwrap();
+            f.write_all(body.as_bytes()).unwrap();
+            f.sync_all().unwrap();
+        }
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(&tmp, path).unwrap();
+    }
+
     #[test]
     fn lint_runs_the_engine_binary_of_the_layout() {
-        use std::os::unix::fs::PermissionsExt;
         let d = tmpdir("lint");
         // a ConfigServer-style engine: not /usr/sbin/MailScanner
         let bin = d.join("usr/mailscanner/usr/sbin/MailScanner");
         std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
-        std::fs::write(&bin, "#!/bin/sh\necho \"lint from $0 $1\"\n").unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let r = lint_with(&bin);
+        write_script(&bin, "#!/bin/sh\necho \"lint from $0 $1\"\n");
+        let mut r = lint_with(&bin);
+        // Another test thread forking while the script was being written can
+        // still hold a copy of the write fd; exec then fails with ETXTBSY
+        // (lint_conf reports any spawn error as "not installed") until that
+        // child execs. The file exists and is closed, so only retrying helps.
+        for _ in 0..10 {
+            if r.ok || !r.output.contains("not installed") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            r = lint_with(&bin);
+        }
         assert!(r.ok, "{}", r.output);
         assert_eq!(r.output, format!("lint from {} --lint", bin.display()));
         // no engine at that path: an install hint, not a crash

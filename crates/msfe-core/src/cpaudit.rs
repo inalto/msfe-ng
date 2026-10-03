@@ -1955,6 +1955,9 @@ mod tests {
 
     #[test]
     fn audit_over_a_fixture_root() {
+        let _env = crate::deliveryrun::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         use crate::config::Config;
         use crate::deliveryrun::{execute, Ctx, Results};
         use std::sync::atomic::AtomicBool;

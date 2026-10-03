@@ -3599,6 +3599,15 @@ mod tests {
         );
 
         // the finished scan is on disk and comes back when memory is empty
+        // (the scan thread marks it done first, writes the file right after
+        // and only then narrows its mode, so both can lag on a loaded machine)
+        for _ in 0..3000 {
+            use std::os::unix::fs::PermissionsExt;
+            if std::fs::metadata(&store).is_ok_and(|m| m.permissions().mode() & 0o777 == 0o600) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
         assert!(store.exists());
         let mode = std::fs::metadata(&store).unwrap();
         use std::os::unix::fs::PermissionsExt;
@@ -3652,7 +3661,7 @@ mod tests {
 
     /// Wait for the running scan to finish (a fixture scan takes milliseconds).
     fn loop_until_done() -> Scan {
-        for _ in 0..500 {
+        for _ in 0..3000 {
             if let Some(s) = snapshot() {
                 if s.done {
                     return s;

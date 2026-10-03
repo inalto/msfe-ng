@@ -485,6 +485,9 @@ mod tests {
 
     #[test]
     fn set_cpanel_sa_turns_accounts_off_and_restores_exactly_them() {
+        let _env = crate::deliveryrun::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let root = cpanel_fixture("toggle");
         std::env::set_var("MSFE_NG_CPANEL_ROOT", &root);
         std::fs::write(root.join("home/bob/.spamassassinenable"), "").unwrap();
