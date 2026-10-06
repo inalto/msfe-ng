@@ -445,6 +445,36 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
             );
         }
         out.push(c);
+        // Signed documents (Italian/EU CAdES: `file.pdf.p7m`) trip the stock
+        // "hide real filename extension" rule; the admin decides to let the
+        // harmless types through (Apply inserts the allow block before it).
+        if let Some(f) = p7m_finding(&lay.perl, &text) {
+            let rel = Path::new(&rules_path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "filename.rules.conf".into());
+            let block = p7m_allow_block();
+            out.push(
+                check(
+                    P7M_CHECK,
+                    false,
+                    Level::Warn,
+                    p7m_detail(&f),
+                    "doctor --apply \"signed documents (.p7m) blocked\" (or the Apply button) inserts, before the generic double-extension deny in filename.rules.conf, an allow for the document types that cannot run code; docx/xlsx/macro formats and executables stay blocked",
+                )
+                .url(P7M_WIKI_URL)
+                .propose(
+                    format!(
+                        "insert before the \"hide real filename extension\" deny in {rel}:\n{block}"
+                    ),
+                    Proposal::LineReplace {
+                        id: format!("ms:{rel}"),
+                        to: format!("{block}\n{}", f.line),
+                        from: f.line,
+                    },
+                ),
+            );
+        }
     }
     {
         let mark = mailscanner::get_directive(&conf, "Mark Infected Messages")
@@ -1538,6 +1568,79 @@ pub fn filename_length_fix(text: &str) -> Option<(String, String)> {
             ),
         )
     })
+}
+
+/// Name of the signed-documents check (what `doctor --apply` takes).
+pub const P7M_CHECK: &str = "signed documents (.p7m) blocked";
+const P7M_WIKI_URL: &str =
+    "https://github.com/inalto/msfe-ng/wiki/Troubleshooting#signed-documents-p7m-are-blocked-as-infected";
+/// Names a CAdES-signed document gets: the original name plus `.p7m`.
+const P7M_SAMPLES: [&str; 2] = ["x.pdf.p7m", "x.xbrl.p7m"];
+
+/// The allow rule Apply inserts: document types that cannot run code.
+fn p7m_allow_block() -> String {
+    [
+        "# Digitally signed documents: Italian/EU CAdES signatures append .p7m to the original name (file.pdf.p7m).",
+        "# Allow the document types that cannot run code; everything else with a double extension is still denied below.",
+        "allow\t\\.(pdf|xml|xbrl|txt|csv|rtf|jpe?g|png|tiff?|odt|ods)\\.p7m$\t-\t-",
+    ]
+    .join("\n")
+}
+
+#[derive(Debug, PartialEq)]
+struct P7mFinding {
+    /// The exact stock hiding-rule line to put the block before.
+    line: String,
+    /// An `allow … p7m` line placed after it (it can never fire).
+    later_allow: Option<String>,
+}
+
+fn is_hiding_rule(r: &crate::msgrammar::FilenameRule) -> bool {
+    r.action != crate::msgrammar::Action::Allow
+        && (r.log_text.contains("Found possible filename hiding")
+            || r.user_text
+                .contains("Attempt to hide real filename extension"))
+}
+
+/// Would the stock hiding rule (first match wins) refuse a `.p7m` document?
+/// Silent (`None`) when both samples are allowed, when another rule decides
+/// (an admin's deliberate deny), or when perl is unavailable.
+fn p7m_finding(perl: &[String], text: &str) -> Option<P7mFinding> {
+    let table = crate::msgrammar::parse_filename_rules(text);
+    let rows = table.rows();
+    let patterns: Vec<String> = rows.iter().map(|r| r.pattern.clone()).collect();
+    let mut hit = None;
+    for s in P7M_SAMPLES {
+        if let Some(Some(i)) = crate::msgtest::first_match_perl(perl, &patterns, s) {
+            if is_hiding_rule(rows[i]) {
+                hit = Some(hit.map_or(i, |h: usize| h.min(i)));
+            }
+        }
+    }
+    let i = hit?;
+    let rule = rows[i];
+    let line = text.lines().find(|l| {
+        crate::msgrammar::parse_filename_rules(l)
+            .rows()
+            .first()
+            .is_some_and(|r| **r == *rule)
+    })?;
+    let later_allow = rows[i + 1..]
+        .iter()
+        .find(|r| r.action == crate::msgrammar::Action::Allow && r.pattern.contains("p7m"))
+        .map(|r| r.to_line());
+    Some(P7mFinding {
+        line: line.to_string(),
+        later_allow,
+    })
+}
+
+fn p7m_detail(f: &P7mFinding) -> String {
+    let mut d = String::from("Italian and EU digitally signed files end in .p7m (file.pdf.p7m); MailScanner's stock rule \"Found possible filename hiding\" in filename.rules.conf reads that as a hidden double extension, removes the attachment and the sender gets an infected-mail notice for a legitimate signed document");
+    if let Some(a) = &f.later_allow {
+        d.push_str(&format!(". An allow for p7m is already there but sits after that deny ({a}) — the first matching rule wins, so it never fires"));
+    }
+    d
 }
 
 /// Carry out the proposal of the named check, after the admin agreed.
@@ -2928,6 +3031,117 @@ mod tests {
         assert!(filename_length_verdict(&relaxed).0);
         assert!(filename_length_fix(&relaxed).is_none());
         assert!(filename_length_verdict("allow\t.*\t-\t-\n").0);
+    }
+
+    // ---- signed documents (.p7m) -----------------------------------------
+
+    const STOCK_RULES: &str = "# stock\ndeny\t\\.[a-z][a-z0-9]{2,3}\\s*\\.[a-z0-9]{3,4}$\tFound possible filename hiding\tAttempt to hide real filename extension\ndeny\t\\.exe$\tprog\tprog\ndeny\t.{150,}\tVery long filename, possible OE attack\tlong names\nallow\t.*\t-\t-\n";
+
+    fn perl() -> Vec<String> {
+        vec!["perl".into()]
+    }
+
+    /// Applying a proposal the way `apply` does (every `from` line becomes `to`).
+    fn applied(text: &str) -> String {
+        let f = p7m_finding(&perl(), text).expect("check fires");
+        let to = format!("{}\n{}", p7m_allow_block(), f.line);
+        text.lines()
+            .map(|l| if l == f.line { to.as_str() } else { l })
+            .map(|l| format!("{l}\n"))
+            .collect()
+    }
+
+    /// First rule MailScanner would match for `name`: its action.
+    fn verdict(text: &str, name: &str) -> String {
+        let t = crate::msgrammar::parse_filename_rules(text);
+        let rows = t.rows();
+        let pats: Vec<String> = rows.iter().map(|r| r.pattern.clone()).collect();
+        match crate::msgtest::first_match_perl(&perl(), &pats, name) {
+            Some(Some(i)) => rows[i].action.as_string(),
+            _ => "none".into(),
+        }
+    }
+
+    #[test]
+    fn p7m_fires_on_the_stock_rules_and_names_the_hiding_line() {
+        let f = p7m_finding(&perl(), STOCK_RULES).expect("fires");
+        assert!(
+            f.line.starts_with("deny\t\\.[a-z][a-z0-9]{2,3}"),
+            "{}",
+            f.line
+        );
+        assert!(f.later_allow.is_none());
+        let d = p7m_detail(&f);
+        assert!(
+            d.contains(".p7m") && d.contains("infected-mail notice"),
+            "{d}"
+        );
+        assert!(p7m_allow_block().contains("allow\t\\.(pdf|xml|xbrl"));
+    }
+
+    #[test]
+    fn p7m_apply_allows_harmless_types_and_keeps_the_rest_blocked() {
+        let new = applied(STOCK_RULES);
+        for ok in [
+            "x.pdf.p7m",
+            "x.xbrl.p7m",
+            "x.jpg.p7m",
+            "Verbale 2025 .pdf.p7m",
+        ] {
+            assert_eq!(verdict(&new, ok), "allow", "{ok}");
+        }
+        for bad in ["x.docx.p7m", "x.exe.p7m", "invoice.pdf.exe", "x.xlsm.p7m"] {
+            assert_eq!(verdict(&new, bad), "deny", "{bad}");
+        }
+        assert!(new.find("allow\t\\.(pdf").unwrap() < new.find("deny\t\\.[a-z]").unwrap());
+        // idempotent: the check is silent afterwards, so a second apply changes nothing
+        assert!(p7m_finding(&perl(), &new).is_none());
+    }
+
+    #[test]
+    fn p7m_silent_when_already_allowed_or_not_the_stock_rule() {
+        // an allow before the deny
+        let before = STOCK_RULES.replacen(
+            "deny\t\\.[a-z]",
+            "allow\t\\.(pdf|xbrl)\\.p7m$\t-\t-\ndeny\t\\.[a-z]",
+            1,
+        );
+        assert!(p7m_finding(&perl(), &before).is_none());
+        // no hiding rule at all
+        assert!(p7m_finding(&perl(), "deny\t\\.exe$\tprog\tprog\nallow\t.*\t-\t-\n").is_none());
+        // an admin's own deliberate deny of p7m decides first
+        let own = format!("deny\t\\.p7m$\tno signed files\tpolicy\n{STOCK_RULES}");
+        assert!(p7m_finding(&perl(), &own).is_none());
+    }
+
+    #[test]
+    fn p7m_reports_a_later_allow_that_can_never_fire() {
+        let late = format!("{STOCK_RULES}allow\t\\.pdf\\.p7m$\t-\t-\n");
+        let f = p7m_finding(&perl(), &late).expect("still fires");
+        assert!(f.later_allow.as_deref().unwrap().contains("pdf"));
+        assert!(p7m_detail(&f).contains("never fires"));
+        // admin's own later lines stay untouched by the apply
+        let new = applied(&late);
+        assert!(new.contains("allow\t\\.pdf\\.p7m$\t-\t-\n"));
+        assert_eq!(verdict(&new, "x.pdf.p7m"), "allow");
+        assert!(p7m_finding(&perl(), &new).is_none());
+    }
+
+    #[test]
+    fn p7m_check_is_a_warning_with_a_wiki_page() {
+        let c = check(P7M_CHECK, false, Level::Warn, String::new(), "f")
+            .url(P7M_WIKI_URL)
+            .propose(
+                "s",
+                Proposal::LineReplace {
+                    id: "ms:filename.rules.conf".into(),
+                    from: "a".into(),
+                    to: "b".into(),
+                },
+            );
+        assert_eq!(c.level, Level::Warn);
+        assert!(c.url.unwrap().contains("Troubleshooting#signed-documents"));
+        assert_eq!(P7M_CHECK, "signed documents (.p7m) blocked");
     }
 
     #[test]

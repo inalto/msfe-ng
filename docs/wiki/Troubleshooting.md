@@ -102,6 +102,38 @@ handed over by hand. Two stock settings are worth revisiting:
   `{Filename?}` subject tag and the `…-Attachment-Warning.txt` attachment
   saying what was removed and why.
 
+## Signed documents (.p7m) are blocked as infected
+
+**Symptom.** An outgoing or incoming message with a digitally signed
+attachment (`Verbale.pdf.p7m`, `bilancio.xbrl.p7m`) is quarantined and the
+sender receives an *infected e-mail* notice; the Messages tab shows it as
+*Other infected*.
+
+**Cause.** Italian and EU signatures (CAdES) wrap the document in an envelope
+named `<original name>.p7m`. The stock rule in `filename.rules.conf`, *Found
+possible filename hiding* (`deny \.[a-z][a-z0-9]{2,3}\s*\.[a-z0-9]{3,4}$`),
+reads `file.pdf.p7m` as a hidden double extension. Rules are read top to
+bottom and the first match wins, so an `allow \.pdf\.p7m$` appended at the end
+of the file never fires.
+
+**The check.** The doctor check *signed documents (.p7m) blocked* (Warn)
+fires when that stock rule would refuse `x.pdf.p7m` or `x.xbrl.p7m`; it is
+silent once they are allowed, or when the rule that refuses them is your own.
+Apply it with the banner button or
+`msfe-ng doctor --apply "signed documents (.p7m) blocked"`: it inserts this
+block right before the generic deny (validated, previous version kept,
+applying twice changes nothing):
+
+```
+allow	\.(pdf|xml|xbrl|txt|csv|rtf|jpe?g|png|tiff?|odt|ods)\.p7m$	-	-
+```
+
+**What stays blocked.** Only document types that cannot run code are
+allowed. `file.docx.p7m`, `.xlsx`, macro formats and executables
+(`file.exe.p7m`) and every other double extension (`invoice.pdf.exe`) are
+still refused by the rules below. Your own later `allow`/`deny` lines for
+`.p7m` are left untouched.
+
 ## An auto-ban hit a legitimate sender
 
 Open Config → *Auto-ban spam sources* → **Recent auto-bans** and click

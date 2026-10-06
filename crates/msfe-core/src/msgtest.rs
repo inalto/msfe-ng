@@ -644,7 +644,11 @@ fn run_av(eml: &Path, transcript: &mut Vec<String>) -> AvVerdict {
 
 /// Which of `rows` matches `subject` first, by one run of the engine's perl
 /// (`/i`, as MailScanner does). `None` when perl is unavailable.
-fn first_match_perl(perl: &[String], patterns: &[String], subject: &str) -> Option<Option<usize>> {
+pub(crate) fn first_match_perl(
+    perl: &[String],
+    patterns: &[String],
+    subject: &str,
+) -> Option<Option<usize>> {
     use std::io::Write;
     use std::process::Stdio;
     let exe = perl.first()?;
