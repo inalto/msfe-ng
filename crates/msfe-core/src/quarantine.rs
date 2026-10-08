@@ -318,11 +318,24 @@ pub fn deliver_inbox(bytes: &[u8], lda: &str, account: &str) -> io::Result<()> {
         .stderr(Stdio::piped())
         .spawn()?;
     child.stdin.take().expect("stdin piped").write_all(bytes)?;
-    if child.wait()?.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other("local delivery (dovecot-lda) failed"))
+    let out = child.wait_with_output()?;
+    if out.status.success() {
+        return Ok(());
     }
+    // EX_NOUSER: the agent found no mailbox for the address
+    if out.status.code() == Some(67) {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("no mailbox for {account} on this server"),
+        ));
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    let err = err.lines().last().unwrap_or("").trim();
+    Err(io::Error::other(if err.is_empty() {
+        "local delivery (dovecot-lda) failed".to_string()
+    } else {
+        format!("local delivery (dovecot-lda) failed: {err}")
+    }))
 }
 
 /// Send an already-assembled RFC822 message: to its own recipients (`to` None)
@@ -400,6 +413,39 @@ pub fn valid_recipient(s: &str) -> bool {
         && s.bytes().all(|b| {
             b.is_ascii_alphanumeric() || matches!(b, b'@' | b'.' | b'_' | b'-' | b'+' | b'=')
         })
+}
+
+/// Which of a message's logged recipients ("a@x.it, b@y.com") have a mailbox
+/// on this server: the ones whose domain is in the local domains list
+/// (case-insensitive, duplicates folded). The rest come back as `remote`,
+/// malformed entries are dropped with them.
+pub fn split_local_recipients(
+    to_address: &str,
+    local_domains: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let mut local = Vec::new();
+    let mut remote = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for raw in to_address.split(',') {
+        let addr = raw
+            .trim()
+            .trim_matches(|c| c == '<' || c == '>')
+            .to_ascii_lowercase();
+        if addr.is_empty() || !seen.insert(addr.clone()) {
+            continue;
+        }
+        let dom = addr.rsplit('@').next().unwrap_or("");
+        let is_local = valid_recipient(&addr)
+            && local_domains
+                .iter()
+                .any(|d| d.trim().eq_ignore_ascii_case(dom));
+        if is_local {
+            local.push(addr);
+        } else {
+            remote.push(addr);
+        }
+    }
+    (local, remote)
 }
 
 // ---- admin quarantine browser + purge -----------------------------------------
@@ -717,6 +763,50 @@ pub fn cutoff_days_ago(days: u32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deliver_inbox_reports_a_missing_mailbox_and_the_agent_error() {
+        let dir = std::env::temp_dir().join(format!("msfe-lda-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let lda = dir.join("lda");
+        crate::testutil::write_script_ready(
+            &lda,
+            "#!/bin/sh\ncat >/dev/null\ncase \"$2\" in\n ok@x.it) exit 0;;\n gone@x.it) echo \"user doesn't exist\" >&2; exit 67;;\n *) echo \"disk quota\" >&2; exit 75;;\nesac\n",
+        );
+        let lda = lda.to_str().unwrap();
+        assert!(deliver_inbox(b"Subject: x\n\nbody\n", lda, "ok@x.it").is_ok());
+        let e = deliver_inbox(b"x", lda, "gone@x.it").unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(e.to_string(), "no mailbox for gone@x.it on this server");
+        let e = deliver_inbox(b"x", lda, "full@x.it").unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "local delivery (dovecot-lda) failed: disk quota"
+        );
+        assert!(deliver_inbox(b"x", lda, "-oQ@x.it").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_recipients_follow_the_local_domains_list() {
+        let doms = vec!["Example.it".to_string(), "other.org".to_string()];
+        let (l, r) = split_local_recipients(
+            "Info@example.it, bob@libero.it, <info@example.it>, x@other.org, ",
+            &doms,
+        );
+        assert_eq!(l, vec!["info@example.it", "x@other.org"]);
+        assert_eq!(r, vec!["bob@libero.it"]);
+        // nothing local: everything is reported, nothing delivered
+        let (l, r) = split_local_recipients("a@libero.it", &doms);
+        assert!(l.is_empty());
+        assert_eq!(r, vec!["a@libero.it"]);
+        // a malformed address never reaches the delivery agent as local
+        let (l, r) = split_local_recipients("-oQ/tmp@example.it", &doms);
+        assert!(l.is_empty());
+        assert_eq!(r.len(), 1);
+        assert_eq!(split_local_recipients("", &doms), (vec![], vec![]));
+    }
 
     /// Fixture matching production layouts: `<date>/spam/<id>` flat files and
     /// `<date>/<id>/message` held dirs, plus junk that must be ignored.

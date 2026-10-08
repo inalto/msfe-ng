@@ -1158,6 +1158,20 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             let r = quarantine::purge_items(Path::new(&cfg.quarantine_dir), &items, dry);
             purge_json(r, dry)
         }
+        ("POST", "/api/quarantine/deliver") => {
+            let v = Json::parse(&req.body).unwrap_or(Json::Null);
+            let ids: Vec<String> = v
+                .get("items")
+                .and_then(|j| match j {
+                    Json::Array(a) => Some(a.iter().map(|it| it.str_field("id")).collect()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            if ids.is_empty() {
+                return Response::json(400, r#"{"error":"no messages selected"}"#);
+            }
+            quarantine_deliver(cfg, &ids)
+        }
         ("POST", "/api/quarantine/purge-older") => {
             let v = Json::parse(&req.body).unwrap_or(Json::Null);
             let dry = matches!(v.get("dry"), Some(Json::Bool(true)));
@@ -1786,6 +1800,74 @@ fn quarantine_preview(cfg: &Config, date: &str, id: &str) -> String {
         }
         Err(e) => format!("{note}cannot read message: {e}"),
     }
+}
+
+/// Copy quarantined messages straight into the INBOX of their logged
+/// recipients that have a mailbox here (domain in the local domains list),
+/// through the Dovecot delivery agent — no re-scan, no re-send. One result
+/// line per message and recipient; remote recipients are reported, not mailed.
+fn quarantine_deliver(cfg: &Config, ids: &[String]) -> Response {
+    let local = msfe_core::sync::gather_domains(None);
+    let mut results = Vec::new();
+    let mut delivered = 0usize;
+    for id in ids {
+        let line = |to: &str, result: &str| {
+            Json::Object(vec![
+                ("id".into(), Json::str(id)),
+                ("to".into(), Json::str(to)),
+                ("result".into(), Json::str(result)),
+            ])
+        };
+        if !service::valid_exim_id(id) {
+            results.push(line("", "bad message id"));
+            continue;
+        }
+        let to_address = stats::to_address_of(cfg, id)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let (locals, remotes) = quarantine::split_local_recipients(&to_address, &local);
+        if locals.is_empty() {
+            results.push(line(
+                &to_address,
+                if to_address.is_empty() {
+                    "no recipient in the message log — use Messages → Deliver to INBOX and type the account"
+                } else {
+                    "no recipient hosted on this server — use Messages → Deliver to INBOX and type the account"
+                },
+            ));
+            continue;
+        }
+        let Some(bytes) = read_full_message(cfg, id) else {
+            results.push(line(
+                &locals.join(", "),
+                "the message is no longer available (only the removed attachment is stored and there is no archive copy)",
+            ));
+            continue;
+        };
+        for to in &locals {
+            match quarantine::deliver_inbox(&bytes, &cfg.dovecot_lda, to) {
+                Ok(()) => {
+                    delivered += 1;
+                    results.push(line(to, "copied to INBOX"));
+                }
+                Err(e) => results.push(line(to, &e.to_string())),
+            }
+        }
+        for to in &remotes {
+            results.push(line(to, "skipped: not hosted on this server"));
+        }
+    }
+    Response::json(
+        200,
+        &Json::Object(vec![
+            ("ok".into(), Json::Bool(delivered > 0)),
+            ("delivered".into(), Json::Int(delivered as i64)),
+            ("total".into(), Json::Int(ids.len() as i64)),
+            ("results".into(), Json::Array(results)),
+        ])
+        .to_string(),
+    )
 }
 
 fn purge_json(r: msfe_core::quarantine::PurgeReport, dry: bool) -> Response {

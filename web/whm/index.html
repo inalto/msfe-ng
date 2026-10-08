@@ -2206,11 +2206,12 @@ async function renderQuarantine(){
   let ENTRIES=[],SEL=new Set();
   const key=e=>e.date+'/'+e.id;
   const purgeSel=el('button',{class:'act danger'},'Purge selected');
+  const inboxSel=el('button',{class:'act',title:'Copy the selected messages straight into the INBOX of their recipients hosted on this server (Dovecot delivery, no re-scan)'},'Copy to INBOX');
   const days=el('input',{type:'number',min:'1',value:'30',style:'width:5rem'});
   const prevBtn=el('button',{class:'act plain'},'Preview');
   const oldBtn=el('button',{class:'act danger'},'Purge older');
   const out=el('pre',{class:'log',style:'display:none'},'');
-  const ctl=el('div',{class:'ctl'},purgeSel,
+  const ctl=el('div',{class:'ctl'},inboxSel,purgeSel,
     el('span',{class:'muted',style:'margin-left:1rem'},'Older than'),days,
     el('span',{class:'muted'},'days:'),prevBtn,oldBtn,totals);
   // search: the whole quarantine, not just the loaded page — the daemon matches
@@ -2236,7 +2237,7 @@ async function renderQuarantine(){
     if(!ENTRIES.length){table.append(el('tr',{},el('td',{colspan:'9',class:'empty'},filtering()?'Nothing in the quarantine matches the search.':'Quarantine is empty.')));return;}
     ENTRIES.forEach(e=>{
       const cb=el('input',{type:'checkbox',...(SEL.has(key(e))?{checked:'checked'}:{})});
-      cb.onchange=()=>{cb.checked?SEL.add(key(e)):SEL.delete(key(e));purgeSel.textContent=SEL.size?`Purge selected (${SEL.size})`:'Purge selected';};
+      cb.onchange=()=>{cb.checked?SEL.add(key(e)):SEL.delete(key(e));purgeSel.textContent=SEL.size?`Purge selected (${SEL.size})`:'Purge selected';inboxSel.textContent=SEL.size?`Copy to INBOX (${SEL.size})`:'Copy to INBOX';};
       const row=el('tr',{},el('td',{},cb),
         el('td',{},fmtD(e.date)),
         el('td',{style:'font-size:.85em'},idCopy(e.id)),
@@ -2265,13 +2266,25 @@ async function renderQuarantine(){
     if(qfrom.value)p.set('from',qfrom.value);if(qto.value)p.set('to',qto.value);
     const d=await api('/api/quarantine?'+p.toString());
     if(d&&d.error){toast(d.error);}
-    ENTRIES=(d&&d.entries)||[];SEL=new Set();purgeSel.textContent='Purge selected';
+    ENTRIES=(d&&d.entries)||[];SEL=new Set();purgeSel.textContent='Purge selected';inboxSel.textContent='Copy to INBOX';
     qclear.style.display=filtering()?'':'none';
     totals.textContent=d&&!d.error?(d.filtered
       ?`${d.total} match(es), ${fmtB(d.bytes)} — of ${d.disk_total} item(s), ${fmtB(d.disk_bytes)} on disk${d.truncated?' — showing first '+ENTRIES.length:''}`
       :`${d.total} item(s), ${fmtB(d.bytes)}${d.truncated?' — showing first '+ENTRIES.length:''}`):'';
     draw();
   }
+  inboxSel.onclick=async()=>{
+    if(!SEL.size)return toast('Select messages first');
+    const sel=ENTRIES.filter(e=>SEL.has(key(e)));
+    const lines=sel.map(e=>`${e.id} → ${e.to||'(no recipient in the message log)'}`);
+    if(!confirm(`Copy ${sel.length} message(s) into the INBOX of their recipients?\n\n${lines.slice(0,12).join('\n')}${lines.length>12?`\n… and ${lines.length-12} more`:''}\n\nThe copy goes straight into the mailbox through Dovecot: it is not re-scanned and not re-sent. Recipients not hosted on this server are skipped.`))return;
+    inboxSel.disabled=true;
+    const r=await api('/api/quarantine/deliver',{method:'POST',body:{items:sel.map(e=>({date:e.date,id:e.id}))}});
+    inboxSel.disabled=false;
+    out.style.display='';
+    out.textContent=r&&r.results?(r.results.map(x=>`${x.id}  ${x.to||'—'}: ${x.result}`).join('\n')||'nothing to do'):(r&&r.error||'no response');
+    toast(r&&typeof r.delivered==='number'?`${r.delivered} cop${r.delivered===1?'y':'ies'} delivered to INBOX`:(r&&r.error||'copy failed'));
+  };
   purgeSel.onclick=async()=>{
     if(!SEL.size)return toast('Select messages first');
     if(!confirm(`Permanently delete ${SEL.size} quarantined message(s) from disk?`))return;

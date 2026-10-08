@@ -19,6 +19,18 @@ works on the matches, which makes "everything from this sender" or "all held
 mail of that week" a two-click clean-up. Enter searches at once, Esc clears
 the text.
 
+- **Copy to INBOX** — put the chosen messages straight into the INBOX of
+  their recipients, with a confirmation that lists each message and its
+  recipients. The copy is handed to Dovecot's delivery agent: it is not
+  re-scanned, so a message held for a false positive (a blocked attachment,
+  a spam score) arrives exactly as it was sent, and it is not re-sent, so
+  nothing leaves the server. Only recipients whose domain is hosted here get
+  a copy; the others are listed as skipped in the output below the buttons,
+  as is an address that has no mailbox. When a held entry holds only the
+  removed attachment, the archive copy of the message is what gets
+  delivered; without one the row says the message is no longer available.
+  For a recipient that is not the logged one, use **Deliver to INBOX** in
+  [Messages](Messages) and type the account.
 - **Purge selected** — delete the chosen copies permanently.
 - **Older than N days → Preview** — a dry-run that counts what would go;
   **Purge older** then deletes it.

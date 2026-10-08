@@ -569,6 +569,16 @@ pub fn to_domain_of(cfg: &Config, message_id: &str) -> io::Result<Option<String>
     Ok(rows.first().and_then(|r| r.first()).cloned())
 }
 
+/// The logged recipient list of a message ("a@x.it, b@y.com"), if logged.
+pub fn to_address_of(cfg: &Config, message_id: &str) -> io::Result<Option<String>> {
+    let sql = format!(
+        "SELECT to_address FROM maillog WHERE message_id={} LIMIT 1",
+        sql_quote(message_id)
+    );
+    let rows = db::query(cfg, &sql)?;
+    Ok(rows.first().and_then(|r| r.first()).cloned())
+}
+
 /// Clamp a query-string integer to a sane range with a default.
 pub fn clamp_int(raw: Option<&str>, default: u32, min: u32, max: u32) -> u32 {
     raw.and_then(|s| s.parse::<u32>().ok())
