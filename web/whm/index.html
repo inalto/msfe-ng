@@ -1258,10 +1258,13 @@ async function renderMessages(){
   loadList();
 }
 
-// Full single-message view (its own screen).
-async function renderMessageView(id){
+// Full single-message view (its own screen). `from` is where Back returns to:
+// 'quarantine' (the on-disk browser) or, by default, the Messages tab.
+async function renderMessageView(id,from){
   const v=$('#view');v.innerHTML='';
-  const back=Object.assign(el('button',{class:'act plain'},'← Back to messages'),{onclick:()=>{location.hash='';renderMessages();}});
+  const fromQ=from==='quarantine';
+  document.querySelectorAll('#tabs button').forEach(x=>x.setAttribute('aria-selected',x.dataset.tab===(fromQ?'quarantine':'messages')));
+  const back=Object.assign(el('button',{class:'act plain'},fromQ?'← Back to quarantine':'← Back to messages'),{onclick:()=>{location.hash='';fromQ?renderQuarantine():renderMessages();}});
   const banBtn=el('button',{class:'act plain',style:'display:none'},'Ban rule…');
   v.append(el('div',{class:'ctl'},back,banBtn));
   const card=el('div',{class:'card'},el('h2',{},'Message '+id),el('div',{class:'muted'},'Loading…'));v.append(card);
@@ -2193,6 +2196,7 @@ async function renderLogs(){
 }
 
 // ---- Quarantine (on-disk browser + purge) ------------------------------------
+const QUAR_F={q:'',kind:'',from:'',to:''}; // the search survives a trip to the message screen
 async function renderQuarantine(){
   const v=$('#view');v.innerHTML='';
   const card=el('div',{class:'card'},el('h2',{},'Quarantine contents'),
@@ -2216,9 +2220,9 @@ async function renderQuarantine(){
     el('span',{class:'muted'},'days:'),prevBtn,oldBtn,totals);
   // search: the whole quarantine, not just the loaded page — the daemon matches
   // the id on disk and sender / recipient / subject in the message log
-  const qtext=el('input',{placeholder:'search sender / recipient / subject / id…',style:'flex:1;min-width:14rem;max-width:24rem',autocomplete:'off',spellcheck:'false'});
-  const qkind=el('select');[['','spam and held'],['spam','spam only'],['held','held only']].forEach(([v,l])=>qkind.append(el('option',{value:v},l)));
-  const qfrom=el('input',{type:'date',title:'from date'}),qto=el('input',{type:'date',title:'to date'});
+  const qtext=el('input',{placeholder:'search sender / recipient / subject / id…',style:'flex:1;min-width:14rem;max-width:24rem',autocomplete:'off',spellcheck:'false',value:QUAR_F.q});
+  const qkind=el('select');[['','spam and held'],['spam','spam only'],['held','held only']].forEach(([v,l])=>qkind.append(el('option',{value:v,...(v===QUAR_F.kind?{selected:'selected'}:{})},l)));
+  const qfrom=el('input',{type:'date',title:'from date',value:QUAR_F.from}),qto=el('input',{type:'date',title:'to date',value:QUAR_F.to});
   const qgo=el('button',{class:'act plain'},'Search');
   const qclear=el('button',{class:'act plain',style:'display:none'},'Clear');
   const search=el('div',{class:'ctl'},qtext,qkind,el('span',{class:'muted',style:'font-size:.8rem'},'from'),qfrom,el('span',{class:'muted',style:'font-size:.8rem'},'to'),qto,qgo,qclear);
@@ -2252,7 +2256,16 @@ async function renderQuarantine(){
       table.append(row);
     });
   }
-  async function view(e){
+  function view(e){
+    // a log row means the full message screen has something to show; a copy
+    // no database row knows about only has its stored headers
+    if('to' in e){
+      if(PREFS.view_new_window){window.open(location.pathname.split('?')[0]+(location.search||'')+'#qmsg='+encodeURIComponent(e.id),'_blank');return;}
+      location.hash='#qmsg='+encodeURIComponent(e.id);renderMessageView(e.id,'quarantine');return;
+    }
+    viewHeaders(e);
+  }
+  async function viewHeaders(e){
     const m=modal(`${e.id} — ${fmtD(e.date)}`);
     m.body.append(el('div',{class:'muted',style:'font-size:.8rem;margin-bottom:.5rem'},'Message headers as stored in the quarantine.'));
     const pre=el('pre',{class:'log'},'Loading…');m.body.append(pre);
@@ -2262,6 +2275,7 @@ async function renderQuarantine(){
   async function load(){
     table.innerHTML='';table.append(el('tr',{},el('td',{class:'empty'},'Loading…')));
     const p=new URLSearchParams({limit:'2000'});
+    Object.assign(QUAR_F,{q:qtext.value.trim(),kind:qkind.value,from:qfrom.value,to:qto.value});
     if(qtext.value.trim())p.set('q',qtext.value.trim());if(qkind.value)p.set('kind',qkind.value);
     if(qfrom.value)p.set('from',qfrom.value);if(qto.value)p.set('to',qto.value);
     const d=await api('/api/quarantine?'+p.toString());
@@ -4976,10 +4990,12 @@ async function refreshDoctor(){
 refreshDoctor();
 setInterval(refreshDoctor,60000);
 
-// deep link: #msg=<id> opens the full message view directly
+// deep link: #msg=<id> opens the full message view directly, #qmsg=<id> the
+// same screen with Back leading to the Quarantine tab
 if(location.hash.startsWith('#msg=')){
-  document.querySelectorAll('#tabs button').forEach(x=>x.setAttribute('aria-selected',x.dataset.tab==='messages'));
   renderMessageView(decodeURIComponent(location.hash.slice(5)));
+} else if(location.hash.startsWith('#qmsg=')){
+  renderMessageView(decodeURIComponent(location.hash.slice(6)),'quarantine');
 } else {
   renderDash();
 }
