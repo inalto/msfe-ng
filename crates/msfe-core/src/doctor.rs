@@ -454,23 +454,36 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "filename.rules.conf".into());
             let block = p7m_allow_block();
+            let (summary, from, to) = if f.old_allow {
+                (
+                    format!("replace the earlier .p7m allow line in {rel} with:\n{P7M_ALLOW}"),
+                    P7M_OLD_ALLOW.to_string(),
+                    P7M_ALLOW.to_string(),
+                )
+            } else {
+                (
+                    format!(
+                        "insert before the \"hide real filename extension\" deny in {rel}:\n{block}"
+                    ),
+                    f.line.clone(),
+                    format!("{block}\n{}", f.line),
+                )
+            };
             out.push(
                 check(
                     P7M_CHECK,
                     false,
                     Level::Warn,
                     p7m_detail(&f),
-                    "doctor --apply \"signed documents (.p7m) blocked\" (or the Apply button) inserts, before the generic double-extension deny in filename.rules.conf, an allow for the document types that cannot run code; docx/xlsx/macro formats and executables stay blocked",
+                    "doctor --apply \"signed documents (.p7m) blocked\" (or the Apply button) inserts, before the generic double-extension deny in filename.rules.conf, an allow for the document types that cannot run code (pdf, images, text, XBRL, OpenDocument, docx/xlsx/pptx); macro formats (docm/xlsm, legacy doc/xls) and executables stay blocked",
                 )
                 .url(P7M_WIKI_URL)
                 .propose(
-                    format!(
-                        "insert before the \"hide real filename extension\" deny in {rel}:\n{block}"
-                    ),
+                    summary,
                     Proposal::LineReplace {
                         id: format!("ms:{rel}"),
-                        to: format!("{block}\n{}", f.line),
-                        from: f.line,
+                        from,
+                        to,
                     },
                 ),
             );
@@ -1575,14 +1588,21 @@ pub const P7M_CHECK: &str = "signed documents (.p7m) blocked";
 const P7M_WIKI_URL: &str =
     "https://github.com/inalto/msfe-ng/wiki/Troubleshooting#signed-documents-p7m-are-blocked-as-infected";
 /// Names a CAdES-signed document gets: the original name plus `.p7m`.
-const P7M_SAMPLES: [&str; 2] = ["x.pdf.p7m", "x.xbrl.p7m"];
+const P7M_SAMPLES: [&str; 3] = ["x.pdf.p7m", "x.xbrl.p7m", "x.docx.p7m"];
+/// The allow line of the block as released before docx/xlsx/pptx joined it;
+/// Apply upgrades it in place instead of adding a second block.
+const P7M_OLD_ALLOW: &str =
+    "allow\t\\.(pdf|xml|xbrl|txt|csv|rtf|jpe?g|png|tiff?|odt|ods)\\.p7m$\t-\t-";
+/// The allow line Apply writes (see [`p7m_allow_block`]).
+const P7M_ALLOW: &str =
+    "allow\t\\.(pdf|xml|xbrl|txt|csv|rtf|jpe?g|png|tiff?|odt|ods|odp|docx|xlsx|pptx)\\.p7m$\t-\t-";
 
 /// The allow rule Apply inserts: document types that cannot run code.
 fn p7m_allow_block() -> String {
     [
         "# Digitally signed documents: Italian/EU CAdES signatures append .p7m to the original name (file.pdf.p7m).",
-        "# Allow the document types that cannot run code; everything else with a double extension is still denied below.",
-        "allow\t\\.(pdf|xml|xbrl|txt|csv|rtf|jpe?g|png|tiff?|odt|ods)\\.p7m$\t-\t-",
+        "# Allow the document types that cannot run code (Office formats without macros included); everything else with a double extension is still denied below.",
+        P7M_ALLOW,
     ]
     .join("\n")
 }
@@ -1593,6 +1613,9 @@ struct P7mFinding {
     line: String,
     /// An `allow … p7m` line placed after it (it can never fire).
     later_allow: Option<String>,
+    /// The earlier release's allow line sits before it: upgrade that line
+    /// rather than inserting a second block.
+    old_allow: bool,
 }
 
 fn is_hiding_rule(r: &crate::msgrammar::FilenameRule) -> bool {
@@ -1629,9 +1652,12 @@ fn p7m_finding(perl: &[String], text: &str) -> Option<P7mFinding> {
         .iter()
         .find(|r| r.action == crate::msgrammar::Action::Allow && r.pattern.contains("p7m"))
         .map(|r| r.to_line());
+    let pos = |needle: &str| text.lines().position(|l| l == needle);
+    let old_allow = matches!((pos(P7M_OLD_ALLOW), pos(line)), (Some(o), Some(h)) if o < h);
     Some(P7mFinding {
         line: line.to_string(),
         later_allow,
+        old_allow,
     })
 }
 
@@ -1639,6 +1665,9 @@ fn p7m_detail(f: &P7mFinding) -> String {
     let mut d = String::from("Italian and EU digitally signed files end in .p7m (file.pdf.p7m); MailScanner's stock rule \"Found possible filename hiding\" in filename.rules.conf reads that as a hidden double extension, removes the attachment and the sender gets an infected-mail notice for a legitimate signed document");
     if let Some(a) = &f.later_allow {
         d.push_str(&format!(". An allow for p7m is already there but sits after that deny ({a}) — the first matching rule wins, so it never fires"));
+    }
+    if f.old_allow {
+        d.push_str(". The allow line from an earlier release is in place but predates docx/xlsx/pptx, so signed Office documents (file.docx.p7m) are still refused");
     }
     d
 }
@@ -3044,9 +3073,13 @@ mod tests {
     /// Applying a proposal the way `apply` does (every `from` line becomes `to`).
     fn applied(text: &str) -> String {
         let f = p7m_finding(&perl(), text).expect("check fires");
-        let to = format!("{}\n{}", p7m_allow_block(), f.line);
+        let (from, to) = if f.old_allow {
+            (P7M_OLD_ALLOW.to_string(), P7M_ALLOW.to_string())
+        } else {
+            (f.line.clone(), format!("{}\n{}", p7m_allow_block(), f.line))
+        };
         text.lines()
-            .map(|l| if l == f.line { to.as_str() } else { l })
+            .map(|l| if l == from { to.as_str() } else { l })
             .map(|l| format!("{l}\n"))
             .collect()
     }
@@ -3087,10 +3120,18 @@ mod tests {
             "x.xbrl.p7m",
             "x.jpg.p7m",
             "Verbale 2025 .pdf.p7m",
+            "x.docx.p7m",
+            "dichiarazione sostitutiva 05.10.2026.docx.p7m",
         ] {
             assert_eq!(verdict(&new, ok), "allow", "{ok}");
         }
-        for bad in ["x.docx.p7m", "x.exe.p7m", "invoice.pdf.exe", "x.xlsm.p7m"] {
+        for bad in [
+            "x.docm.p7m",
+            "x.doc.p7m",
+            "x.exe.p7m",
+            "invoice.pdf.exe",
+            "x.xlsm.p7m",
+        ] {
             assert_eq!(verdict(&new, bad), "deny", "{bad}");
         }
         assert!(new.find("allow\t\\.(pdf").unwrap() < new.find("deny\t\\.[a-z]").unwrap());
@@ -3103,7 +3144,7 @@ mod tests {
         // an allow before the deny
         let before = STOCK_RULES.replacen(
             "deny\t\\.[a-z]",
-            "allow\t\\.(pdf|xbrl)\\.p7m$\t-\t-\ndeny\t\\.[a-z]",
+            "allow\t\\.(pdf|xbrl|docx)\\.p7m$\t-\t-\ndeny\t\\.[a-z]",
             1,
         );
         assert!(p7m_finding(&perl(), &before).is_none());
@@ -3112,6 +3153,30 @@ mod tests {
         // an admin's own deliberate deny of p7m decides first
         let own = format!("deny\t\\.p7m$\tno signed files\tpolicy\n{STOCK_RULES}");
         assert!(p7m_finding(&perl(), &own).is_none());
+    }
+
+    #[test]
+    fn p7m_upgrades_the_earlier_release_allow_line_in_place() {
+        let older = STOCK_RULES.replacen(
+            "deny\t\\.[a-z]",
+            &format!("# Digitally signed documents\n{P7M_OLD_ALLOW}\ndeny\t\\.[a-z]"),
+            1,
+        );
+        assert_eq!(verdict(&older, "x.pdf.p7m"), "allow");
+        assert_eq!(verdict(&older, "x.docx.p7m"), "deny");
+        let f = p7m_finding(&perl(), &older).expect("fires for docx");
+        assert!(f.old_allow);
+        assert!(p7m_detail(&f).contains("predates docx"));
+        let new = applied(&older);
+        assert_eq!(new.matches("allow\t\\.(pdf").count(), 1, "{new}");
+        assert!(!new.contains(P7M_OLD_ALLOW));
+        assert_eq!(verdict(&new, "x.docx.p7m"), "allow");
+        assert_eq!(verdict(&new, "x.docm.p7m"), "deny");
+        assert!(p7m_finding(&perl(), &new).is_none());
+        // the same line after the deny is a later_allow, not an upgrade target
+        let late = format!("{STOCK_RULES}{P7M_OLD_ALLOW}\n");
+        let f = p7m_finding(&perl(), &late).expect("fires");
+        assert!(!f.old_allow && f.later_allow.is_some());
     }
 
     #[test]

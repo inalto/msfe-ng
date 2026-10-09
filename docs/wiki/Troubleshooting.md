@@ -117,22 +117,30 @@ bottom and the first match wins, so an `allow \.pdf\.p7m$` appended at the end
 of the file never fires.
 
 **The check.** The doctor check *signed documents (.p7m) blocked* (Warn)
-fires when that stock rule would refuse `x.pdf.p7m` or `x.xbrl.p7m`; it is
-silent once they are allowed, or when the rule that refuses them is your own.
-Apply it with the banner button or
+fires when that stock rule would refuse `x.pdf.p7m`, `x.xbrl.p7m` or
+`x.docx.p7m`; it is silent once they are allowed, or when the rule that
+refuses them is your own. Apply it with the banner button or
 `msfe-ng doctor --apply "signed documents (.p7m) blocked"`: it inserts this
 block right before the generic deny (validated, previous version kept,
 applying twice changes nothing):
 
 ```
-allow	\.(pdf|xml|xbrl|txt|csv|rtf|jpe?g|png|tiff?|odt|ods)\.p7m$	-	-
+allow	\.(pdf|xml|xbrl|txt|csv|rtf|jpe?g|png|tiff?|odt|ods|odp|docx|xlsx|pptx)\.p7m$	-	-
 ```
 
+A host that applied the shorter line of an earlier release (without
+`docx|xlsx|pptx`) gets the check again for `x.docx.p7m`; Apply then replaces
+that one line in place rather than adding a second block.
+
 **What stays blocked.** Only document types that cannot run code are
-allowed. `file.docx.p7m`, `.xlsx`, macro formats and executables
+allowed: PDF, images, text, XML/XBRL, OpenDocument and the Office formats
+that cannot hold macros (`.docx`, `.xlsx`, `.pptx`). Macro formats
+(`file.docm.p7m`, `.xlsm`, legacy `.doc`/`.xls`), executables
 (`file.exe.p7m`) and every other double extension (`invoice.pdf.exe`) are
 still refused by the rules below. Your own later `allow`/`deny` lines for
-`.p7m` are left untouched.
+`.p7m` are left untouched; an explicit `deny \.docx\.p7m$` of your own
+placed after the block still wins for that type, since nothing later is
+rewritten.
 
 ## An auto-ban hit a legitimate sender
 
