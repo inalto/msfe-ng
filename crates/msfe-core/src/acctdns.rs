@@ -538,19 +538,70 @@ fn whmapi1(
     args: &[String],
     timeout: Duration,
 ) -> Result<Json, String> {
-    let text = if cp.live() {
+    let (stdout, stderr) = if cp.live() {
         let mut c = Command::new("whmapi1");
         c.arg("--output=json").arg(func).args(args);
         let out = run_with_timeout(&mut c, timeout).map_err(|e| format!("whmapi1: {e}"))?;
         if out.timed_out {
             return Err(format!("whmapi1 {func} timed out"));
         }
-        format!("{}{}", out.stdout, out.stderr)
+        (out.stdout, out.stderr)
     } else {
-        cp.read(&format!("_cmd/{name}.txt"))
-            .ok_or_else(|| format!("no fixture _cmd/{name}.txt"))?
+        (
+            cp.read(&format!("_cmd/{name}.txt"))
+                .ok_or_else(|| format!("no fixture _cmd/{name}.txt"))?,
+            String::new(),
+        )
     };
-    Json::parse(&text).map_err(|e| format!("whmapi1 {func}: unreadable output ({e})"))
+    parse_api_output(&stdout, &stderr).map_err(|e| format!("whmapi1 {func}: {e}"))
+}
+
+/// The JSON of an API reply: the JSON document on stdout, whatever the call
+/// also printed around it — hooks and warnings go to stderr, but some land on
+/// stdout after the document (`create_subdomain` does that) — ignored. The
+/// error carries the first line of that extra text.
+fn parse_api_output(stdout: &str, stderr: &str) -> Result<Json, String> {
+    if let Ok(v) = Json::parse(stdout) {
+        return Ok(v);
+    }
+    // the document, then trailing text: take the balanced top-level object
+    let t = stdout.trim_start();
+    if t.starts_with('{') {
+        let mut depth = 0usize;
+        let mut in_str = false;
+        let mut esc = false;
+        for (i, c) in t.char_indices() {
+            match c {
+                '\\' if in_str => esc = !esc,
+                '"' if !esc => in_str = !in_str,
+                '{' if !in_str => depth += 1,
+                '}' if !in_str => {
+                    depth -= 1;
+                    if depth == 0 {
+                        if let Ok(v) = Json::parse(&t[..=i]) {
+                            return Ok(v);
+                        }
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            if c != '\\' {
+                esc = false;
+            }
+        }
+    }
+    let noise = stdout
+        .lines()
+        .chain(stderr.lines())
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('{'))
+        .unwrap_or("");
+    Err(if noise.is_empty() {
+        "unreadable output".to_string()
+    } else {
+        format!("unreadable output ({noise})")
+    })
 }
 
 /// `metadata.result == 1` → cPanel's `reason`, else the reason as the error.
@@ -4472,6 +4523,26 @@ mod tests {
             .unwrap_err()
             .error
             .contains("needs cPanel"));
+    }
+
+    #[test]
+    fn api_output_is_the_json_document_whatever_follows_it() {
+        let doc = r#"{"metadata":{"result":1,"reason":"OK"},"data":{"x":"a}b"}}"#;
+        assert!(parse_api_output(doc, "").is_ok());
+        // a warning after the document on stdout (create_subdomain)
+        let v = parse_api_output(
+            &format!("{doc}\nwarn [create_subdomain] Something to know\n"),
+            "",
+        )
+        .unwrap();
+        assert_eq!(meta_ok(&v).unwrap(), "OK");
+        // stderr noise is ignored
+        assert!(parse_api_output(doc, "hook: deprecated\n").is_ok());
+        // no document: the first line of noise is the reason
+        let e = parse_api_output("", "Can't locate Foo.pm\nmore\n").unwrap_err();
+        assert_eq!(e, "unreadable output (Can't locate Foo.pm)");
+        let e = parse_api_output("{\"metadata\":", "").unwrap_err();
+        assert_eq!(e, "unreadable output");
     }
 
     // ---- the MTA-STS policy site ----------------------------------------------
