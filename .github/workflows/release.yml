@@ -13,6 +13,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Tag matches Cargo.toml
+        # The tarball is named after Cargo.toml, and the installer downloads
+        # msfe-ng-<tag>.tar.gz: a tag on a commit without the version bump
+        # would publish a release whose asset nobody can fetch.
+        run: |
+          ver="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -1)"
+          [ "v$ver" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $ver — bump the version first"; exit 1; }
       - name: Build release tarball
         run: sh packaging/dist.sh
       - name: Publish GitHub release
