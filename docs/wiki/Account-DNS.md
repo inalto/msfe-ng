@@ -52,7 +52,10 @@ passed.
 
 **Repair** on a row (or **Apply** on one check) uses cPanel's own installers.
 Nothing writes a zone file by hand, and nothing runs without a confirmation
-that states the change and shows the record.
+that states the change and shows the record. The same installers are behind
+**Apply this fix…** on an SPF, DKIM or DMARC row of the [Address
+test](Delivery-test), which offers it only when this view reports the record
+as repairable.
 
 | Check | What runs |
 |---|---|

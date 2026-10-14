@@ -2573,6 +2573,10 @@ function copyBtn(text){const b=el('button',{class:'copybtn',title:'Copy'},'copy'
 function deliveryRenderer(into){
   const shown=new Map(); // check key → row
   const scopes={};
+  // Fix boxes keep a slot for an Apply button; setRepair(fn) fills every slot
+  // (fn(check) → node or null) now and for the rows still to come.
+  const slots=[];let repair=null;
+  function fillSlot(sl){sl.holder.innerHTML='';const n=repair&&repair(sl.c);if(n)sl.holder.append(n);}
   DLV_SCOPES.forEach(([id,title,hint])=>{
     const sec=el('section',{class:'card dlv-scope','data-scope':id,style:'display:none'},el('h2',{},title),el('div',{class:'muted',style:'font-size:.8rem;margin-bottom:.4rem'},hint));
     const cats=el('div');sec.append(cats);
@@ -2612,6 +2616,8 @@ function deliveryRenderer(into){
       if(c.fix.location)f.append(el('div',{class:'muted'},'Where: '+c.fix.location));
       if(c.fix.command)f.append(el('div',{class:'dlv-rec'},el('pre',{class:'log mono'},c.fix.command),copyBtn(c.fix.command)));
       if(c.fix.url)f.append(el('div',{},el('a',{href:c.fix.url,target:'_blank',rel:'noopener'},c.fix.url)));
+      const holder=el('div',{class:'dlv-apply-slot'});f.append(holder);
+      const sl={c,holder};slots.push(sl);fillSlot(sl);
       cell.append(f);
     }
     (c.evidence||[]).forEach(e=>cell.append(el('div',{class:'muted',style:'font-size:.76rem;margin-top:.4rem'},e.label),el('pre',{class:'log'},e.text)));
@@ -2641,9 +2647,73 @@ function deliveryRenderer(into){
       });
       return added;
     },
-    reset(){shown.clear();Object.values(scopes).forEach(s=>{s.sec.style.display='none';s.cats.innerHTML='';s.groups={};s.na=0;s.naWrap.innerHTML='';s.naWrap.append(el('summary',{class:'muted'},'not applicable'));});},
+    reset(){shown.clear();slots.length=0;Object.values(scopes).forEach(s=>{s.sec.style.display='none';s.cats.innerHTML='';s.groups={};s.na=0;s.naWrap.innerHTML='';s.naWrap.append(el('summary',{class:'muted'},'not applicable'));});},
+    setRepair(fn){repair=fn;slots.forEach(fillSlot);},
     count(){return shown.size;}
   };
+}
+
+// ---- Address test → apply a DNS fix ------------------------------------------
+// A row whose fix is the SPF, DKIM or DMARC record of the tested domain gets an
+// Apply button when Account DNS (the same cPanel installers behind its Repair)
+// reports that record as fixable from this server. Everything else keeps the
+// copy button only.
+const DLV_REPAIR_IDS={'spf.record':'spf','spf.eval':'spf','spf.all':'spf','out.spf_includes_ip':'spf','dkim.discovery':'dkim','out.dkim_cpanel':'dkim','dmarc.record':'dmarc','dmarc.syntax':'dmarc','dmarc.policy':'dmarc'};
+const DLV_REPAIR_LABEL={spf:'SPF',dkim:'DKIM',dmarc:'DMARC'};
+// ctx: {domain, acct (the Account DNS row), applied {what:true}, onApplied(row), rerun()}
+function dlvRepairButton(c,ctx){
+  const what=DLV_REPAIR_IDS[c.id];
+  if(!what||!ctx.acct||!(c.verdict==='fail'||c.verdict==='warn'))return null;
+  if(ctx.applied[what])return el('span',{class:'muted',style:'font-size:.78rem'},DLV_REPAIR_LABEL[what]+' fix applied — run the test again once the resolver has caught up');
+  const ac=ctx.acct[what]||{};
+  if(!ac.fixable)return null;
+  const b=el('button',{class:'act plain dlv-apply',style:'margin-top:.4rem',title:'Install the record with cPanel’s own installer, after a confirmation'},'Apply this fix…');
+  b.onclick=e=>{e.stopPropagation();dlvApplyDialog(what,ctx);};
+  return b;
+}
+function dlvApplyDialog(what,ctx){
+  const d=ctx.domain,ac=ctx.acct[what]||{},label=DLV_REPAIR_LABEL[what],dns=acdDns(ctx.acct.zone);
+  const action=what==='dmarc'?acdDmarcAction(ac):ACD_ACTION[what];
+  const m=modal('Apply the '+label+' fix — '+d);
+  m.body.append(el('div',{class:'muted',style:'font-size:.8rem;margin-bottom:.5rem'},
+    action+' for '+d+'. This runs cPanel’s own installer; nothing is written by hand. DNS: '+dns.label+' — '+dns.title+'.'));
+  if(ac.summary)m.body.append(el('div',{class:'muted',style:'font-size:.8rem'},'now: '+ac.summary+((ac.current||[]).length?' — '+(ac.current||[]).join(' | '):'')));
+  const cur=ac.current||[];
+  let ta=null,form=null;
+  if(what==='dmarc'){
+    form=acdDmarcForm(d,ac.suggested_value||cur[0]||'');
+    m.body.append(form.wrap,el('div',{class:'muted',style:'font-size:.76rem'},cur.length>1?'Every _dmarc record in the zone is removed and the record above added in its place.':cur.length?'The existing record is removed from the zone and this one added in its place.':'Choose the policy and the report address; the record updates as you go.'));
+  }else{
+    ta=el('textarea',{class:'mono',rows:'3',spellcheck:'false',style:'width:100%',...(what==='dkim'?{readonly:'readonly'}:{})});
+    ta.value=ac.suggested||cur[0]||ac.expected||(what==='dkim'?'cPanel generates the key pair and publishes default._domainkey.'+d:'');
+    m.body.append(el('div',{class:'acct-lbl'},'record to install'),ta,
+      el('div',{class:'muted',style:'font-size:.76rem'},what==='dkim'?'cPanel generates the key and publishes it; this record cannot be edited here.':'Edit the record before applying if you need to.'));
+  }
+  if(ac.fix_note)m.body.append(el('div',{class:'muted',style:'font-size:.78rem'},ac.fix_note));
+  m.body.append(acdGuide(what));
+  const out=el('pre',{class:'log',style:'display:none'});
+  const go=el('button',{class:'act'},'Apply');
+  const cancel=el('button',{class:'act plain'},'Cancel');
+  cancel.onclick=()=>m.close();
+  const ctl=el('div',{class:'ctl',style:'margin-top:.6rem'},go,cancel);
+  go.onclick=async()=>{
+    const body={domain:d,what};
+    if(what!=='dkim'){const v=form?form.value():ta.value.trim();if(!v){toast('The record is empty');return;}body.record=v;}
+    go.disabled=true;cancel.disabled=true;out.style.display='';out.textContent='Applying…';
+    const res=await api('/api/acctdns/fix',{method:'POST',body});
+    out.textContent=(((res&&res.actions)||[]).join('\n'))||(res&&res.error)||'no output';
+    cancel.disabled=false;
+    if(!(res&&res.ok)){go.disabled=false;toast((res&&res.error)||'not applied');return;}
+    toast(label+' record installed');
+    ctx.applied[what]=true;
+    if(res.row)ctx.onApplied(res.row);
+    const again=el('button',{class:'act'},'Run the test again');
+    again.onclick=()=>{m.close();ctx.rerun();};
+    cancel.textContent='Close';
+    ctl.innerHTML='';ctl.append(again,cancel);
+    m.body.insertBefore(el('div',{class:'note',style:'font-size:.8rem;margin-top:.5rem'},'Applied. The resolver this host uses may still answer with the old record until its TTL passes, so a re-run can still show the old state for a while; the installer’s reply above is the proof the record was written.'),out);
+  };
+  m.body.append(ctl,out);
 }
 
 function dlvChips(summary){
@@ -3240,6 +3310,20 @@ async function renderDeliveryTest(v){
   const results=el('div');v.append(results);
   const renderer=deliveryRenderer(results);
   let runId=null;
+  // The Account DNS row of the tested domain, fetched once per run: it says
+  // which of SPF, DKIM and DMARC can be installed from here (cPanel only; a
+  // domain not hosted here answers 404 and the rows keep their copy button).
+  const repairCtx={domain:'',acct:null,applied:{},onApplied(row){repairCtx.acct=row;renderer.setRepair(c=>dlvRepairButton(c,repairCtx));},rerun(){forceBox.checked=true;startRun();}};
+  let repairFor=null;
+  function resetRepair(){repairFor=null;repairCtx.domain='';repairCtx.acct=null;repairCtx.applied={};renderer.setRepair(null);}
+  async function loadRepair(domain){
+    if(!domain||repairFor===domain)return;
+    repairFor=domain;
+    const r=await api('/api/acctdns/scan',{method:'POST',body:{domain}});
+    if(repairFor!==domain||!r||!r.row)return;
+    repairCtx.domain=domain;repairCtx.acct=r.row;repairCtx.applied={};
+    renderer.setRepair(c=>dlvRepairButton(c,repairCtx));
+  }
 
   function showProgress(r){
     chips.innerHTML='';chips.append(dlvChips(r.summary));
@@ -3253,11 +3337,12 @@ async function renderDeliveryTest(v){
     const r=await api('/api/delivery/run?id='+encodeURIComponent(runId));
     if(!r||r.error){clearInterval(dlvTimer);dlvTimer=null;runBtn.disabled=false;cancelBtn.style.display='none';toast((r&&r.error)||'lost the run');return;}
     renderer.add(r.checks||[]);showProgress(r);
+    if(r.inputs&&r.inputs.domain)loadRepair(r.inputs.domain);
     if(r.done){clearInterval(dlvTimer);dlvTimer=null;runBtn.disabled=false;cancelBtn.style.display='none';toast(`Done — ${r.summary&&Object.values(r.summary).reduce((a,s)=>a+s.fail,0)} problem(s)`);}
   }
   async function startRun(){
     const a=addr.value.trim();if(!a){addr.focus();return;}
-    runBtn.disabled=true;renderer.reset();prog.style.display='';chips.innerHTML='';ptext.textContent='starting…';bar.querySelector('.bar').style.width='2%';exportBtns.style.display='none';
+    runBtn.disabled=true;renderer.reset();resetRepair();prog.style.display='';chips.innerHTML='';ptext.textContent='starting…';bar.querySelector('.bar').style.width='2%';exportBtns.style.display='none';
     const body={address:a,days:+daysIn.value||2,audit:auditBox.checked&&!auditBox.disabled,force:forceBox.checked};
     if(ipIn.value.trim())body.ip=ipIn.value.trim();if(selIn.value.trim())body.selector=selIn.value.trim();
     const r=await api('/api/delivery/run',{method:'POST',body});
@@ -3278,7 +3363,7 @@ async function renderDeliveryTest(v){
   emlBtn.onclick=async()=>{
     const f=fileIn.files&&fileIn.files[0];if(!f){toast('Choose a file first');fileIn.focus();return;}
     if(f.size>2900000){toast('The file is larger than 2.9 MB — save the message without attachments');return;}
-    runBtn.disabled=true;emlBtn.disabled=true;renderer.reset();prog.style.display='';chips.innerHTML='';ptext.textContent='uploading…';bar.querySelector('.bar').style.width='2%';exportBtns.style.display='none';
+    runBtn.disabled=true;emlBtn.disabled=true;renderer.reset();resetRepair();prog.style.display='';chips.innerHTML='';ptext.textContent='uploading…';bar.querySelector('.bar').style.width='2%';exportBtns.style.display='none';
     const b64=await new Promise((res,rej)=>{const rd=new FileReader();rd.onload=()=>res(String(rd.result).split(',').pop());rd.onerror=rej;rd.readAsDataURL(f);});
     const body={b64,kind:kindBounce.checked?'bounce':'message',name:f.name,days:+daysIn.value||2,audit:auditBox.checked&&!auditBox.disabled};
     if(addr.value.trim())body.address=addr.value.trim();if(ipIn.value.trim())body.ip=ipIn.value.trim();if(selIn.value.trim())body.selector=selIn.value.trim();

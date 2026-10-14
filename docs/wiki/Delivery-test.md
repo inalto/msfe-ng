@@ -29,6 +29,19 @@ Each row opens to the **evidence** (the DNS records, the SMTP transcript, the
 certificate) and a **fix**: the DNS record to publish (with a copy button),
 where to click in WHM/cPanel, or the command to run.
 
+When the fix is the domain's **SPF, DKIM or DMARC record** and the domain is
+hosted on this cPanel server with its zone here, the row also offers **Apply
+this fix…**. It opens a confirmation that states what will run, shows the
+record cPanel itself proposes (SPF editable, DKIM read-only, DMARC as the
+policy form) and where the zone lives, and nothing happens until you press
+*Apply*. The change runs through the same installers as [Account
+DNS](Account-DNS)'s *Repair* (`install_spf_records`, `enable_dkim`,
+`addzonerecord`) and shows their transcript; the row then notes the fix was
+applied and offers to run the test again. Resolvers can keep the old answer
+until the record's TTL passes, so a re-run right away may still show the old
+state. Rows about a domain hosted elsewhere, or about anything other than
+those three records (MX, MTA-STS, TLSA, …), keep the copy button only.
+
 Nothing is guessed. An address alone cannot prove that the mailbox exists,
 that its mail authenticates, or that it lands in the inbox — the report says
 so in its last row. An MX host is never assumed to be a sender: a blocklist
