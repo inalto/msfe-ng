@@ -110,6 +110,7 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
         ("acctdns", Some("scan")) => Some(&["--user", "--domain", "--all", "--json"]),
         ("acctdns", Some("fix")) => Some(&["--record", "--json"]),
         ("acctdns", Some("txt")) => Some(&["--json"]),
+        ("acctdns", Some("mta-sts")) => Some(&["--policy", "--mode", "--json"]),
         ("acctdns", _) => Some(NONE),
         ("dmarc", Some("fetch")) => Some(&["--dry-run", "--keep", "--json"]),
         ("dmarc", Some("import" | "status")) => Some(&["--json"]),
@@ -150,7 +151,7 @@ fn usage_of(cmd: &str) -> &'static str {
         "restore" => "msfe-ng restore <file.tar.gz> [--yes]   (alias: snapshot import --only msfe)",
         "conf" => "msfe-ng conf <test [--no-lint] [--json] [--with <id>=<file>]... | test-message <clean|gtube|eicar|file.eml> [--offline] [--json] | grep <text>>",
         "delivery" => "msfe-ng delivery <test <address> [--ip <sending ip>] [--selector <dkim selector>] [--audit] [--days <1-7>] [--json | --html] [--force] | eml <file.eml> [--bounce] [--address <a>] [--ip <ip>] [--selector <s>] [--audit] [--json | --html] | inbox <install [--dry-run] | uninstall [--dry-run] | status | new | poll <token> [--json] | remove <token> | sweep> | testmail --from <local address> --to <address> [--tag <t>] [--follow <secs>] [--json] | monitor <list [--json] | add <address> [--interval-mins n] [--audit] [--ip ..] [--selector ..] [--days n] | remove <id|address> | run [--dry-run] [--id n]> | osint <address> [--providers a,b] [--json | --html] [--force] | osint providers [--json] | osint sweep | osint monitor <list [--json] | add <address> [--sources a,b] [--interval-mins n] | remove <id|address> | enable <id> | disable <id> | run [--dry-run] [--id n] | history <id> [--json]>>",
-        "acctdns" => "msfe-ng acctdns <scan [--user <account>] [--domain <domain>] [--all] [--json] | fix <domain> <spf|dkim|dmarc> [--record <record>] [--json] | txt <name> <value> [--json]>",
+        "acctdns" => "msfe-ng acctdns <scan [--user <account>] [--domain <domain>] [--all] [--json] | fix <domain> <spf|dkim|dmarc> [--record <record>] [--json] | txt <name> <value> [--json] | mta-sts <domain> [--mode testing|enforce|none] [--policy <file>] [--json]>",
         "footers" => "msfe-ng footers <status [--json] | set \"<directive>\" on|off [\"<directive>\" on|off]... [--dry-run] | off [--dry-run] | restore [<backup>] [--dry-run] | backups>",
         "dmarc" => "msfe-ng dmarc <fetch [--dry-run] [--keep] [--json] | import <file.xml|.gz|.zip|.eml>... [--json] | status [--json] | test | prune>",
         _ => "msfe-ng help",
@@ -3875,6 +3876,7 @@ fn cmd_acctdns(sub: Option<&str>, rest: &[String]) -> ExitCode {
         Some("scan") => cmd_acctdns_scan(rest),
         Some("fix") => cmd_acctdns_fix(rest),
         Some("txt") => cmd_acctdns_txt(rest),
+        Some("mta-sts") => cmd_acctdns_mtasts(rest),
         _ => {
             eprintln!("usage: {}", usage_of("acctdns"));
             ExitCode::from(2)
@@ -4101,6 +4103,84 @@ fn cmd_acctdns_txt(rest: &[String]) -> ExitCode {
                     println!("{a}");
                 }
                 eprintln!("msfe-ng acctdns txt: {e}", e = e.error);
+            }
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// `acctdns mta-sts <domain> [--mode m] [--policy <file>] [--json]`: make
+/// `mta-sts.<domain>` serve a policy — the subdomain through cPanel when the
+/// account lacks it, the file in its document root, AutoSSL asked for the
+/// certificate. The policy is built from the MX hosts (`--mode`, default
+/// testing) unless `--policy` names a file holding it. The TXT record is `txt`.
+fn cmd_acctdns_mtasts(rest: &[String]) -> ExitCode {
+    use msfe_core::acctdns;
+    use msfe_core::cpaudit::Cp;
+    use msfe_core::dns::Client;
+    let mut json = false;
+    let mut mode = "testing".to_string();
+    let mut policy_file: Option<&str> = None;
+    let mut positional: Vec<&String> = Vec::new();
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--mode" => mode = it.next().cloned().unwrap_or_default(),
+            "--policy" => policy_file = it.next().map(String::as_str),
+            "--json" => json = true,
+            x if !x.starts_with('-') => positional.push(a),
+            _ => {}
+        }
+    }
+    let (Some(domain), None) = (positional.first(), positional.get(1)) else {
+        eprintln!("usage: {}", usage_of("acctdns"));
+        return ExitCode::from(2);
+    };
+    if !matches!(mode.as_str(), "testing" | "enforce" | "none") {
+        eprintln!(
+            "msfe-ng acctdns mta-sts: --mode must be testing, enforce or none\nusage: {}",
+            usage_of("acctdns")
+        );
+        return ExitCode::from(2);
+    }
+    let client = Client::system();
+    let policy = match policy_file {
+        Some(f) => match std::fs::read_to_string(f) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("msfe-ng acctdns mta-sts: cannot read {f}: {e}");
+                return ExitCode::from(2);
+            }
+        },
+        None => {
+            let d = domain.trim().trim_end_matches('.').to_ascii_lowercase();
+            acctdns::mtasts_policy(&client, &d, &mode)
+        }
+    };
+    match acctdns::install_mtasts_site(&Cp::detect(), &client, domain, Some(&policy)) {
+        Ok(r) => {
+            if json {
+                println!("{}", r.to_json());
+            } else {
+                for a in &r.actions {
+                    println!("{a}");
+                }
+                println!(
+                    "https://{}/.well-known/mta-sts.txt serves:\n{}",
+                    r.host,
+                    r.policy.trim_end()
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            if json {
+                println!("{}", e.to_json());
+            } else {
+                for a in &e.actions {
+                    println!("{a}");
+                }
+                eprintln!("msfe-ng acctdns mta-sts: {e}", e = e.error);
             }
             ExitCode::from(1)
         }

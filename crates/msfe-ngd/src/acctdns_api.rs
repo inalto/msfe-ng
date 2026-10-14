@@ -2,7 +2,7 @@
 //! every domain hosted on this server, and cPanel's own installers behind a
 //! repair button.
 //!
-//! Three routes only. `GET /api/acctdns/scan` is the poller's endpoint: it
+//! Routes: `GET /api/acctdns/scan` is the poller's endpoint: it
 //! answers the scan in memory, else the last one from disk, with its age, and
 //! `404 {"error":…}` when nothing has ever run. `POST /api/acctdns/scan`
 //! either re-checks one domain inline (fast enough for a request) or starts
@@ -36,6 +36,8 @@ pub fn handle(
         ("POST", "/api/acctdns/fix") => fix(req),
         ("GET", "/api/acctdns/zone") => zone(req),
         ("POST", "/api/acctdns/txt") => txt(req),
+        ("GET", "/api/acctdns/mtasts") => mtasts_get(req),
+        ("POST", "/api/acctdns/mtasts") => mtasts_post(req),
         _ => Response::json(404, r#"{"error":"not found"}"#),
     }
 }
@@ -217,6 +219,53 @@ fn txt(req: &Request) -> Response {
         return err(400, "value required");
     };
     match acctdns::install_txt(&Cp::detect(), &name, &value) {
+        Ok(r) => Response::json(200, &r.to_json().to_string()),
+        Err(e) => Response::json(400, &e.to_json().to_string()),
+    }
+}
+
+/// `?domain=`: the MTA-STS policy site of a domain — which account would
+/// host `mta-sts.<domain>` (`hosted` false: none, no button), whether it
+/// exists, and the policy this server proposes (`mode: testing`, the MX hosts).
+fn mtasts_get(req: &Request) -> Response {
+    let domain = req.query_param("domain").unwrap_or_default();
+    let cp = Cp::detect();
+    if !acctdns::supported(&cp) {
+        return unsupported(&cp, 501);
+    }
+    match acctdns::mtasts_site(&cp, &domain) {
+        Ok(s) => {
+            let mut v = s.to_json();
+            if let Json::Object(fields) = &mut v {
+                fields.push((
+                    "policy".into(),
+                    Json::str(acctdns::mtasts_policy(
+                        &Client::system(),
+                        &s.domain,
+                        "testing",
+                    )),
+                ));
+            }
+            Response::json(200, &v.to_string())
+        }
+        Err(e) => err(400, &e),
+    }
+}
+
+/// `{domain, policy?}`: make `mta-sts.<domain>` serve the policy (the proposal
+/// when none is given): subdomain through cPanel, file in its document root,
+/// AutoSSL asked for the certificate. The `_mta-sts` TXT record is `txt`'s job.
+fn mtasts_post(req: &Request) -> Response {
+    let v = match body_json(req) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let Some(domain) = field(&v, "domain") else {
+        return err(400, "domain required");
+    };
+    let policy = field(&v, "policy").filter(|p| !p.trim().is_empty());
+    match acctdns::install_mtasts_site(&Cp::detect(), &Client::system(), &domain, policy.as_deref())
+    {
         Ok(r) => Response::json(200, &r.to_json().to_string()),
         Err(e) => Response::json(400, &e.to_json().to_string()),
     }
@@ -581,5 +630,89 @@ mod tests {
             Some(1),
             "{v}"
         );
+    }
+
+    #[test]
+    fn mtasts_describes_the_site_then_installs_it() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = tree("mtasts");
+        env(&root);
+        write(
+            &root,
+            "/etc/passwd",
+            "alice:x:1001:1001::/home/alice:/bin/bash\n",
+        );
+        // the description: hosted by alice, not there yet, a proposed policy
+        let (status, v) = call("GET", "/api/acctdns/mtasts?domain=example.com", "");
+        assert_eq!(status, 200, "{v}");
+        assert!(matches!(v.get("hosted"), Some(Json::Bool(true))), "{v}");
+        assert!(matches!(v.get("exists"), Some(Json::Bool(false))), "{v}");
+        assert_eq!(v.str_field("host"), "mta-sts.example.com");
+        assert!(
+            v.str_field("policy")
+                .starts_with("version: STSv1\nmode: testing\n"),
+            "{v}"
+        );
+        let (status, v) = call("GET", "/api/acctdns/mtasts?domain=elsewhere.net", "");
+        assert_eq!(status, 200, "{v}");
+        assert!(matches!(v.get("hosted"), Some(Json::Bool(false))), "{v}");
+        let (status, _) = call("GET", "/api/acctdns/mtasts?domain=not%20a%20name", "");
+        assert_eq!(status, 400);
+        // the install
+        write(&root, "/_cmd/acctdns_mtasts_subdomain.txt", ZONE_OK);
+        write(&root, "/_cmd/acctdns_mtasts_autossl.txt", ZONE_OK);
+        let policy = "version: STSv1\nmode: testing\nmx: mail.example.com\nmax_age: 604800\n";
+        let (status, v) = call(
+            "POST",
+            "/api/acctdns/mtasts",
+            &format!(
+                r#"{{"domain":"example.com","policy":"{}"}}"#,
+                policy.replace('\n', "\\n")
+            ),
+        );
+        assert_eq!(status, 200, "{v}");
+        assert!(matches!(v.get("ok"), Some(Json::Bool(true))), "{v}");
+        assert!(matches!(v.get("created"), Some(Json::Bool(true))), "{v}");
+        assert_eq!(
+            v.str_field("docroot"),
+            "/home/alice/public_html/mta-sts.example.com"
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                root.join("home/alice/public_html/mta-sts.example.com/.well-known/mta-sts.txt")
+            )
+            .unwrap(),
+            policy
+        );
+        let actions = v.get("actions").and_then(Json::as_array).unwrap();
+        assert!(
+            actions
+                .iter()
+                .filter_map(Json::as_str)
+                .any(|a| a.starts_with("whmapi1 create_subdomain domain=mta-sts.example.com")),
+            "{v}"
+        );
+        // missing domain, a domain not hosted here, a bad policy
+        let (status, v) = call("POST", "/api/acctdns/mtasts", r#"{"policy":"x"}"#);
+        assert_eq!(status, 400, "{v}");
+        assert!(v.str_field("error").contains("domain required"), "{v}");
+        let (status, v) = call(
+            "POST",
+            "/api/acctdns/mtasts",
+            r#"{"domain":"elsewhere.net"}"#,
+        );
+        assert_eq!(status, 400, "{v}");
+        assert!(
+            v.str_field("error")
+                .contains("not a domain of a cPanel account"),
+            "{v}"
+        );
+        let (status, v) = call(
+            "POST",
+            "/api/acctdns/mtasts",
+            r#"{"domain":"example.com","policy":"nonsense"}"#,
+        );
+        assert_eq!(status, 400, "{v}");
+        assert!(v.str_field("error").contains("does not parse"), "{v}");
     }
 }

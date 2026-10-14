@@ -473,6 +473,17 @@ fn acctdns_checks_its_flags_and_scans_a_fixture_tree() {
         String::from_utf8_lossy(&out.stderr)
     );
 
+    // `mta-sts` needs one domain and a known mode
+    let out = msfe_ng(&d, &["acctdns", "mta-sts"]);
+    assert_eq!(out.status.code(), Some(2));
+    let out = msfe_ng(&d, &["acctdns", "mta-sts", "example.com", "--mode", "loud"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--mode must be"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
     // a fixture tree that looks like cPanel: the scan runs inline
     let root = d.join("root");
     cpanel_tree(&root);

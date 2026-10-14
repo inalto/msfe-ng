@@ -2238,6 +2238,349 @@ fn accepts(what: What, check: &Check, txt: &str) -> bool {
     }
 }
 
+// ---- the MTA-STS policy site ------------------------------------------------------
+// The `_mta-sts` TXT record only announces a policy; senders fetch it from
+// `https://mta-sts.<domain>/.well-known/mta-sts.txt`, and while that host has
+// no address or no file the record protects nothing. On a cPanel server the
+// policy site is a subdomain of the account that hosts the domain: cPanel's
+// `create_subdomain` adds the A record and the vhost, the file goes into its
+// document root, and AutoSSL issues the certificate. Nothing else is touched.
+
+/// The policy site's host name.
+pub fn mtasts_host(domain: &str) -> String {
+    format!("mta-sts.{domain}")
+}
+
+/// Where the subdomain's files go, relative to the account's home.
+pub fn mtasts_docroot_rel(domain: &str) -> String {
+    format!("public_html/{}", mtasts_host(domain))
+}
+
+/// The policy text to serve: `mode` (`testing` to start), one `mx:` line per
+/// MX host of the domain (the domain itself when it publishes none — the
+/// implicit MX of RFC 5321), a week of `max_age`.
+pub fn mtasts_policy(client: &Client, domain: &str, mode: &str) -> String {
+    let mut hosts: Vec<String> = client
+        .mx(domain)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(_, h)| h.trim_end_matches('.').to_ascii_lowercase())
+        .filter(|h| !h.is_empty())
+        .collect();
+    hosts.dedup();
+    if hosts.is_empty() {
+        hosts.push(domain.to_string());
+    }
+    let mut out = format!("version: STSv1\nmode: {mode}\n");
+    for h in hosts {
+        out.push_str(&format!("mx: {h}\n"));
+    }
+    out.push_str("max_age: 604800\n");
+    out
+}
+
+/// A policy handed in by the admin: it must parse, name a mode, and (unless
+/// `mode: none`) cover at least one MX. Returned normalised with `\n` ends.
+fn check_policy(text: &str) -> Result<String, String> {
+    let t = text.replace("\r\n", "\n");
+    let t = t.trim();
+    if t.is_empty() {
+        return Err("the policy is empty".into());
+    }
+    if t.len() > 4096 {
+        return Err("the policy is longer than 4096 bytes".into());
+    }
+    if t.chars().any(|c| c.is_control() && c != '\n') {
+        return Err("the policy may not contain control characters".into());
+    }
+    let p =
+        crate::mtasts::parse_policy(t).map_err(|e| format!("the policy does not parse: {e}"))?;
+    if let Some(first) = p.problems.first() {
+        return Err(format!("the policy does not parse: {first}"));
+    }
+    if p.mx.is_empty() && p.mode != crate::mtasts::StsMode::None {
+        return Err("the policy needs at least one mx: line".into());
+    }
+    Ok(format!("{t}\n"))
+}
+
+/// What `install_mtasts_site` did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MtaStsReport {
+    pub domain: String,
+    pub host: String,
+    pub user: String,
+    pub docroot: String,
+    pub policy: String,
+    /// The subdomain was created by this call (false: it already existed).
+    pub created: bool,
+    pub actions: Vec<String>,
+}
+
+impl MtaStsReport {
+    pub fn to_json(&self) -> Json {
+        Json::Object(vec![
+            ("ok".into(), Json::Bool(true)),
+            ("domain".into(), Json::str(&self.domain)),
+            ("host".into(), Json::str(&self.host)),
+            ("user".into(), Json::str(&self.user)),
+            ("docroot".into(), Json::str(&self.docroot)),
+            ("policy".into(), Json::str(&self.policy)),
+            ("created".into(), Json::Bool(self.created)),
+            (
+                "actions".into(),
+                Json::Array(self.actions.iter().map(Json::str).collect()),
+            ),
+        ])
+    }
+}
+
+/// What the Address test needs to know before offering the button: the host,
+/// the account that would own it (none: the domain is not hosted here), and
+/// whether the subdomain already exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MtaStsSite {
+    pub domain: String,
+    pub host: String,
+    pub user: Option<String>,
+    pub exists: bool,
+}
+
+impl MtaStsSite {
+    pub fn to_json(&self) -> Json {
+        Json::Object(vec![
+            ("domain".into(), Json::str(&self.domain)),
+            ("host".into(), Json::str(&self.host)),
+            (
+                "user".into(),
+                self.user.as_deref().map(Json::str).unwrap_or(Json::Null),
+            ),
+            ("hosted".into(), Json::Bool(self.user.is_some())),
+            ("exists".into(), Json::Bool(self.exists)),
+        ])
+    }
+}
+
+/// Which account hosts `domain` and whether `mta-sts.<domain>` is already one
+/// of its domains. `Err` when the name is malformed or cPanel is not here.
+pub fn mtasts_site(cp: &Cp, domain: &str) -> Result<MtaStsSite, String> {
+    if !supported(cp) {
+        return Err(format!(
+            "Account DNS needs cPanel (this host: {})",
+            panel_name(cp)
+        ));
+    }
+    let d = domain.trim().trim_end_matches('.').to_ascii_lowercase();
+    if !crate::netguard::valid_hostname(&d) {
+        return Err(format!("'{domain}' is not a domain name"));
+    }
+    let host = mtasts_host(&d);
+    let domains = list_domains(cp);
+    let user = domains
+        .iter()
+        .find(|x| x.domain == d)
+        .map(|x| x.user.clone());
+    let exists = domains.iter().any(|x| x.domain == host);
+    Ok(MtaStsSite {
+        domain: d,
+        host,
+        user,
+        exists,
+    })
+}
+
+/// `documentroot:` of `/var/cpanel/userdata/<user>/<host>`, or the
+/// conventional place under the account's home when the file is not there yet.
+fn mtasts_docroot(cp: &Cp, user: &str, domain: &str) -> String {
+    let host = mtasts_host(domain);
+    if let Some(text) = cp.read(&format!("/var/cpanel/userdata/{user}/{host}")) {
+        if let Some(v) = text.lines().find_map(|l| l.strip_prefix("documentroot:")) {
+            let v = v.trim().trim_matches('\'').trim_matches('"');
+            if v.starts_with('/') {
+                return v.to_string();
+            }
+        }
+    }
+    let home = cp
+        .read("/etc/passwd")
+        .and_then(|p| {
+            p.lines().find_map(|l| {
+                let f: Vec<&str> = l.split(':').collect();
+                (f.len() > 5 && f[0] == user).then(|| f[5].to_string())
+            })
+        })
+        .unwrap_or_else(|| format!("/home/{user}"));
+    format!(
+        "{}/{}",
+        home.trim_end_matches('/'),
+        mtasts_docroot_rel(domain)
+    )
+}
+
+/// The `.htaccess` of the policy site: nothing inherited from the account's
+/// web site may rewrite or redirect the request, and the file is text/plain.
+const MTASTS_HTACCESS: &str = "# MSFE-NG: the MTA-STS policy site serves one file, as text/plain,\n# without the rewrites of the account's main site (RFC 8461 §3.3)\nRewriteEngine Off\nAddType text/plain .txt\n";
+
+/// Write `data` at `path` (0644), creating the directories (0755), owned by
+/// `user` when running live as root. `replace` false keeps an existing file.
+fn write_site_file(
+    cp: &Cp,
+    user: &str,
+    path: &Path,
+    data: &str,
+    replace: bool,
+) -> Result<bool, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
+    let uid_gid = if cp.live() {
+        crate::confcheck::uid_gid_of(user)
+    } else {
+        None
+    };
+    let mut created_dirs: Vec<PathBuf> = Vec::new();
+    let mut p = dir.to_path_buf();
+    while !p.exists() {
+        created_dirs.push(p.clone());
+        match p.parent() {
+            Some(x) => p = x.to_path_buf(),
+            None => break,
+        }
+    }
+    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    for d in created_dirs {
+        let _ = std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755));
+        if let Some((uid, gid)) = uid_gid {
+            std::os::unix::fs::chown(&d, Some(uid), Some(gid))
+                .map_err(|e| format!("cannot chown {}: {e}", d.display()))?;
+        }
+    }
+    if path.exists() && !replace {
+        return Ok(false);
+    }
+    std::fs::write(path, data).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644));
+    if let Some((uid, gid)) = uid_gid {
+        std::os::unix::fs::chown(path, Some(uid), Some(gid))
+            .map_err(|e| format!("cannot chown {}: {e}", path.display()))?;
+    }
+    Ok(true)
+}
+
+/// Make `mta-sts.<domain>` serve `policy` (the proposal of `mtasts_policy`
+/// when `None`): the subdomain is created through cPanel's `create_subdomain`
+/// when the account does not have it yet (that adds the A record to the zone
+/// and the web vhost), the policy goes to `.well-known/mta-sts.txt` in its
+/// document root with a guarding `.htaccess`, and AutoSSL is asked for the
+/// certificate. The `_mta-sts` TXT record is `install_txt`'s job.
+pub fn install_mtasts_site(
+    cp: &Cp,
+    client: &Client,
+    domain: &str,
+    policy: Option<&str>,
+) -> Result<MtaStsReport, FixError> {
+    let site = mtasts_site(cp, domain).map_err(FixError::new)?;
+    let Some(user) = site.user.clone() else {
+        return Err(FixError::new(format!(
+            "{} is not a domain of a cPanel account on this server, so there is no account to host {}",
+            site.domain, site.host
+        )));
+    };
+    let d = site.domain.clone();
+    let host = site.host.clone();
+    let text = match policy {
+        Some(p) => check_policy(p).map_err(FixError::new)?,
+        None => mtasts_policy(client, &d, "testing"),
+    };
+    let mut actions: Vec<String> = Vec::new();
+    let created = if site.exists {
+        actions.push(format!("{host} is already a domain of account {user}"));
+        false
+    } else {
+        installer(
+            cp,
+            "acctdns_mtasts_subdomain",
+            "create_subdomain",
+            &[
+                format!("domain={host}"),
+                format!("document_root={}", mtasts_docroot_rel(&d)),
+            ],
+            &mut actions,
+        )?;
+        actions.push(format!(
+            "{host} created for account {user}: cPanel added its A record to the zone and its web site"
+        ));
+        true
+    };
+    let docroot = mtasts_docroot(cp, &user, &d);
+    let root = cp.path(&docroot);
+    let fail = |e: String, actions: &[String]| {
+        let mut a = actions.to_vec();
+        a.push(format!("failed: {e}"));
+        FixError::with(e, a)
+    };
+    let file = root.join(".well-known").join("mta-sts.txt");
+    write_site_file(cp, &user, &file, &text, true).map_err(|e| fail(e, &actions))?;
+    actions.push(format!(
+        "policy written to {docroot}/.well-known/mta-sts.txt"
+    ));
+    match write_site_file(cp, &user, &root.join(".htaccess"), MTASTS_HTACCESS, false) {
+        Ok(true) => actions.push(format!(
+            "{docroot}/.htaccess written (no rewrites, text/plain)"
+        )),
+        Ok(false) => actions.push(format!("{docroot}/.htaccess left as it is")),
+        Err(e) => return Err(fail(e, &actions)),
+    }
+    // the certificate: AutoSSL runs for the account in the background
+    actions.push(format!(
+        "whmapi1 start_autossl_check_for_one_user username={user}"
+    ));
+    match whmapi1(
+        cp,
+        "acctdns_mtasts_autossl",
+        "start_autossl_check_for_one_user",
+        &[format!("username={user}")],
+        FIX_TIMEOUT,
+    )
+    .and_then(|v| meta_ok(&v))
+    {
+        Ok(reason) => actions.push(format!(
+            "{reason} — AutoSSL issues the certificate for {host} in the background, usually within minutes; until then the fetch fails on the certificate"
+        )),
+        Err(e) => actions.push(format!(
+            "AutoSSL not started ({e}) — run it for {user} from WHM › Manage AutoSSL, or wait for its daily run"
+        )),
+    }
+    if cp.live() {
+        if let Some(note) = flush_resolver(&host) {
+            actions.push(note);
+        }
+    }
+    match client.addrs(&host) {
+        Ok((v4, v6)) if !v4.is_empty() || !v6.is_empty() => actions.push(format!(
+            "{host} resolves ({})",
+            v4.iter()
+                .map(|a| a.to_string())
+                .chain(v6.iter().map(|a| a.to_string()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        _ => actions.push(format!(
+            "{host} does not resolve yet from this host — resolvers keep a negative answer for the zone's negative TTL; test again later"
+        )),
+    }
+    Ok(MtaStsReport {
+        domain: d,
+        host,
+        user,
+        docroot,
+        policy: text,
+        created,
+        actions,
+    })
+}
+
 // ---- the scan registry --------------------------------------------------------
 
 /// Limit a scan to one account or one domain.
@@ -4129,5 +4472,227 @@ mod tests {
             .unwrap_err()
             .error
             .contains("needs cPanel"));
+    }
+
+    // ---- the MTA-STS policy site ----------------------------------------------
+
+    /// A resolver answering MX for example.com and A for mta-sts.example.com.
+    fn mtasts_dns() -> testsupport::FakeServer {
+        testsupport::start(
+            Box::new(|name, rtype| {
+                let n = name.trim_end_matches('.').to_ascii_lowercase();
+                let mut recs = Vec::new();
+                if n == "example.com" && rtype == 15 {
+                    for (pref, host) in [(20, "mx2.example.com"), (10, "mx1.example.com")] {
+                        recs.push(Rr {
+                            name: n.clone(),
+                            rtype: 15,
+                            ttl: 300,
+                            data: RData::Mx {
+                                pref,
+                                host: host.to_string(),
+                            },
+                        });
+                    }
+                }
+                if n == "mta-sts.example.com" && rtype == 1 {
+                    recs.push(Rr {
+                        name: n.clone(),
+                        rtype: 1,
+                        ttl: 300,
+                        data: RData::A("192.0.2.10".parse().unwrap()),
+                    });
+                }
+                Some((0, recs, false))
+            }),
+            false,
+        )
+    }
+
+    #[test]
+    fn mtasts_policy_lists_the_mx_hosts_in_preference_order_or_the_domain_itself() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let srv = mtasts_dns();
+        std::env::set_var("MSFE_NG_RESOLVER", srv.addr.to_string());
+        let client = Client::system();
+        assert_eq!(
+            mtasts_policy(&client, "example.com", "testing"),
+            "version: STSv1\nmode: testing\nmx: mx1.example.com\nmx: mx2.example.com\nmax_age: 604800\n"
+        );
+        // no MX: the implicit MX is the domain
+        assert_eq!(
+            mtasts_policy(&client, "example.org", "enforce"),
+            "version: STSv1\nmode: enforce\nmx: example.org\nmax_age: 604800\n"
+        );
+        std::env::remove_var("MSFE_NG_RESOLVER");
+    }
+
+    #[test]
+    fn check_policy_wants_a_parseable_policy_with_an_mx() {
+        assert!(check_policy("").unwrap_err().contains("empty"));
+        assert!(check_policy("version: STSv1\nmode: testing\nmax_age: 1\n")
+            .unwrap_err()
+            .contains("mx:"));
+        assert!(check_policy("version: STSv1\nmode: none\nmax_age: 1\n").is_ok());
+        assert!(
+            check_policy("version: STSv1\nmode: maybe\nmx: a.b\nmax_age: 1\n")
+                .unwrap_err()
+                .contains("does not parse")
+        );
+        assert!(
+            check_policy("version: STSv1\nmode: testing\nmx: a.b\nmax_age: 1\nhuh\n")
+                .unwrap_err()
+                .contains("does not parse")
+        );
+        assert_eq!(
+            check_policy("version: STSv1\r\nmode: testing\r\nmx: a.b\r\nmax_age: 1").unwrap(),
+            "version: STSv1\nmode: testing\nmx: a.b\nmax_age: 1\n"
+        );
+    }
+
+    #[test]
+    fn mtasts_site_knows_the_account_and_whether_the_subdomain_exists() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = server_tree("mtasts-site");
+        let cp = Cp { root: root.clone() };
+        let s = mtasts_site(&cp, "Example.COM.").unwrap();
+        assert_eq!(s.domain, "example.com");
+        assert_eq!(s.host, "mta-sts.example.com");
+        assert_eq!(s.user.as_deref(), Some("alice"));
+        assert!(!s.exists);
+        let s = mtasts_site(&cp, "elsewhere.net").unwrap();
+        assert!(s.user.is_none());
+        assert!(mtasts_site(&cp, "not a name").is_err());
+        let j = s.to_json();
+        assert!(matches!(j.get("hosted"), Some(Json::Bool(false))));
+        // the subdomain already there
+        write(
+            &root,
+            "/etc/userdomains",
+            "example.com: alice\nmta-sts.example.com: alice\n",
+        );
+        let s = mtasts_site(&cp, "example.com").unwrap();
+        assert!(s.exists);
+        // no cPanel
+        let _ = std::fs::remove_file(root.join("etc/userdomains"));
+        assert!(mtasts_site(&cp, "example.com")
+            .unwrap_err()
+            .contains("needs cPanel"));
+    }
+
+    #[test]
+    fn install_mtasts_site_creates_the_subdomain_writes_the_policy_and_asks_autossl() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = server_tree("mtasts-install");
+        let srv = mtasts_dns();
+        std::env::set_var("MSFE_NG_RESOLVER", srv.addr.to_string());
+        let client = Client::system();
+        let cp = Cp { root: root.clone() };
+        write(
+            &root,
+            "/etc/passwd",
+            "alice:x:1001:1001::/home/alice:/bin/bash\n",
+        );
+
+        // not hosted here: refused before anything runs
+        let e = install_mtasts_site(&cp, &client, "elsewhere.net", None).unwrap_err();
+        assert!(
+            e.error.contains("not a domain of a cPanel account"),
+            "{}",
+            e.error
+        );
+        // a bad policy is refused before anything runs
+        let e = install_mtasts_site(&cp, &client, "example.com", Some("nonsense")).unwrap_err();
+        assert!(e.error.contains("does not parse"), "{}", e.error);
+        assert!(!root
+            .join("_cmd")
+            .join("acctdns_mtasts_subdomain.txt")
+            .exists());
+
+        // the subdomain is created, the userdata file names the docroot
+        write(&root, "/_cmd/acctdns_mtasts_subdomain.txt", OK_REPLY);
+        write(&root, "/_cmd/acctdns_mtasts_autossl.txt", OK_REPLY);
+        write(
+            &root,
+            "/var/cpanel/userdata/alice/mta-sts.example.com",
+            "documentroot: /home/alice/public_html/mta-sts.example.com\nservername: mta-sts.example.com\nuser: alice\n",
+        );
+        let r = install_mtasts_site(&cp, &client, "example.com", None).unwrap();
+        assert!(r.created);
+        assert_eq!(r.user, "alice");
+        assert_eq!(r.docroot, "/home/alice/public_html/mta-sts.example.com");
+        assert_eq!(
+            r.policy,
+            "version: STSv1\nmode: testing\nmx: mx1.example.com\nmx: mx2.example.com\nmax_age: 604800\n"
+        );
+        assert_eq!(
+            r.actions[0],
+            "whmapi1 create_subdomain domain=mta-sts.example.com document_root=public_html/mta-sts.example.com"
+        );
+        assert!(
+            r.actions
+                .iter()
+                .any(|a| a.starts_with("whmapi1 start_autossl_check_for_one_user username=alice")),
+            "{:?}",
+            r.actions
+        );
+        assert!(
+            r.actions
+                .iter()
+                .any(|a| a.contains("mta-sts.example.com resolves (192.0.2.10)")),
+            "{:?}",
+            r.actions
+        );
+        let file = root.join("home/alice/public_html/mta-sts.example.com/.well-known/mta-sts.txt");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), r.policy);
+        let ht = root.join("home/alice/public_html/mta-sts.example.com/.htaccess");
+        assert_eq!(std::fs::read_to_string(&ht).unwrap(), MTASTS_HTACCESS);
+        let j = r.to_json();
+        assert!(matches!(j.get("ok"), Some(Json::Bool(true))));
+        assert!(matches!(j.get("created"), Some(Json::Bool(true))));
+
+        // a second run: the subdomain exists, the policy is replaced, the
+        // .htaccess the admin may have edited is kept
+        write(
+            &root,
+            "/etc/userdomains",
+            "example.com: alice\nmta-sts.example.com: alice\n",
+        );
+        let _ = std::fs::remove_file(root.join("_cmd/acctdns_mtasts_subdomain.txt"));
+        std::fs::write(&ht, "# mine\n").unwrap();
+        let enforce = "version: STSv1\nmode: enforce\nmx: mx1.example.com\nmax_age: 86400\n";
+        let r = install_mtasts_site(&cp, &client, "example.com", Some(enforce)).unwrap();
+        assert!(!r.created);
+        assert_eq!(
+            r.actions[0],
+            "mta-sts.example.com is already a domain of account alice"
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), enforce);
+        assert_eq!(std::fs::read_to_string(&ht).unwrap(), "# mine\n");
+        assert!(r
+            .actions
+            .iter()
+            .any(|a| a.contains(".htaccess left as it is")));
+
+        // the installer refusing is the error, with the transcript
+        write(&root, "/etc/userdomains", "example.com: alice\n");
+        write(&root, "/_cmd/acctdns_mtasts_subdomain.txt", DENIED_REPLY);
+        let e = install_mtasts_site(&cp, &client, "example.com", None).unwrap_err();
+        assert!(e.error.contains("Access denied"), "{}", e.error);
+        assert_eq!(e.actions.len(), 2, "{:?}", e.actions);
+
+        // without a userdata file the docroot follows the home from /etc/passwd
+        let _ = std::fs::remove_file(root.join("var/cpanel/userdata/alice/mta-sts.example.com"));
+        write(&root, "/_cmd/acctdns_mtasts_subdomain.txt", OK_REPLY);
+        let _ = std::fs::remove_file(root.join("_cmd/acctdns_mtasts_autossl.txt"));
+        let r = install_mtasts_site(&cp, &client, "example.com", None).unwrap();
+        assert_eq!(r.docroot, "/home/alice/public_html/mta-sts.example.com");
+        assert!(
+            r.actions.iter().any(|a| a.contains("AutoSSL not started")),
+            "{:?}",
+            r.actions
+        );
+        std::env::remove_var("MSFE_NG_RESOLVER");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

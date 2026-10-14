@@ -2665,6 +2665,11 @@ const DLV_REPAIR_LABEL={spf:'SPF',dkim:'DKIM',dmarc:'DMARC'};
 // holds the name (the DMARC authorization lives in the *receiving* domain's
 // zone). A proposal still holding a <placeholder> is never offered.
 const DLV_TXT_IDS={'tlsrpt.record':'TLS-RPT','mtasts.txt':'MTA-STS','dmarc.rua_external':'DMARC report authorization'};
+// The MTA-STS policy site: mta-sts.<domain> without an address, or with no
+// policy served. POST /api/acctdns/mtasts creates the subdomain through cPanel
+// (A record + vhost), writes .well-known/mta-sts.txt and asks AutoSSL — offered
+// when the tested domain is hosted by an account here (ctx.acct).
+const DLV_MTASTS_SITE_IDS={'mtasts.policy':true};
 // `name. TTL IN TXT "value"` → {what, name, value}, or null
 function dlvTxtRecord(c){
   const what=DLV_TXT_IDS[c.id];
@@ -2679,6 +2684,7 @@ function dlvRepairButton(c,ctx){
   if(!(c.verdict==='fail'||c.verdict==='warn'))return null;
   const rec=dlvTxtRecord(c);
   if(rec)return dlvTxtButton(rec,ctx);
+  if(DLV_MTASTS_SITE_IDS[c.id]&&c.verdict==='fail')return dlvMtaStsSiteButton(ctx);
   const what=DLV_REPAIR_IDS[c.id];
   if(!what||!ctx.acct)return null;
   if(ctx.applied[what])return el('span',{class:'muted',style:'font-size:.78rem'},DLV_REPAIR_LABEL[what]+' fix applied — run the test again once the resolver has caught up');
@@ -2697,19 +2703,91 @@ function dlvTxtButton(rec,ctx){
   b.onclick=e=>{e.stopPropagation();dlvTxtDialog(rec,z,ctx);};
   return b;
 }
+function dlvMtaStsSiteButton(ctx){
+  if(!ctx.acct||!ctx.domain)return null; // not hosted by an account here: the copy button is all there is
+  if(ctx.applied['mtasts-site'])return el('span',{class:'muted',style:'font-size:.78rem'},'mta-sts.'+ctx.domain+' set up — fix applied; run the test again once the resolver and AutoSSL have caught up');
+  const b=el('button',{class:'act plain dlv-apply-mtasts',style:'margin-top:.4rem',title:'Create mta-sts.'+ctx.domain+' with cPanel’s create_subdomain, write the policy file and ask AutoSSL for the certificate, after a confirmation'},'Apply this fix…');
+  b.onclick=e=>{e.stopPropagation();dlvMtaStsSiteDialog(ctx);};
+  return b;
+}
+// The policy-site part of the fix, as a form: the proposed policy (editable),
+// what will be done. Used alone by the policy rows' dialog and, before the
+// TXT record goes out, by the MTA-STS record dialog.
+// Returns {box, apply(out) → Promise<res|null>, enabled()}.
+function dlvMtaStsSiteForm(ctx){
+  const d=ctx.domain,host='mta-sts.'+d;
+  const box=el('div',{});
+  const ta=el('textarea',{class:'mono',rows:'5',spellcheck:'false',style:'width:100%'});ta.value='(loading the proposal…)';ta.disabled=true;
+  const info=el('div',{class:'muted',style:'font-size:.78rem;margin-bottom:.4rem'},'');
+  box.append(info,el('div',{class:'acct-lbl'},'policy to serve at https://'+host+'/.well-known/mta-sts.txt'),ta,
+    el('div',{class:'muted',style:'font-size:.76rem'},'mode: testing lets senders report problems without refusing delivery; switch to enforce once the test shows the MX certificates are right. One mx: line per MX host; max_age in seconds.'));
+  let site=null;
+  (async()=>{
+    const r=await api('/api/acctdns/mtasts?domain='+encodeURIComponent(d));
+    if(!r||r.error){info.textContent=(r&&r.error)||'cannot describe the site';return;}
+    site=r;ta.value=r.policy||'';ta.disabled=false;
+    info.textContent=(r.exists?host+' is already a domain of account '+r.user+'; the policy file is written into its document root (replacing any policy there) and AutoSSL is asked for the certificate.'
+      :host+' is created as a subdomain of account '+r.user+' through cPanel’s create_subdomain (document root public_html/'+host+'): that adds its A record to the zone and the web site. The policy goes to .well-known/mta-sts.txt there, with a .htaccess that keeps the main site’s rewrites out, and AutoSSL is asked for the certificate.')
+      +' Nothing is written by hand outside the site’s own folder.';
+  })();
+  return {box,
+    enabled(){return site&&site.hosted;},
+    async apply(out){
+      const policy=ta.value.trim();if(!policy){toast('The policy is empty');return null;}
+      out.textContent='Setting up '+host+'…';
+      const res=await api('/api/acctdns/mtasts',{method:'POST',body:{domain:d,policy}});
+      out.textContent=(((res&&res.actions)||[]).join('\n'))||(res&&res.error)||'no output';
+      if(!(res&&res.ok)){toast((res&&res.error)||'not set up');return null;}
+      ctx.applied['mtasts-site']=true;ctx.refill();
+      return res;
+    }};
+}
+function dlvMtaStsSiteDialog(ctx){
+  const host='mta-sts.'+ctx.domain;
+  const m=modal('Serve the MTA-STS policy — '+host);
+  const form=dlvMtaStsSiteForm(ctx);
+  m.body.append(form.box);
+  const out=el('pre',{class:'log',style:'display:none'});
+  const go=el('button',{class:'act'},'Apply');
+  const cancel=el('button',{class:'act plain'},'Cancel');
+  cancel.onclick=()=>m.close();
+  const ctl=el('div',{class:'ctl',style:'margin-top:.6rem'},go,cancel);
+  go.onclick=async()=>{
+    if(!form.enabled()){toast('The site cannot be set up from here');return;}
+    go.disabled=true;cancel.disabled=true;out.style.display='';
+    const res=await form.apply(out);
+    cancel.disabled=false;
+    if(!res){go.disabled=false;return;}
+    toast(host+' set up');
+    const again=el('button',{class:'act'},'Run the test again');
+    again.onclick=()=>{m.close();ctx.rerun();};
+    cancel.textContent='Close';
+    ctl.innerHTML='';ctl.append(again,cancel);
+    m.body.insertBefore(el('div',{class:'note',style:'font-size:.8rem;margin-top:.5rem'},'Set up. AutoSSL issues the certificate in the background (usually within minutes) and resolvers may keep a negative answer for '+host+' for a while, so a re-run right away can still fail on the fetch; the transcript above is the proof of what was done.'),out);
+  };
+  m.body.append(ctl,out);
+}
 function dlvTxtDialog(rec,z,ctx){
   const dns=acdDns(z);
   const m=modal('Publish the '+rec.what+' record — '+rec.name);
   m.body.append(el('div',{class:'muted',style:'font-size:.8rem;margin-bottom:.5rem'},
     'A TXT record at '+rec.name+' goes into zone '+z.name+' on this server through cPanel’s own addzonerecord; any TXT record already at that name is replaced. Nothing is written by hand. DNS: '+dns.label+' — '+dns.title+'.'));
-  let hint='';
-  if(rec.what==='MTA-STS'){const d=rec.name.replace(/^_mta-sts\./,'');hint='The record alone protects nothing: senders that see it fetch https://mta-sts.'+d+'/.well-known/mta-sts.txt and ignore the record while that file is missing. Serve the policy (the row’s Where says how), then publish — or publish now and add the file right after.';}
+  let hint='',site=null,siteOn=null;
+  if(rec.what==='MTA-STS'){const d=rec.name.replace(/^_mta-sts\./,'');hint='The record alone protects nothing: senders that see it fetch https://mta-sts.'+d+'/.well-known/mta-sts.txt and ignore the record while that file is missing.';
+    if(ctx.acct&&ctx.domain===d&&!ctx.applied['mtasts-site']){site=dlvMtaStsSiteForm(ctx);siteOn=el('input',{type:'checkbox'});siteOn.checked=true;}
+    else hint+=' Serve the policy (the row’s Where says how), then publish — or publish now and add the file right after.';}
   else if(rec.what==='TLS-RPT')hint='The mailbox in rua= must exist and be read: senders that support TLS-RPT mail it a daily report of TLS failures towards your MX. Change the address before applying if needed.';
   else{const mm=/^(.+?)\._report\._dmarc\.(.+)$/.exec(rec.name);if(mm)hint='This tells receivers that '+mm[2]+' agrees to receive DMARC reports about '+mm[1]+'. It belongs in '+mm[2]+'’s zone, which is why it is published there.';}
   if(hint)m.body.append(el('div',{class:'muted',style:'font-size:.78rem;margin-bottom:.4rem'},hint));
   const ta=el('textarea',{class:'mono',rows:'3',spellcheck:'false',style:'width:100%'});ta.value=rec.value;
   m.body.append(el('div',{class:'acct-lbl'},'record to publish (TXT value)'),ta,
     el('div',{class:'muted',style:'font-size:.76rem'},'Edit the value before applying if you need to; it is published with a 14400 s TTL.'));
+  if(site){
+    const lab=el('label',{style:'display:block;margin-top:.6rem;font-size:.85rem'},siteOn,' Also set up mta-sts.'+ctx.domain+' and serve this policy, before publishing the record');
+    site.box.style.marginTop='.4rem';
+    siteOn.onchange=()=>{site.box.style.display=siteOn.checked?'':'none';};
+    m.body.append(lab,site.box);
+  }
   const out=el('pre',{class:'log',style:'display:none'});
   const go=el('button',{class:'act'},'Apply');
   const cancel=el('button',{class:'act plain'},'Cancel');
@@ -2717,9 +2795,17 @@ function dlvTxtDialog(rec,z,ctx){
   const ctl=el('div',{class:'ctl',style:'margin-top:.6rem'},go,cancel);
   go.onclick=async()=>{
     const value=ta.value.trim();if(!value){toast('The record is empty');return;}
-    go.disabled=true;cancel.disabled=true;out.style.display='';out.textContent='Publishing…';
+    go.disabled=true;cancel.disabled=true;out.style.display='';
+    let head='';
+    if(site&&siteOn.checked){
+      if(!site.enabled()){toast('The site cannot be set up from here');go.disabled=false;cancel.disabled=false;return;}
+      const sres=await site.apply(out);
+      if(!sres){go.disabled=false;cancel.disabled=false;return;}
+      head=out.textContent+'\n\n';
+    }
+    out.textContent=head+'Publishing…';
     const res=await api('/api/acctdns/txt',{method:'POST',body:{name:rec.name,value}});
-    out.textContent=(((res&&res.actions)||[]).join('\n'))||(res&&res.error)||'no output';
+    out.textContent=head+((((res&&res.actions)||[]).join('\n'))||(res&&res.error)||'no output');
     cancel.disabled=false;
     if(!(res&&res.ok)){go.disabled=false;toast((res&&res.error)||'not published');return;}
     toast(rec.what+' record published');

@@ -58,7 +58,11 @@ test](Delivery-test), which offers it only when this view reports the record
 as repairable. The Address test's TLS-RPT, MTA-STS and DMARC report-authorization
 rows use a plainer path: one TXT record into the local zone that holds the
 name (`dumpzone` + `removezonerecord` for what is there, then `addzonerecord`),
-also available as `msfe-ng acctdns txt <name> <value>`.
+also available as `msfe-ng acctdns txt <name> <value>`. The MTA-STS policy
+site (`mta-sts.<domain>`) is set up through `create_subdomain` for the account
+hosting the domain, the policy file in its document root, and
+`start_autossl_check_for_one_user` for the certificate — `msfe-ng acctdns
+mta-sts <domain>`.
 
 | Check | What runs |
 |---|---|
@@ -211,6 +215,17 @@ that name, and prints the transcript. The value is checked against the name:
 `_report._dmarc`; `_dmarc` and `_domainkey` names are refused (use `fix`).
 Exit **0** on success, **1** when refused or no local zone holds the name
 (the record to publish elsewhere is printed), **2** on a usage error.
+
+`mta-sts <domain>` makes `mta-sts.<domain>` serve an MTA-STS policy: the
+subdomain is created through cPanel for the account that hosts the domain
+when it is not there yet (that adds the A record and the web site), the
+policy goes to `.well-known/mta-sts.txt` in its document root (replacing one
+already there; a guarding `.htaccess` is written only when none exists), and
+AutoSSL is asked for the certificate. The policy is built from the domain's
+MX hosts with `--mode` (`testing` by default, `enforce`, `none`) and a week of
+`max_age`, or read from `--policy <file>`. The `_mta-sts` TXT record is
+`txt`'s job. Exit **0** on success, **1** when the domain is not hosted by an
+account here or cPanel refused, **2** on a usage error.
 
 ## Requirements
 

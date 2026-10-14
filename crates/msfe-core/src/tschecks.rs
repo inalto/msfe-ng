@@ -292,6 +292,7 @@ fn mtasts_task(ctx: &Ctx, res: &Results) -> (Vec<Check>, Vec<Task>) {
                 .fix(Fix {
                     summary: format!("Give {host} an address (A/AAAA or CNAME) and serve the policy over HTTPS"),
                     dns_record: Some(format!("{host}. 3600 IN A <web server IP>")),
+                    location: Some(format!("cPanel: a subdomain {host} with AutoSSL and the policy at .well-known/mta-sts.txt in its document root — the Apply button does that when {d} is hosted here")),
                     ..Default::default()
                 }),
         );
@@ -334,7 +335,11 @@ fn mtasts_task(ctx: &Ctx, res: &Results) -> (Vec<Check>, Vec<Task>) {
             out.push(
                 Check::new("mtasts.policy", r, TS, Verdict::Fail, Severity::High, "MTA-STS policy cannot be fetched", format!("{e}. Senders that support MTA-STS fetch this file after seeing the TXT record; failing that they fall back to opportunistic TLS and retry on every delivery — the TXT record promises a policy that is not there"))
                     .target(&url)
-                    .fix_summary(format!("Serve {url} over HTTPS with a certificate valid for {host} (no redirects), content type text/plain")),
+                    .fix(Fix {
+                        summary: format!("Serve {url} over HTTPS with a certificate valid for {host} (no redirects), content type text/plain"),
+                        location: Some(format!("cPanel: the policy at .well-known/mta-sts.txt in the document root of {host}, a certificate from AutoSSL — the Apply button does that when {d} is hosted here")),
+                        ..Default::default()
+                    }),
             );
             return (out, vec![]);
         }
@@ -352,7 +357,11 @@ fn mtasts_task(ctx: &Ctx, res: &Results) -> (Vec<Check>, Vec<Task>) {
             )
             .target(&url)
             .evidence("body", fetched.body.chars().take(500).collect::<String>())
-            .fix_summary(format!("Put the policy file at {url}")),
+            .fix(Fix {
+                summary: format!("Put the policy file at {url}"),
+                location: Some(format!("cPanel: .well-known/mta-sts.txt in the document root of {host} — the Apply button writes it when {d} is hosted here")),
+                ..Default::default()
+            }),
         );
         return (out, vec![]);
     }

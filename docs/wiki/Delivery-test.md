@@ -48,8 +48,26 @@ cPanel's `addzonerecord` into whichever zone on this server holds the name:
 which belongs in the *receiving* domain's zone, so it is offered when that
 domain is hosted here even if the tested one is not). The confirmation shows
 the TXT value to publish, editable, and any TXT record already at that name
-is replaced. For MTA-STS it also reminds you that the record protects nothing
-until the policy file is served at `https://mta-sts.<domain>/.well-known/mta-sts.txt`.
+is replaced.
+
+MTA-STS needs more than the record: senders that see it fetch the policy from
+`https://mta-sts.<domain>/.well-known/mta-sts.txt` and ignore the record while
+that fails. When the tested domain is hosted by a cPanel account here, the
+MTA-STS record dialog offers to **set up the policy site first** (on by
+default) and the *policy* rows — `mta-sts.<domain>` does not resolve, the
+policy cannot be fetched, answers something other than 200 — get their own
+**Apply this fix…**. That creates `mta-sts.<domain>` as a subdomain of the
+account through cPanel's `create_subdomain` (which adds its A record to the
+zone and the web site, document root `public_html/mta-sts.<domain>`) unless
+the account already has it, writes the policy to `.well-known/mta-sts.txt`
+there with a small `.htaccess` that keeps the main site's rewrites out and
+the file `text/plain`, and asks AutoSSL for the certificate. The dialog shows
+the policy, editable: `mode: testing` to start, one `mx:` line per MX host
+the domain publishes (the domain itself when it has none), a week of
+`max_age`. AutoSSL issues the certificate in the background and resolvers may
+hold a negative answer for the new name for a while, so a re-run right away
+can still fail on the fetch; the transcript is the proof of what was done.
+Also available as `msfe-ng acctdns mta-sts <domain>`.
 A proposal that still contains a `<placeholder>` is never offered. Rows about
 a name whose zone is not on this server, or about anything else (MX, TLSA, …),
 keep the copy button only.
