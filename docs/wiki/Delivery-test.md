@@ -39,8 +39,20 @@ DNS](Account-DNS)'s *Repair* (`install_spf_records`, `enable_dkim`,
 `addzonerecord`) and shows their transcript; the row then notes the fix was
 applied and offers to run the test again. Resolvers can keep the old answer
 until the record's TTL passes, so a re-run right away may still show the old
-state. Rows about a domain hosted elsewhere, or about anything other than
-those three records (MX, MTA-STS, TLSA, …), keep the copy button only.
+state.
+
+Three more records get the same button, published as plain TXT records with
+cPanel's `addzonerecord` into whichever zone on this server holds the name:
+**TLS-RPT** (`_smtp._tls.<domain>`), **MTA-STS** (`_mta-sts.<domain>`) and the
+**DMARC external-report authorization** (`<domain>._report._dmarc.<receiver>`,
+which belongs in the *receiving* domain's zone, so it is offered when that
+domain is hosted here even if the tested one is not). The confirmation shows
+the TXT value to publish, editable, and any TXT record already at that name
+is replaced. For MTA-STS it also reminds you that the record protects nothing
+until the policy file is served at `https://mta-sts.<domain>/.well-known/mta-sts.txt`.
+A proposal that still contains a `<placeholder>` is never offered. Rows about
+a name whose zone is not on this server, or about anything else (MX, TLSA, …),
+keep the copy button only.
 
 Nothing is guessed. An address alone cannot prove that the mailbox exists,
 that its mail authenticates, or that it lands in the inbox — the report says

@@ -109,6 +109,7 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
         ("delivery", _) => Some(NONE),
         ("acctdns", Some("scan")) => Some(&["--user", "--domain", "--all", "--json"]),
         ("acctdns", Some("fix")) => Some(&["--record", "--json"]),
+        ("acctdns", Some("txt")) => Some(&["--json"]),
         ("acctdns", _) => Some(NONE),
         ("dmarc", Some("fetch")) => Some(&["--dry-run", "--keep", "--json"]),
         ("dmarc", Some("import" | "status")) => Some(&["--json"]),
@@ -149,7 +150,7 @@ fn usage_of(cmd: &str) -> &'static str {
         "restore" => "msfe-ng restore <file.tar.gz> [--yes]   (alias: snapshot import --only msfe)",
         "conf" => "msfe-ng conf <test [--no-lint] [--json] [--with <id>=<file>]... | test-message <clean|gtube|eicar|file.eml> [--offline] [--json] | grep <text>>",
         "delivery" => "msfe-ng delivery <test <address> [--ip <sending ip>] [--selector <dkim selector>] [--audit] [--days <1-7>] [--json | --html] [--force] | eml <file.eml> [--bounce] [--address <a>] [--ip <ip>] [--selector <s>] [--audit] [--json | --html] | inbox <install [--dry-run] | uninstall [--dry-run] | status | new | poll <token> [--json] | remove <token> | sweep> | testmail --from <local address> --to <address> [--tag <t>] [--follow <secs>] [--json] | monitor <list [--json] | add <address> [--interval-mins n] [--audit] [--ip ..] [--selector ..] [--days n] | remove <id|address> | run [--dry-run] [--id n]> | osint <address> [--providers a,b] [--json | --html] [--force] | osint providers [--json] | osint sweep | osint monitor <list [--json] | add <address> [--sources a,b] [--interval-mins n] | remove <id|address> | enable <id> | disable <id> | run [--dry-run] [--id n] | history <id> [--json]>>",
-        "acctdns" => "msfe-ng acctdns <scan [--user <account>] [--domain <domain>] [--all] [--json] | fix <domain> <spf|dkim|dmarc> [--record <record>] [--json]>",
+        "acctdns" => "msfe-ng acctdns <scan [--user <account>] [--domain <domain>] [--all] [--json] | fix <domain> <spf|dkim|dmarc> [--record <record>] [--json] | txt <name> <value> [--json]>",
         "footers" => "msfe-ng footers <status [--json] | set \"<directive>\" on|off [\"<directive>\" on|off]... [--dry-run] | off [--dry-run] | restore [<backup>] [--dry-run] | backups>",
         "dmarc" => "msfe-ng dmarc <fetch [--dry-run] [--keep] [--json] | import <file.xml|.gz|.zip|.eml>... [--json] | status [--json] | test | prune>",
         _ => "msfe-ng help",
@@ -3873,6 +3874,7 @@ fn cmd_acctdns(sub: Option<&str>, rest: &[String]) -> ExitCode {
     match sub {
         Some("scan") => cmd_acctdns_scan(rest),
         Some("fix") => cmd_acctdns_fix(rest),
+        Some("txt") => cmd_acctdns_txt(rest),
         _ => {
             eprintln!("usage: {}", usage_of("acctdns"));
             ExitCode::from(2)
@@ -4061,6 +4063,52 @@ fn cmd_acctdns_fix(rest: &[String]) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// `acctdns txt <name> <value> [--json]`: one TXT record into the zone this
+/// server holds for the name, replacing what is published there (the Address
+/// test's Apply button for TLS-RPT, MTA-STS and DMARC report authorization).
+fn cmd_acctdns_txt(rest: &[String]) -> ExitCode {
+    use msfe_core::acctdns;
+    use msfe_core::cpaudit::Cp;
+    let json = rest.iter().any(|a| a == "--json");
+    let positional: Vec<&String> = rest.iter().filter(|a| !a.starts_with('-')).collect();
+    let (Some(name), Some(value)) = (positional.first(), positional.get(1)) else {
+        eprintln!("usage: {}", usage_of("acctdns"));
+        return ExitCode::from(2);
+    };
+    match acctdns::install_txt(&Cp::detect(), name, value) {
+        Ok(r) => {
+            if json {
+                println!("{}", r.to_json());
+            } else {
+                for a in &r.actions {
+                    println!("{a}");
+                }
+                println!(
+                    "{} ({})",
+                    acctdns_txt_line(&r.name, &r.value),
+                    r.zone.summary()
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            if json {
+                println!("{}", e.to_json());
+            } else {
+                for a in &e.actions {
+                    println!("{a}");
+                }
+                eprintln!("msfe-ng acctdns txt: {e}", e = e.error);
+            }
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn acctdns_txt_line(name: &str, value: &str) -> String {
+    format!("{name}. 14400 IN TXT \"{value}\"")
 }
 
 fn fmt_size(n: u64) -> String {

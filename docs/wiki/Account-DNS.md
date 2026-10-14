@@ -55,7 +55,10 @@ Nothing writes a zone file by hand, and nothing runs without a confirmation
 that states the change and shows the record. The same installers are behind
 **Apply this fix…** on an SPF, DKIM or DMARC row of the [Address
 test](Delivery-test), which offers it only when this view reports the record
-as repairable.
+as repairable. The Address test's TLS-RPT, MTA-STS and DMARC report-authorization
+rows use a plainer path: one TXT record into the local zone that holds the
+name (`dumpzone` + `removezonerecord` for what is there, then `addzonerecord`),
+also available as `msfe-ng acctdns txt <name> <value>`.
 
 | Check | What runs |
 |---|---|
@@ -181,6 +184,7 @@ currently visible, so they follow the filters.
 ```
 msfe-ng acctdns scan [--user <u>] [--domain <d>] [--all] [--json]
 msfe-ng acctdns fix <domain> <spf|dkim|dmarc> [--record <r>] [--json]
+msfe-ng acctdns txt <name> <value> [--json]
 ```
 
 `scan` prints one line per domain, followed by a summary:
@@ -199,6 +203,14 @@ check, **2** on a usage error, **3** when the panel is not cPanel.
 the re-checked row; `--record` supplies the record to install instead of the
 proposed one (SPF and DMARC only). Exit **0** on success, **1** when the
 installer refused, **2** on a usage error.
+
+`txt` publishes one TXT record at `<name>` (a bare value or a zone-file line)
+into the zone this server holds for it, replacing any TXT record already at
+that name, and prints the transcript. The value is checked against the name:
+`v=TLSRPTv1` under `_smtp._tls`, `v=STSv1` under `_mta-sts`, `v=DMARC1` under
+`_report._dmarc`; `_dmarc` and `_domainkey` names are refused (use `fix`).
+Exit **0** on success, **1** when refused or no local zone holds the name
+(the record to publish elsewhere is printed), **2** on a usage error.
 
 ## Requirements
 

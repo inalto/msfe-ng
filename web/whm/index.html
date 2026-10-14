@@ -2660,16 +2660,77 @@ function deliveryRenderer(into){
 // copy button only.
 const DLV_REPAIR_IDS={'spf.record':'spf','spf.eval':'spf','spf.all':'spf','out.spf_includes_ip':'spf','dkim.discovery':'dkim','out.dkim_cpanel':'dkim','dmarc.record':'dmarc','dmarc.syntax':'dmarc','dmarc.policy':'dmarc'};
 const DLV_REPAIR_LABEL={spf:'SPF',dkim:'DKIM',dmarc:'DMARC'};
-// ctx: {domain, acct (the Account DNS row), applied {what:true}, onApplied(row), rerun()}
+// Plain TXT records the test proposes elsewhere than the domain's own SPF, DKIM
+// and DMARC: published through POST /api/acctdns/txt into whichever local zone
+// holds the name (the DMARC authorization lives in the *receiving* domain's
+// zone). A proposal still holding a <placeholder> is never offered.
+const DLV_TXT_IDS={'tlsrpt.record':'TLS-RPT','mtasts.txt':'MTA-STS','dmarc.rua_external':'DMARC report authorization'};
+// `name. TTL IN TXT "value"` → {what, name, value}, or null
+function dlvTxtRecord(c){
+  const what=DLV_TXT_IDS[c.id];
+  if(!what||!c.fix||!c.fix.dns_record)return null;
+  const m=/^\s*([A-Za-z0-9_.-]+?)\.?\s+\d+\s+IN\s+TXT\s+"([^"]*)"\s*$/.exec(c.fix.dns_record);
+  if(!m||/[<>]/.test(m[2]))return null;
+  return {what,name:m[1].toLowerCase(),value:m[2].trim()};
+}
+// ctx: {domain, acct (the Account DNS row), zones {name: zone|null (pending)}, applied {key:true},
+//       lookupZone(name), onApplied(row), refill(), rerun()}
 function dlvRepairButton(c,ctx){
+  if(!(c.verdict==='fail'||c.verdict==='warn'))return null;
+  const rec=dlvTxtRecord(c);
+  if(rec)return dlvTxtButton(rec,ctx);
   const what=DLV_REPAIR_IDS[c.id];
-  if(!what||!ctx.acct||!(c.verdict==='fail'||c.verdict==='warn'))return null;
+  if(!what||!ctx.acct)return null;
   if(ctx.applied[what])return el('span',{class:'muted',style:'font-size:.78rem'},DLV_REPAIR_LABEL[what]+' fix applied — run the test again once the resolver has caught up');
   const ac=ctx.acct[what]||{};
   if(!ac.fixable)return null;
   const b=el('button',{class:'act plain dlv-apply',style:'margin-top:.4rem',title:'Install the record with cPanel’s own installer, after a confirmation'},'Apply this fix…');
   b.onclick=e=>{e.stopPropagation();dlvApplyDialog(what,ctx);};
   return b;
+}
+function dlvTxtButton(rec,ctx){
+  if(ctx.applied['txt:'+rec.name])return el('span',{class:'muted',style:'font-size:.78rem'},rec.what+' record published at '+rec.name+' — fix applied; run the test again once the resolver has caught up');
+  const z=ctx.zones[rec.name];
+  if(z===undefined){ctx.zones[rec.name]=null;ctx.lookupZone(rec.name);return null;} // pending
+  if(!z||!z.name)return null; // no local zone: the copy button is all there is
+  const b=el('button',{class:'act plain dlv-apply-txt',style:'margin-top:.4rem',title:'Publish the record in zone '+z.name+' on this server with cPanel’s addzonerecord, after a confirmation'},'Apply this fix…');
+  b.onclick=e=>{e.stopPropagation();dlvTxtDialog(rec,z,ctx);};
+  return b;
+}
+function dlvTxtDialog(rec,z,ctx){
+  const dns=acdDns(z);
+  const m=modal('Publish the '+rec.what+' record — '+rec.name);
+  m.body.append(el('div',{class:'muted',style:'font-size:.8rem;margin-bottom:.5rem'},
+    'A TXT record at '+rec.name+' goes into zone '+z.name+' on this server through cPanel’s own addzonerecord; any TXT record already at that name is replaced. Nothing is written by hand. DNS: '+dns.label+' — '+dns.title+'.'));
+  let hint='';
+  if(rec.what==='MTA-STS'){const d=rec.name.replace(/^_mta-sts\./,'');hint='The record alone protects nothing: senders that see it fetch https://mta-sts.'+d+'/.well-known/mta-sts.txt and ignore the record while that file is missing. Serve the policy (the row’s Where says how), then publish — or publish now and add the file right after.';}
+  else if(rec.what==='TLS-RPT')hint='The mailbox in rua= must exist and be read: senders that support TLS-RPT mail it a daily report of TLS failures towards your MX. Change the address before applying if needed.';
+  else{const mm=/^(.+?)\._report\._dmarc\.(.+)$/.exec(rec.name);if(mm)hint='This tells receivers that '+mm[2]+' agrees to receive DMARC reports about '+mm[1]+'. It belongs in '+mm[2]+'’s zone, which is why it is published there.';}
+  if(hint)m.body.append(el('div',{class:'muted',style:'font-size:.78rem;margin-bottom:.4rem'},hint));
+  const ta=el('textarea',{class:'mono',rows:'3',spellcheck:'false',style:'width:100%'});ta.value=rec.value;
+  m.body.append(el('div',{class:'acct-lbl'},'record to publish (TXT value)'),ta,
+    el('div',{class:'muted',style:'font-size:.76rem'},'Edit the value before applying if you need to; it is published with a 14400 s TTL.'));
+  const out=el('pre',{class:'log',style:'display:none'});
+  const go=el('button',{class:'act'},'Apply');
+  const cancel=el('button',{class:'act plain'},'Cancel');
+  cancel.onclick=()=>m.close();
+  const ctl=el('div',{class:'ctl',style:'margin-top:.6rem'},go,cancel);
+  go.onclick=async()=>{
+    const value=ta.value.trim();if(!value){toast('The record is empty');return;}
+    go.disabled=true;cancel.disabled=true;out.style.display='';out.textContent='Publishing…';
+    const res=await api('/api/acctdns/txt',{method:'POST',body:{name:rec.name,value}});
+    out.textContent=(((res&&res.actions)||[]).join('\n'))||(res&&res.error)||'no output';
+    cancel.disabled=false;
+    if(!(res&&res.ok)){go.disabled=false;toast((res&&res.error)||'not published');return;}
+    toast(rec.what+' record published');
+    ctx.applied['txt:'+rec.name]=true;ctx.refill();
+    const again=el('button',{class:'act'},'Run the test again');
+    again.onclick=()=>{m.close();ctx.rerun();};
+    cancel.textContent='Close';
+    ctl.innerHTML='';ctl.append(again,cancel);
+    m.body.insertBefore(el('div',{class:'note',style:'font-size:.8rem;margin-top:.5rem'},'Published. The resolver this host uses may still answer with the old record until its TTL passes, so a re-run can still show the old state for a while; the installer’s reply above is the proof the record was written.'),out);
+  };
+  m.body.append(ctl,out);
 }
 function dlvApplyDialog(what,ctx){
   const d=ctx.domain,ac=ctx.acct[what]||{},label=DLV_REPAIR_LABEL[what],dns=acdDns(ctx.acct.zone);
@@ -3313,16 +3374,28 @@ async function renderDeliveryTest(v){
   // The Account DNS row of the tested domain, fetched once per run: it says
   // which of SPF, DKIM and DMARC can be installed from here (cPanel only; a
   // domain not hosted here answers 404 and the rows keep their copy button).
-  const repairCtx={domain:'',acct:null,applied:{},onApplied(row){repairCtx.acct=row;renderer.setRepair(c=>dlvRepairButton(c,repairCtx));},rerun(){forceBox.checked=true;startRun();}};
+  const repairFn=c=>dlvRepairButton(c,repairCtx);
+  const repairCtx={domain:'',acct:null,zones:{},applied:{},
+    onApplied(row){repairCtx.acct=row;renderer.setRepair(repairFn);},
+    refill(){renderer.setRepair(repairFn);},
+    rerun(){forceBox.checked=true;startRun();},
+    // which local zone holds a record name (TLS-RPT, MTA-STS, DMARC authorization): one lookup per name per run
+    async lookupZone(name){
+      const zones=repairCtx.zones;
+      const r=await api('/api/acctdns/zone?name='+encodeURIComponent(name));
+      if(zones!==repairCtx.zones)return; // a newer run
+      zones[name]=(r&&r.zone)||{name:null};
+      renderer.setRepair(repairFn);
+    }};
   let repairFor=null;
-  function resetRepair(){repairFor=null;repairCtx.domain='';repairCtx.acct=null;repairCtx.applied={};renderer.setRepair(null);}
+  function resetRepair(){repairFor=null;repairCtx.domain='';repairCtx.acct=null;repairCtx.zones={};repairCtx.applied={};renderer.setRepair(null);}
   async function loadRepair(domain){
     if(!domain||repairFor===domain)return;
-    repairFor=domain;
+    repairFor=domain;renderer.setRepair(repairFn);
     const r=await api('/api/acctdns/scan',{method:'POST',body:{domain}});
     if(repairFor!==domain||!r||!r.row)return;
-    repairCtx.domain=domain;repairCtx.acct=r.row;repairCtx.applied={};
-    renderer.setRepair(c=>dlvRepairButton(c,repairCtx));
+    repairCtx.domain=domain;repairCtx.acct=r.row;
+    renderer.setRepair(repairFn);
   }
 
   function showProgress(r){

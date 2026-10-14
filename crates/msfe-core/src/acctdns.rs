@@ -224,6 +224,20 @@ impl Zone {
             _ => "elsewhere",
         }
     }
+    pub fn to_json(&self) -> Json {
+        Json::Object(vec![
+            (
+                "name".into(),
+                self.name.clone().map(Json::Str).unwrap_or(Json::Null),
+            ),
+            ("local_authority".into(), Json::Bool(self.local_authority)),
+            (
+                "nameservers".into(),
+                Json::Array(self.nameservers.iter().map(Json::str).collect()),
+            ),
+            ("summary".into(), Json::str(self.summary())),
+        ])
+    }
 }
 
 /// The verdict on one record of one domain.
@@ -368,24 +382,7 @@ impl Row {
             ("user".into(), Json::str(&self.domain.user)),
             ("kind".into(), Json::str(self.domain.kind.as_str())),
             ("mail".into(), Json::str(self.domain.mail.as_str())),
-            (
-                "zone".into(),
-                Json::Object(vec![
-                    (
-                        "name".into(),
-                        self.zone.name.clone().map(Json::Str).unwrap_or(Json::Null),
-                    ),
-                    (
-                        "local_authority".into(),
-                        Json::Bool(self.zone.local_authority),
-                    ),
-                    (
-                        "nameservers".into(),
-                        Json::Array(self.zone.nameservers.iter().map(Json::str).collect()),
-                    ),
-                    ("summary".into(), Json::str(self.zone.summary())),
-                ]),
-            ),
+            ("zone".into(), self.zone.to_json()),
             ("spf".into(), self.spf.to_json()),
             ("dkim".into(), self.dkim.to_json()),
             ("dmarc".into(), self.dmarc.to_json()),
@@ -1920,6 +1917,242 @@ pub fn fix(cp: &Cp, domain: &str, what: What, record: Option<&str>) -> Result<Fi
         update_row(r);
     }
     Ok(FixReport { actions, row })
+}
+
+// ---- any TXT record in a zone this server holds ---------------------------------
+// The Address test proposes records that are not SPF, DKIM or DMARC at the
+// domain itself: TLS-RPT (`_smtp._tls.<d>`), MTA-STS (`_mta-sts.<d>`) and the
+// DMARC external-report authorization (`<d>._report._dmarc.<receiver>`), which
+// lives in the *receiving* domain's zone. They are plain TXT records, so one
+// installer covers them: find the local zone holding the name, replace what is
+// published at that name, add the record — through `addzonerecord`, as the
+// DMARC repair does.
+
+/// A record owner name: like a host name, but labels may begin with `_`
+/// (`_smtp`, `_tls`, `_mta-sts`, `_report`, RFC 8552).
+pub fn valid_record_name(s: &str) -> bool {
+    let s = s.trim_end_matches('.');
+    if s.is_empty() || s.len() > 253 || !s.contains('.') {
+        return false;
+    }
+    let labels: Vec<&str> = s.split('.').collect();
+    if labels.iter().any(|l| {
+        let body = l.strip_prefix('_').unwrap_or(l);
+        body.is_empty()
+            || l.len() > 63
+            || body.starts_with('-')
+            || body.ends_with('-')
+            || !body.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    }) {
+        return false;
+    }
+    !labels.last().unwrap().bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Which zone on this server holds `name`: cPanel is asked about the name and
+/// each parent with at least two labels in one `has_local_authority` call, and
+/// the longest candidate it answers for wins. `Zone::default()` (no name) when
+/// none is held here; `Err` for a malformed name or a failed call.
+pub fn txt_zone(cp: &Cp, name: &str) -> Result<Zone, String> {
+    let n = name.trim().trim_end_matches('.').to_ascii_lowercase();
+    if !valid_record_name(&n) {
+        return Err(format!("'{name}' is not a DNS name"));
+    }
+    let labels: Vec<&str> = n.split('.').collect();
+    let candidates: Vec<String> = (0..labels.len().saturating_sub(1))
+        .map(|i| labels[i..].join("."))
+        .collect();
+    let args: Vec<String> = candidates.iter().map(|c| format!("domain={c}")).collect();
+    let auth = whmapi1(
+        cp,
+        "acctdns_txt_authority",
+        "has_local_authority",
+        &args,
+        VALIDATE_TIMEOUT,
+    )
+    .and_then(|v| parse_local_authority(&v))?;
+    for c in &candidates {
+        if let Some((_, z)) = auth.iter().find(|(d, _)| d == c) {
+            if z.name.is_some() {
+                return Ok(inherit_nameservers(z.clone(), &Ok(auth.clone())));
+            }
+        }
+    }
+    Ok(Zone::default())
+}
+
+/// What `install_txt` did: the record as installed, where, and the transcript.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TxtReport {
+    pub name: String,
+    pub value: String,
+    pub zone: Zone,
+    pub actions: Vec<String>,
+}
+
+impl TxtReport {
+    pub fn to_json(&self) -> Json {
+        Json::Object(vec![
+            ("ok".into(), Json::Bool(true)),
+            ("name".into(), Json::str(&self.name)),
+            ("value".into(), Json::str(&self.value)),
+            ("zone".into(), self.zone.to_json()),
+            (
+                "actions".into(),
+                Json::Array(self.actions.iter().map(Json::str).collect()),
+            ),
+        ])
+    }
+}
+
+/// The value a TXT record at `name` may hold: the generic rules of
+/// `check_record`, no `<placeholder>` left from a proposal, and the right
+/// `v=` tag for the names this knows — the records cPanel's own installers
+/// own (DMARC at `_dmarc`, DKIM) are refused, so they are never bypassed.
+fn check_txt(name: &str, value: &str) -> Result<String, String> {
+    let v = txt_value(value).trim().to_string();
+    if v.is_empty() {
+        return Err("the record is empty".into());
+    }
+    if v.len() > MAX_RECORD {
+        return Err(format!(
+            "the record is {} characters long (limit {MAX_RECORD})",
+            v.len()
+        ));
+    }
+    if v.contains('"') || v.chars().any(|c| c.is_control()) {
+        return Err("the record may not contain quotes or control characters".into());
+    }
+    if v.contains('<') || v.contains('>') {
+        return Err("the record still holds a <placeholder> — fill it in first".into());
+    }
+    let lower = v.to_ascii_lowercase();
+    let need = |tag: &str, what: &str| {
+        if lower.starts_with(&tag.to_ascii_lowercase()) {
+            Ok(())
+        } else {
+            Err(format!("a {what} record must start with {tag}"))
+        }
+    };
+    if name.starts_with("_dmarc.") {
+        return Err(
+            "the DMARC record is installed by the DMARC repair (Account DNS), not here".into(),
+        );
+    }
+    if name.contains("._domainkey.") {
+        return Err(
+            "DKIM records are generated and published by cPanel (Account DNS), not here".into(),
+        );
+    }
+    if name.starts_with("_smtp._tls.") {
+        need("v=TLSRPTv1", "TLS-RPT")?;
+    } else if name.starts_with("_mta-sts.") {
+        need("v=STSv1", "MTA-STS")?;
+    } else if name.contains("._report._dmarc.") {
+        need("v=DMARC1", "DMARC report authorization")?;
+    }
+    Ok(v)
+}
+
+/// Publish one TXT record at `name` in the zone this server holds for it:
+/// every TXT record already at that name is removed (`dumpzone` +
+/// `removezonerecord`), then the new one added (`addzonerecord`, TTL 14400).
+/// Refused, with the zone-file line to publish elsewhere in `actions`, when no
+/// local zone holds the name.
+pub fn install_txt(cp: &Cp, name: &str, value: &str) -> Result<TxtReport, FixError> {
+    if !supported(cp) {
+        return Err(FixError::new(format!(
+            "Account DNS needs cPanel (this host: {})",
+            panel_name(cp)
+        )));
+    }
+    let n = name.trim().trim_end_matches('.').to_ascii_lowercase();
+    if !valid_record_name(&n) {
+        return Err(FixError::new(format!("'{name}' is not a DNS name")));
+    }
+    let v = check_txt(&n, value).map_err(FixError::new)?;
+    let zone = txt_zone(cp, &n).map_err(FixError::new)?;
+    let Some(zname) = zone.name.clone() else {
+        return Err(FixError::with(
+            format!("no zone on this server holds {n}; publish the record at the domain's own name servers"),
+            vec![txt_line(&n, &v)],
+        ));
+    };
+    let mut actions: Vec<String> = Vec::new();
+    actions.push(format!("whmapi1 dumpzone domain={zname}"));
+    let dump = whmapi1(
+        cp,
+        "acctdns_dumpzone",
+        "dumpzone",
+        &[format!("domain={zname}")],
+        FIX_TIMEOUT,
+    )
+    .and_then(|d| meta_ok(&d).map(|_| d))
+    .map_err(|e| {
+        let mut a = actions.clone();
+        a.push(format!("failed: {e}"));
+        FixError::with(e, a)
+    })?;
+    let lines = dmarc_zone_lines(&dump, &n);
+    actions.push(format!(
+        "{} TXT record(s) at {n} in the zone to replace",
+        lines.len()
+    ));
+    for line in lines {
+        installer(
+            cp,
+            "acctdns_txt_remove",
+            "removezonerecord",
+            &[format!("zone={zname}"), format!("line={line}")],
+            &mut actions,
+        )?;
+    }
+    installer(
+        cp,
+        "acctdns_txt_add",
+        "addzonerecord",
+        &[
+            format!("domain={zname}"),
+            format!("name={n}."),
+            "type=TXT".to_string(),
+            format!("ttl={TTL}"),
+            format!("txtdata={v}"),
+        ],
+        &mut actions,
+    )?;
+    if !zone.local_authority {
+        actions.push(format!(
+            "the zone {zname} is only a copy on this server — its name servers ({}) must replicate from here, or the record has to be published there too",
+            if zone.nameservers.is_empty() {
+                "elsewhere".to_string()
+            } else {
+                zone.nameservers.join(", ")
+            }
+        ));
+    }
+    if cp.live() {
+        if let Some(note) = flush_resolver(&zname) {
+            actions.push(note);
+        }
+    }
+    let client = Client::system();
+    match authoritative_txt(&client, &zone, &n) {
+        Some((server, records)) if records.iter().any(|t| t.trim() == v) => actions.push(format!(
+            "{server} (authoritative) already answers with the new record — resolvers show it within its TTL ({TTL} s)"
+        )),
+        Some((server, _)) => actions.push(format!(
+            "{server} (authoritative) does not answer with the new record yet — the zone may replicate from elsewhere; resolvers keep the old answer until the record's TTL expires"
+        )),
+        None => actions.push(
+            "installed — resolvers keep the old answer until the record's TTL expires; test again later".into(),
+        ),
+    }
+    Ok(TxtReport {
+        name: n,
+        value: v,
+        zone,
+        actions,
+    })
 }
 
 /// Drop what the local resolver cached under `domain`, when the resolver is
@@ -3739,5 +3972,162 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         panic!("the scan did not finish");
+    }
+
+    const TXT_AUTH: &str = r#"{"metadata":{"command":"has_local_authority","reason":"OK","result":1,"version":1},"data":{"records":[
+      {"domain":"_smtp._tls.example.org","zone":"example.org","local_authority":1,"nameservers":["ns1.example.org"],"error":null},
+      {"domain":"_smtp._tls.elsewhere.net","zone":null,"local_authority":0,"nameservers":[],"error":null},
+      {"domain":"example.com","zone":"example.com","local_authority":0,"nameservers":["ns1.example.net."],"error":null}
+    ]}}"#;
+
+    #[test]
+    fn txt_zone_takes_the_name_or_the_nearest_parent_cpanel_knows() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = server_tree("txtzone");
+        let cp = Cp { root: root.clone() };
+        write(&root, "/_cmd/acctdns_txt_authority.txt", TXT_AUTH);
+        // answered for the name itself
+        let z = txt_zone(&cp, "_smtp._tls.example.org").unwrap();
+        assert_eq!(z.name.as_deref(), Some("example.org"));
+        assert!(z.local_authority);
+        // not answered for the name: the parent zone is the answer (a copy here)
+        let z = txt_zone(&cp, "_mta-sts.example.com.").unwrap();
+        assert_eq!(z.name.as_deref(), Some("example.com"));
+        assert!(!z.local_authority);
+        assert_eq!(z.nameservers, vec!["ns1.example.net".to_string()]);
+        // no zone at all
+        let z = txt_zone(&cp, "_smtp._tls.elsewhere.net").unwrap();
+        assert!(z.name.is_none());
+        // a name no candidate matches
+        let z = txt_zone(&cp, "a.b.nowhere.test").unwrap();
+        assert!(z.name.is_none());
+        assert!(txt_zone(&cp, "not a name").is_err());
+    }
+
+    #[test]
+    fn install_txt_validates_then_replaces_the_records_at_the_name() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = server_tree("txtfix");
+        let srv = testsupport::start(Box::new(|_, _| Some((0, vec![], false))), false);
+        std::env::set_var("MSFE_NG_RESOLVER", srv.addr.to_string());
+        let cp = Cp { root: root.clone() };
+        write(&root, "/_cmd/acctdns_txt_authority.txt", TXT_AUTH);
+        let tlsrpt = "v=TLSRPTv1; rua=mailto:tls@example.org";
+
+        let e = |name: &str, value: &str| install_txt(&cp, name, value).unwrap_err().error;
+        assert!(
+            e("not a name", tlsrpt).contains("not a DNS name"),
+            "{}",
+            e("not a name", tlsrpt)
+        );
+        assert!(e("_smtp._tls.example.org", "  ").contains("empty"));
+        assert!(
+            e("_smtp._tls.example.org", "v=TLSRPTv1; rua=mailto:<mailbox>").contains("placeholder")
+        );
+        assert!(e(
+            "_smtp._tls.example.org",
+            "v=TLSRPTv1; rua=mailto:x@example.org \""
+        )
+        .contains("quotes"));
+        assert!(e("_smtp._tls.example.org", "v=STSv1; id=1").contains("v=TLSRPTv1"));
+        assert!(e("_mta-sts.example.org", tlsrpt).contains("v=STSv1"));
+        assert!(e("example.net._report._dmarc.example.org", "v=spf1 -all").contains("v=DMARC1"));
+        assert!(e("_dmarc.example.org", "v=DMARC1; p=none").contains("DMARC repair"));
+        assert!(e("default._domainkey.example.org", "v=DKIM1; p=AAAA").contains("DKIM"));
+        let long = format!("v=TLSRPTv1; rua=mailto:{}@example.org", "a".repeat(460));
+        assert!(e("_smtp._tls.example.org", &long).contains("limit 450"));
+
+        // no zone here: refused, carrying the record to publish elsewhere
+        let err = install_txt(
+            &cp,
+            "_smtp._tls.elsewhere.net",
+            "v=TLSRPTv1; rua=mailto:tls@elsewhere.net",
+        )
+        .unwrap_err();
+        assert!(
+            err.error.contains("no zone on this server"),
+            "{}",
+            err.error
+        );
+        assert_eq!(err.actions, vec!["_smtp._tls.elsewhere.net. 14400 IN TXT \"v=TLSRPTv1; rua=mailto:tls@elsewhere.net\"".to_string()]);
+
+        // the TXT records already at the name go first, highest line first,
+        // then the new one is added; other names and types are left alone
+        write(
+            &root,
+            "/_cmd/acctdns_dumpzone.txt",
+            r#"{"data":{"zone":[{"record":[{"Line":3,"type":"TXT","name":"example.org.","txtdata":"v=spf1 -all"},{"Line":7,"type":"TXT","name":"_smtp._tls.example.org.","txtdata":"v=TLSRPTv1; rua=mailto:old@example.org"},{"Line":9,"type":"CNAME","name":"_smtp._tls.example.org."},{"Line":15,"type":"TXT","name":"_SMTP._tls.example.org.","txtdata":"v=TLSRPTv1"}]}]},"metadata":{"result":1,"reason":"OK"}}"#,
+        );
+        write(&root, "/_cmd/acctdns_txt_remove.txt", OK_REPLY);
+        write(&root, "/_cmd/acctdns_txt_add.txt", OK_REPLY);
+        let rep = install_txt(&cp, "_smtp._tls.example.org.", tlsrpt).unwrap();
+        assert_eq!(rep.name, "_smtp._tls.example.org");
+        assert_eq!(rep.value, tlsrpt);
+        assert_eq!(rep.zone.name.as_deref(), Some("example.org"));
+        assert_eq!(rep.actions[0], "whmapi1 dumpzone domain=example.org");
+        assert_eq!(
+            rep.actions[1],
+            "2 TXT record(s) at _smtp._tls.example.org in the zone to replace"
+        );
+        assert_eq!(
+            rep.actions[2],
+            "whmapi1 removezonerecord zone=example.org line=15"
+        );
+        assert_eq!(
+            rep.actions[4],
+            "whmapi1 removezonerecord zone=example.org line=7"
+        );
+        assert_eq!(
+            rep.actions[6],
+            "whmapi1 addzonerecord domain=example.org name=_smtp._tls.example.org. type=TXT ttl=14400 txtdata='v=TLSRPTv1; rua=mailto:tls@example.org'"
+        );
+        assert!(
+            rep.actions.last().unwrap().contains("old answer"),
+            "{:?}",
+            rep.actions
+        );
+        let j = rep.to_json();
+        assert!(matches!(j.get("ok"), Some(Json::Bool(true))));
+        assert_eq!(
+            j.get("zone").map(|z| z.str_field("summary")).unwrap(),
+            "here"
+        );
+
+        // a zone that is only a copy here: installed, and the transcript says so
+        write(
+            &root,
+            "/_cmd/acctdns_dumpzone.txt",
+            r#"{"data":{"zone":[{"record":[]}]},"metadata":{"result":1,"reason":"OK"}}"#,
+        );
+        let rep = install_txt(&cp, "_mta-sts.example.com", "v=STSv1; id=2026101401").unwrap();
+        assert_eq!(
+            rep.actions[1],
+            "0 TXT record(s) at _mta-sts.example.com in the zone to replace"
+        );
+        assert!(
+            rep.actions
+                .iter()
+                .any(|a| a.contains("name servers") && a.contains("ns1.example.net")),
+            "{:?}",
+            rep.actions
+        );
+
+        // cPanel refusing the call is an error carrying the transcript
+        write(&root, "/_cmd/acctdns_txt_add.txt", DENIED_REPLY);
+        let err = install_txt(&cp, "_smtp._tls.example.org", tlsrpt).unwrap_err();
+        assert_eq!(err.error, "Access denied");
+        assert!(err
+            .actions
+            .iter()
+            .any(|a| a.contains("failed: Access denied")));
+
+        // an unsupported host refuses before anything runs
+        let bare = Cp {
+            root: tmpdir("txt-bare"),
+        };
+        assert!(install_txt(&bare, "_smtp._tls.example.org", tlsrpt)
+            .unwrap_err()
+            .error
+            .contains("needs cPanel"));
     }
 }

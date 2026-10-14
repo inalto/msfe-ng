@@ -463,6 +463,15 @@ fn acctdns_checks_its_flags_and_scans_a_fixture_tree() {
     assert_eq!(out.status.code(), Some(2));
     let out = msfe_ng(&d, &["acctdns", "wipe"]);
     assert_eq!(out.status.code(), Some(2));
+    // `txt` needs a name and a value; the value is checked against the name
+    // before anything is looked up
+    let out = msfe_ng(&d, &["acctdns", "txt", "_smtp._tls.example.com"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("usage: msfe-ng acctdns"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // a fixture tree that looks like cPanel: the scan runs inline
     let root = d.join("root");
@@ -502,6 +511,41 @@ fn acctdns_checks_its_flags_and_scans_a_fixture_tree() {
     assert!(text.contains("[FAIL] example.com  spf: "), "{text}");
     assert!(text.contains("[FAIL] shop.example.com  spf: "), "{text}");
     assert!(text.contains("2 domains · 2 fail"), "{text}");
+
+    // `txt` on the fixture tree: a value of the wrong kind is refused with the reason
+    let out = Command::new(env!("CARGO_BIN_EXE_msfe-ng"))
+        .args(["acctdns", "txt", "_smtp._tls.example.com", "v=STSv1; id=1"])
+        .env("MSFE_NG_CONFIG", d.join("config.toml"))
+        .env("MSFE_NG_CPANEL_ROOT", &root)
+        .env("MSFE_NG_RESOLVER", nxdomain_resolver())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("v=TLSRPTv1"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // --json prints the error object instead
+    let out = Command::new(env!("CARGO_BIN_EXE_msfe-ng"))
+        .args([
+            "acctdns",
+            "txt",
+            "_smtp._tls.example.com",
+            "v=STSv1; id=1",
+            "--json",
+        ])
+        .env("MSFE_NG_CONFIG", d.join("config.toml"))
+        .env("MSFE_NG_CPANEL_ROOT", &root)
+        .env("MSFE_NG_RESOLVER", nxdomain_resolver())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("\"error\":"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
 
     // a host that is not cPanel says so and runs nothing
     let bare = d.join("bare");
