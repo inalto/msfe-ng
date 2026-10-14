@@ -673,13 +673,10 @@ mod tests {
         assert_eq!(status, 200, "{v}");
         assert!(matches!(v.get("ok"), Some(Json::Bool(true))), "{v}");
         assert!(matches!(v.get("created"), Some(Json::Bool(true))), "{v}");
-        assert_eq!(
-            v.str_field("docroot"),
-            "/home/alice/public_html/mta-sts.example.com"
-        );
+        assert_eq!(v.str_field("docroot"), "/home/alice/mta-sts.example.com");
         assert_eq!(
             std::fs::read_to_string(
-                root.join("home/alice/public_html/mta-sts.example.com/.well-known/mta-sts.txt")
+                root.join("home/alice/mta-sts.example.com/.well-known/mta-sts.txt")
             )
             .unwrap(),
             policy

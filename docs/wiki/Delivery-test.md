@@ -58,7 +58,10 @@ default) and the *policy* rows — `mta-sts.<domain>` does not resolve, the
 policy cannot be fetched, answers something other than 200 — get their own
 **Apply this fix…**. That creates `mta-sts.<domain>` as a subdomain of the
 account through cPanel's `create_subdomain` (which adds its A record to the
-zone and the web site, document root `public_html/mta-sts.<domain>`) unless
+zone and the web site; document root `mta-sts.<domain>` under the account's
+home, outside `public_html` so nothing of the main site reaches it — or
+`public_html/mta-sts.<domain>` when the server's Tweak Setting *Restrict
+document roots to public_html* is on) unless
 the account already has it, writes the policy to `.well-known/mta-sts.txt`
 there with a small `.htaccess` that keeps the main site's rewrites out and
 the file `text/plain`, and asks AutoSSL for the certificate. The dialog shows

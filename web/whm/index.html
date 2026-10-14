@@ -2727,7 +2727,7 @@ function dlvMtaStsSiteForm(ctx){
     if(!r||r.error){info.textContent=(r&&r.error)||'cannot describe the site';return;}
     site=r;ta.value=r.policy||'';ta.disabled=false;
     info.textContent=(r.exists?host+' is already a domain of account '+r.user+'; the policy file is written into its document root (replacing any policy there) and AutoSSL is asked for the certificate.'
-      :host+' is created as a subdomain of account '+r.user+' through cPanel’s create_subdomain (document root public_html/'+host+'): that adds its A record to the zone and the web site. The policy goes to .well-known/mta-sts.txt there, with a .htaccess that keeps the main site’s rewrites out, and AutoSSL is asked for the certificate.')
+      :host+' is created as a subdomain of account '+r.user+' through cPanel’s create_subdomain (document root '+(r.docroot||host)+' under its home, outside public_html unless the server restricts document roots to it): that adds its A record to the zone and the web site. The policy goes to .well-known/mta-sts.txt there, with a .htaccess that keeps the main site’s rewrites out, and AutoSSL is asked for the certificate.')
       +' Nothing is written by hand outside the site’s own folder.';
   })();
   return {box,

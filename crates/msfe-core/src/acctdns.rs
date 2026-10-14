@@ -2302,9 +2302,26 @@ pub fn mtasts_host(domain: &str) -> String {
     format!("mta-sts.{domain}")
 }
 
-/// Where the subdomain's files go, relative to the account's home.
-pub fn mtasts_docroot_rel(domain: &str) -> String {
-    format!("public_html/{}", mtasts_host(domain))
+/// Where the subdomain's files go, relative to the account's home: its own
+/// folder beside `public_html`, so nothing of the account's web site
+/// (`.htaccess` rewrites, redirects, deploy scripts) reaches it — unless the
+/// server's Tweak Setting "Restrict document roots to public_html"
+/// (`publichtmlsubsonly`) forbids that, then `public_html/<host>`.
+pub fn mtasts_docroot_rel(cp: &Cp, domain: &str) -> String {
+    let host = mtasts_host(domain);
+    if public_html_only(cp) {
+        format!("public_html/{host}")
+    } else {
+        host
+    }
+}
+
+/// `publichtmlsubsonly=1` in `/var/cpanel/cpanel.config`.
+fn public_html_only(cp: &Cp) -> bool {
+    cp.read("/var/cpanel/cpanel.config")
+        .unwrap_or_default()
+        .lines()
+        .any(|l| l.trim() == "publichtmlsubsonly=1")
 }
 
 /// The policy text to serve: `mode` (`testing` to start), one `mx:` line per
@@ -2395,6 +2412,8 @@ pub struct MtaStsSite {
     pub host: String,
     pub user: Option<String>,
     pub exists: bool,
+    /// Where the files would go, relative to the account's home.
+    pub docroot: String,
 }
 
 impl MtaStsSite {
@@ -2408,6 +2427,7 @@ impl MtaStsSite {
             ),
             ("hosted".into(), Json::Bool(self.user.is_some())),
             ("exists".into(), Json::Bool(self.exists)),
+            ("docroot".into(), Json::str(&self.docroot)),
         ])
     }
 }
@@ -2432,11 +2452,13 @@ pub fn mtasts_site(cp: &Cp, domain: &str) -> Result<MtaStsSite, String> {
         .find(|x| x.domain == d)
         .map(|x| x.user.clone());
     let exists = domains.iter().any(|x| x.domain == host);
+    let docroot = mtasts_docroot_rel(cp, &d);
     Ok(MtaStsSite {
         domain: d,
         host,
         user,
         exists,
+        docroot,
     })
 }
 
@@ -2464,7 +2486,7 @@ fn mtasts_docroot(cp: &Cp, user: &str, domain: &str) -> String {
     format!(
         "{}/{}",
         home.trim_end_matches('/'),
-        mtasts_docroot_rel(domain)
+        mtasts_docroot_rel(cp, domain)
     )
 }
 
@@ -2555,7 +2577,7 @@ pub fn install_mtasts_site(
             "create_subdomain",
             &[
                 format!("domain={host}"),
-                format!("document_root={}", mtasts_docroot_rel(&d)),
+                format!("document_root={}", mtasts_docroot_rel(cp, &d)),
             ],
             &mut actions,
         )?;
@@ -4631,6 +4653,22 @@ mod tests {
         assert_eq!(s.host, "mta-sts.example.com");
         assert_eq!(s.user.as_deref(), Some("alice"));
         assert!(!s.exists);
+        assert_eq!(s.docroot, "mta-sts.example.com");
+        // the Tweak Setting that restricts document roots to public_html
+        write(
+            &root,
+            "/var/cpanel/cpanel.config",
+            "x=1\npublichtmlsubsonly=1\n",
+        );
+        assert_eq!(
+            mtasts_site(&cp, "example.com").unwrap().docroot,
+            "public_html/mta-sts.example.com"
+        );
+        write(&root, "/var/cpanel/cpanel.config", "publichtmlsubsonly=0\n");
+        assert_eq!(
+            mtasts_site(&cp, "example.com").unwrap().docroot,
+            "mta-sts.example.com"
+        );
         let s = mtasts_site(&cp, "elsewhere.net").unwrap();
         assert!(s.user.is_none());
         assert!(mtasts_site(&cp, "not a name").is_err());
@@ -4686,19 +4724,19 @@ mod tests {
         write(
             &root,
             "/var/cpanel/userdata/alice/mta-sts.example.com",
-            "documentroot: /home/alice/public_html/mta-sts.example.com\nservername: mta-sts.example.com\nuser: alice\n",
+            "documentroot: /home/alice/mta-sts.example.com\nservername: mta-sts.example.com\nuser: alice\n",
         );
         let r = install_mtasts_site(&cp, &client, "example.com", None).unwrap();
         assert!(r.created);
         assert_eq!(r.user, "alice");
-        assert_eq!(r.docroot, "/home/alice/public_html/mta-sts.example.com");
+        assert_eq!(r.docroot, "/home/alice/mta-sts.example.com");
         assert_eq!(
             r.policy,
             "version: STSv1\nmode: testing\nmx: mx1.example.com\nmx: mx2.example.com\nmax_age: 604800\n"
         );
         assert_eq!(
             r.actions[0],
-            "whmapi1 create_subdomain domain=mta-sts.example.com document_root=public_html/mta-sts.example.com"
+            "whmapi1 create_subdomain domain=mta-sts.example.com document_root=mta-sts.example.com"
         );
         assert!(
             r.actions
@@ -4714,9 +4752,9 @@ mod tests {
             "{:?}",
             r.actions
         );
-        let file = root.join("home/alice/public_html/mta-sts.example.com/.well-known/mta-sts.txt");
+        let file = root.join("home/alice/mta-sts.example.com/.well-known/mta-sts.txt");
         assert_eq!(std::fs::read_to_string(&file).unwrap(), r.policy);
-        let ht = root.join("home/alice/public_html/mta-sts.example.com/.htaccess");
+        let ht = root.join("home/alice/mta-sts.example.com/.htaccess");
         assert_eq!(std::fs::read_to_string(&ht).unwrap(), MTASTS_HTACCESS);
         let j = r.to_json();
         assert!(matches!(j.get("ok"), Some(Json::Bool(true))));
@@ -4757,7 +4795,7 @@ mod tests {
         write(&root, "/_cmd/acctdns_mtasts_subdomain.txt", OK_REPLY);
         let _ = std::fs::remove_file(root.join("_cmd/acctdns_mtasts_autossl.txt"));
         let r = install_mtasts_site(&cp, &client, "example.com", None).unwrap();
-        assert_eq!(r.docroot, "/home/alice/public_html/mta-sts.example.com");
+        assert_eq!(r.docroot, "/home/alice/mta-sts.example.com");
         assert!(
             r.actions.iter().any(|a| a.contains("AutoSSL not started")),
             "{:?}",
