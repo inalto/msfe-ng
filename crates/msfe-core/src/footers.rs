@@ -579,7 +579,7 @@ fn now() -> i64 {
         .unwrap_or(0)
 }
 
-fn stamp_of(at: i64) -> String {
+pub(crate) fn stamp_of(at: i64) -> String {
     let d = crate::civil::Date::from_unix(at as u64);
     let s = at.rem_euclid(86_400);
     format!(
@@ -892,7 +892,7 @@ pub fn apply_with(
 
 /// A backup name not taken yet: two changes in the same second get `-2`, `-3`…
 /// (names still sort by time: `…-101500` < `…-101500-2`).
-fn unique_stamp(root: &Path, at: i64) -> String {
+pub(crate) fn unique_stamp(root: &Path, at: i64) -> String {
     let base = stamp_of(at);
     (1..)
         .map(|n| {

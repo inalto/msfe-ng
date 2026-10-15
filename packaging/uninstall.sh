@@ -77,6 +77,8 @@ if [ -x "$BINDIR/msfe-ng" ]; then
     "$BINDIR/msfe-ng" mailscanner disable-logging >/dev/null 2>&1 || true
     # the diagnostic inbox's Exim fragments (exim.conf.local include lines)
     "$BINDIR/msfe-ng" delivery inbox uninstall >/dev/null 2>&1 || true
+    # the local submission privacy template (exim.conf.local @CONFIG@ block)
+    "$BINDIR/msfe-ng" localsub off >/dev/null 2>&1 || true
 fi
 rm -rf /var/spool/msfe-ng/diag /var/cache/msfe-ng/delivery
 # MailScanner's `Exim Command` must not point at the shim we are removing

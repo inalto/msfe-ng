@@ -63,6 +63,7 @@ msfe-ng acctdns fix <domain> <spf|dkim|dmarc> [--record <r>] [--json]   install 
 msfe-ng service units [--json]   the daemons mail depends on: running now, and enabled at boot? (exit 1 when one needs attention; other stopped or failed services on the host are listed as down and do not affect the exit code)
 msfe-ng service unit <name> <enable|start|restart|enable-now>   act on one of them
 msfe-ng footers <status [--json] | set "<directive>" on|off ... [--dry-run] | off [--dry-run] | restore [<backup>] [--dry-run] | backups>   what MailScanner changes in delivered mail, one switch per setting, with backups (see Settings → What MailScanner changes in mail)
+msfe-ng localsub <status [--json] | on [--dry-run] | off [--dry-run] | restore [<backup>] [--dry-run] | backups>   hide the loopback hop in the Received: line of authenticated webmail submissions, via /etc/exim.conf.local with backup, validation and rollback (see Settings → Local submission privacy)
 msfe-ng dmarc fetch [--dry-run] [--keep] [--json]   read the DMARC report mailbox, store the reports, delete the imported mails (cron: hourly)
 msfe-ng dmarc import <file>... [--json]   store DMARC report files (.xml, .xml.gz, .zip) or saved report mails (.eml)
 msfe-ng dmarc <status [--json] | test | prune>   last fetch and stored totals | IMAP login check | drop rows past retention

@@ -978,6 +978,7 @@ async function renderSettings(){
   };
   pc.append(psave);v.append(pc);
   renderFootersCard(v);
+  renderLocalsubCard(v);
 }
 
 // What MailScanner changes in delivered mail: one switch per setting, grouped
@@ -1090,6 +1091,95 @@ async function renderFootersCard(v){
     }
   }
   fc.append(bar,out);
+  draw();
+}
+
+// Local submission privacy: Exim's stock Received header names the loopback
+// hop of every webmail message ("from localhost (…) [127.0.0.1]"). One switch
+// installs a guarded received_header_text in /etc/exim.conf.local (backed up,
+// validated by Exim, rolled back on failure); "Put back" restores a backup.
+// Roundcube's own origin header is shown, never written (cPanel owns it).
+async function renderLocalsubCard(v){
+  const lc=el('div',{class:'card',id:'localsub-card'},el('h2',{},'Local submission privacy'),
+    el('div',{class:'muted',style:'margin-bottom:.6rem;font-size:.8rem'},
+      'Webmail hands every message to Exim over an authenticated connection from this server itself, and Exim’s stock Received header then reads “from localhost (server name) [127.0.0.1]” — a hop that tells recipients nothing useful about the sender. Hiding it leaves the header without a “from” clause for authenticated submissions from 127.0.0.1 or ::1 only (“with esmtpsa” still records the authentication); every other hop, external authenticated clients included, is recorded exactly as before. The setting goes into the @CONFIG@ section of /etc/exim.conf.local, so it survives cPanel’s Exim rebuilds; Exim checks the result and the previous file comes back if it does not accept it.'));
+  v.append(lc);
+  const body=el('div',{},el('div',{class:'muted'},'Loading…'));lc.append(body);
+  const out=el('pre',{class:'log',style:'display:none;max-height:14rem'});
+  async function run(path,bodyObj,busy,okMsg){
+    out.style.display='';out.textContent=busy;
+    const r=await api(path,{method:'POST',body:bodyObj});
+    out.textContent=((r&&r.transcript)||[(r&&r.error)||'no response']).join('\n');
+    toast(r&&r.ok?okMsg:'Not changed — see the output');
+    return r;
+  }
+  async function draw(){
+    const st=await api('/api/localsub');
+    body.innerHTML='';
+    if(!st||st.error){body.append(el('div',{class:'note warn'},(st&&st.error)||'no answer'));return;}
+    if(!st.applicable){body.append(el('div',{class:'muted'},'Not a cPanel server: this setting is implemented for cPanel’s Exim (exim.conf.local) only.'));return;}
+    let status,cls='muted';
+    if(st.conflict){status='Cannot be switched here: '+st.conflict+'. Exim refuses an option set twice — edit that setting by hand.';cls='note warn';}
+    else if(st.hidden&&st.installed)status='Hidden — Exim prints no host for authenticated webmail submissions (set by MSFE-NG).';
+    else if(st.hidden)status='Hidden — set by the administrator (a received_header_text outside MSFE-NG’s block).';
+    else if(st.installed){status='Exposed — MSFE-NG’s block is in '+st.conf_local+' but Exim does not use it (cPanel rebuilt without it, or the file was edited). Run /scripts/buildeximconf && /scripts/restartsrv_exim, or Show it again to drop the block.';cls='note warn';}
+    else if(st.effective==='exposes')status='Exposed — every webmail message carries “Received: from localhost (…) [127.0.0.1]”.';
+    else status='Unknown — exim -bP did not answer and the Exim configuration cannot be read.';
+    body.append(el('div',{class:cls,style:'font-size:.85rem;margin-bottom:.5rem'},status));
+    const pv=(st.preview||[]).filter(r=>r.ip!=='::1');
+    if(pv.length){
+      const t=el('table',{style:'font-size:.76rem'});
+      t.append(el('tr',{},...['Hop','Exim’s stock header','With the loopback hop hidden'].map(h=>el('th',{},h))));
+      pv.forEach(r=>t.append(el('tr',{},
+        el('td',{},r.label,el('div',{class:'muted mono'},r.ip)),
+        el('td',{},el('pre',{class:'log',style:'margin:0;white-space:pre-wrap'},r.before)),
+        el('td',{},el('pre',{class:'log',style:'margin:0;white-space:pre-wrap'},r.after)))));
+      body.append(el('details',{style:'margin-bottom:.5rem'},el('summary',{class:'muted',style:'font-size:.8rem'},'Preview — the Received line Exim writes, before and after'),t));
+    }
+    const hideIt=!st.installed;
+    const btn=el('button',{class:'act'+(hideIt?'':' plain')},hideIt?'Hide the loopback hop':'Show it again');
+    if(hideIt&&st.conflict)btn.disabled=true;
+    if(hideIt&&st.hidden&&!st.installed){btn.disabled=true;btn.title='Already hidden by a setting of the administrator';}
+    btn.onclick=async()=>{
+      const msg=hideIt
+        ?'Hide the loopback hop of authenticated webmail submissions?\n\nA guarded received_header_text is added to '+st.conf_local+' (a backup is kept), Exim’s configuration is rebuilt and checked, and Exim restarts. If Exim does not accept it, the previous file comes back.'
+        :'Remove MSFE-NG’s received_header_text from '+st.conf_local+'?\n\nWebmail messages will again say “from localhost (…) [127.0.0.1]”. A backup is kept, Exim’s configuration is rebuilt and checked, and Exim restarts.';
+      if(!confirm(msg))return;
+      btn.disabled=true;
+      const r=await run('/api/localsub/apply',{install:hideIt},hideIt?'▶ backing up, rebuilding and checking Exim…':'▶ backing up and removing…',hideIt?'Hidden — new webmail messages leave without the loopback hop':'The loopback hop is shown again');
+      btn.disabled=false;if(r&&r.ok)draw();
+    };
+    body.append(el('div',{class:'ctl'},btn));
+    const bk=st.backups||[];
+    if(bk.length){
+      const bt=el('table',{style:'margin-top:.4rem'});
+      bt.append(el('tr',{},...['Backup','Taken before',''].map(h=>el('th',{},h))));
+      bk.forEach(b=>{
+        const go=el('button',{class:'act plain'},'Put back');
+        go.disabled=!b.applied;
+        go.title=b.applied?'Put exim.conf.local back exactly as it was before this change':'This change was never applied (Exim refused it)';
+        go.onclick=async()=>{
+          if(!confirm('Put '+st.conf_local+' back as it was before the change of '+fmtTime(b.at)+'?\n\nThe current file is backed up first. Exim’s configuration is rebuilt and checked, and Exim restarts.'))return;
+          go.disabled=true;
+          const r=await run('/api/localsub/restore',{stamp:b.stamp},'▶ restoring…','Put back');
+          go.disabled=false;if(r&&r.ok)draw();
+        };
+        const what=b.action==='on'?'hiding the hop':b.action==='off'?'showing it again':b.action;
+        bt.append(el('tr',{},el('td',{},fmtTime(b.at),b.applied?'':el('span',{class:'muted'},' (unused)')),
+          el('td',{class:'muted',style:'font-size:.8rem'},what),el('td',{},go)));
+      });
+      body.append(el('details',{style:'margin-top:.8rem'},el('summary',{class:'muted',style:'font-size:.8rem'},`Backups (${bk.length}) — kept in /etc/msfe-ng/localsub`),bt));
+    }
+    const rc=st.roundcube||{};
+    const tri=x=>x===true?'on':x===false?'off':'unknown';
+    body.append(el('div',{style:'margin-top:1rem'},
+      el('h3',{style:'font-size:.9rem;margin:.2rem 0'},'Roundcube origin header'),
+      el('div',{style:'font-size:.82rem'},'http_received_header: ',el('b',{},tri(rc.received_header)),' · encrypted (http_received_header_encrypt): ',el('b',{},tri(rc.encrypt))),
+      el('div',{class:'muted',style:'font-size:.78rem;margin-top:.3rem'},
+        'Separately from Exim, Roundcube can add its own Received line naming the address of the browser the message was written from. It is off by default and MSFE-NG does not change it: cPanel regenerates Roundcube’s config.inc.php on every update, so a lasting change has to go through cPanel. Turning it on records where the user really was — useful for abuse handling, but it publishes the user’s own IP address to every recipient; the encrypted variant hides it from recipients while keeping it recoverable with the server’s key.'),
+      (rc.files&&rc.files.length)?el('div',{class:'muted mono',style:'font-size:.7rem'},'read from '+rc.files.join(', ')):''));
+  }
+  lc.append(out);
   draw();
 }
 

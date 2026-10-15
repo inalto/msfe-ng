@@ -786,11 +786,11 @@ pub fn status_check() -> Check {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    static ENV: Mutex<()> = Mutex::new(());
+    pub(crate) static ENV: Mutex<()> = Mutex::new(());
 
     #[test]
     fn splices_include_lines_idempotently() {

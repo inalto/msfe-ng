@@ -88,6 +88,26 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             let r = msfe_core::footers::restore(cfg, config_file, &stamp, false);
             Response::json(200, &msfe_core::footers::report_json(&r).to_string())
         }
+        ("GET", "/api/localsub") => {
+            let st = msfe_core::localsub::state(cfg, config_file);
+            Response::json(200, &msfe_core::localsub::state_json(&st).to_string())
+        }
+        ("POST", "/api/localsub/apply") => {
+            let v = Json::parse(&req.body).unwrap_or(Json::Null);
+            let Some(Json::Bool(install)) = v.get("install") else {
+                return Response::json(400, r#"{"error":"install: true|false required"}"#);
+            };
+            let dry = matches!(v.get("dry"), Some(Json::Bool(true)));
+            let r = msfe_core::localsub::apply(cfg, config_file, *install, dry);
+            Response::json(200, &msfe_core::localsub::report_json(&r).to_string())
+        }
+        ("POST", "/api/localsub/restore") => {
+            let stamp = Json::parse(&req.body)
+                .map(|v| v.str_field("stamp"))
+                .unwrap_or_default();
+            let r = msfe_core::localsub::restore(cfg, config_file, &stamp, false);
+            Response::json(200, &msfe_core::localsub::report_json(&r).to_string())
+        }
 
         ("GET", "/api/policy") => {
             let pdir = sync::policy_dir(config_file);

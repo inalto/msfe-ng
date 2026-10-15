@@ -120,6 +120,9 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
         ("footers", Some("status")) => Some(&["--json"]),
         ("footers", Some("off" | "restore" | "set")) => Some(DRY),
         ("footers", _) => Some(NONE),
+        ("localsub", Some("status")) => Some(&["--json"]),
+        ("localsub", Some("on" | "off" | "restore")) => Some(DRY),
+        ("localsub", _) => Some(NONE),
         _ => None,
     }
 }
@@ -156,6 +159,7 @@ fn usage_of(cmd: &str) -> &'static str {
         "delivery" => "msfe-ng delivery <test <address> [--ip <sending ip>] [--selector <dkim selector>] [--audit] [--days <1-7>] [--json | --html] [--force] | eml <file.eml> [--bounce] [--address <a>] [--ip <ip>] [--selector <s>] [--audit] [--json | --html] | inbox <install [--dry-run] | uninstall [--dry-run] | status | new | poll <token> [--json] | remove <token> | sweep> | testmail --from <local address> --to <address> [--tag <t>] [--follow <secs>] [--json] | monitor <list [--json] | add <address> [--interval-mins n] [--audit] [--ip ..] [--selector ..] [--days n] | remove <id|address> | run [--dry-run] [--id n]> | osint <address> [--providers a,b] [--json | --html] [--force] | osint providers [--json] | osint sweep | osint monitor <list [--json] | add <address> [--sources a,b] [--interval-mins n] | remove <id|address> | enable <id> | disable <id> | run [--dry-run] [--id n] | history <id> [--json]>>",
         "acctdns" => "msfe-ng acctdns <scan [--user <account>] [--domain <domain>] [--all] [--json] | fix <domain> <spf|dkim|dmarc> [--record <record>] [--json] | txt <name> <value> [--json] | mta-sts <domain> [--mode testing|enforce|none] [--policy <file>] [--json]>",
         "footers" => "msfe-ng footers <status [--json] | set \"<directive>\" on|off [\"<directive>\" on|off]... [--dry-run] | off [--dry-run] | restore [<backup>] [--dry-run] | backups>",
+        "localsub" => "msfe-ng localsub <status [--json] | on [--dry-run] | off [--dry-run] | restore [<backup>] [--dry-run] | backups>",
         "dmarc" => "msfe-ng dmarc <fetch [--dry-run] [--keep] [--json] | import <file.xml|.gz|.zip|.eml>... [--json] | status [--json] | test | prune>",
         _ => "msfe-ng help",
     }
@@ -250,6 +254,7 @@ fn main() -> ExitCode {
         "acctdns" => cmd_acctdns(sub, rest),
         "dmarc" => cmd_dmarc(sub, rest),
         "footers" => cmd_footers(sub, rest),
+        "localsub" => cmd_localsub(sub, rest),
         "help" | "--help" | "-h" => {
             print_help();
             ExitCode::SUCCESS
@@ -3813,6 +3818,117 @@ fn cmd_footers(sub: Option<&str>, rest: &[String]) -> ExitCode {
     }
 }
 
+/// Local submission privacy: Exim's Received header without the loopback
+/// hop of authenticated webmail submissions (cPanel, via exim.conf.local).
+fn cmd_localsub(sub: Option<&str>, rest: &[String]) -> ExitCode {
+    use msfe_core::localsub;
+    let cfg = Config::load(&config_path());
+    let dry = rest.iter().any(|a| a == "--dry-run");
+    let finish = |r: localsub::Report| {
+        for l in &r.actions {
+            println!("{l}");
+        }
+        if r.ok {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(1)
+        }
+    };
+    match sub {
+        Some("status") => {
+            let st = localsub::state(&cfg, &config_path());
+            if rest.iter().any(|a| a == "--json") {
+                println!("{}", localsub::state_json(&st));
+                return ExitCode::SUCCESS;
+            }
+            if !st.applicable {
+                println!("not a cPanel server: local submission privacy is implemented for cPanel's Exim only");
+                return ExitCode::SUCCESS;
+            }
+            println!(
+                "{}",
+                match (st.effective, st.installed) {
+                    (localsub::Effective::Ours, _) | (localsub::Effective::Hand, true) =>
+                        "hidden: Exim prints no host for authenticated loopback submissions (set by MSFE-NG)",
+                    (localsub::Effective::Hand, false) =>
+                        "hidden: Exim prints no host for authenticated loopback submissions (set by the administrator)",
+                    (_, true) =>
+                        "exposed: the MSFE-NG block is in exim.conf.local but Exim does not use it (/scripts/buildeximconf && /scripts/restartsrv_exim)",
+                    (localsub::Effective::Exposes, false) =>
+                        "exposed: webmail messages carry `Received: from localhost (…) [127.0.0.1]`",
+                    (localsub::Effective::Unknown, false) =>
+                        "unknown: exim -bP did not answer and the Exim configuration cannot be read",
+                }
+            );
+            println!(
+                "  {} {}",
+                st.conf_local.display(),
+                if st.installed {
+                    "has the MSFE-NG block"
+                } else {
+                    "has no MSFE-NG block"
+                }
+            );
+            if let Some(c) = &st.conflict {
+                println!("  conflict: {c}");
+            }
+            for r in st.preview.iter().flatten() {
+                println!("\n  {} [{}]", r.label, r.ip);
+                println!("    stock: {}", r.before.replace('\n', "\n           "));
+                println!("    guard: {}", r.after.replace('\n', "\n           "));
+            }
+            let tri = |v: Option<bool>| match v {
+                Some(true) => "on",
+                Some(false) => "off",
+                None => "unknown",
+            };
+            println!(
+                "\nRoundcube origin header (http_received_header): {}, encrypted: {}",
+                tri(st.roundcube.received_header),
+                tri(st.roundcube.encrypt)
+            );
+            ExitCode::SUCCESS
+        }
+        Some("on") => finish(localsub::apply(&cfg, &config_path(), true, dry)),
+        Some("off") => finish(localsub::apply(&cfg, &config_path(), false, dry)),
+        Some("restore") => {
+            let stamp = match rest.iter().find(|a| !a.starts_with('-')) {
+                Some(s) => s.clone(),
+                None => match localsub::backups(&config_path())
+                    .into_iter()
+                    .find(|b| b.applied)
+                {
+                    Some(b) => b.stamp,
+                    None => {
+                        eprintln!("msfe-ng localsub restore: no backup to restore");
+                        return ExitCode::from(1);
+                    }
+                },
+            };
+            finish(localsub::restore(&cfg, &config_path(), &stamp, dry))
+        }
+        Some("backups") => {
+            let b = localsub::backups(&config_path());
+            if b.is_empty() {
+                println!("no backups");
+            }
+            for x in b {
+                println!(
+                    "{}  before \"{}\"{}",
+                    x.stamp,
+                    x.action,
+                    if x.applied { "" } else { "  (unused)" }
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        _ => {
+            eprintln!("usage: {}", usage_of("localsub"));
+            ExitCode::from(2)
+        }
+    }
+}
+
 fn cmd_dmarc(sub: Option<&str>, rest: &[String]) -> ExitCode {
     use msfe_core::dmarcjob;
     let cfg = Config::load(&config_path());
@@ -4375,6 +4491,9 @@ COMMANDS:
                         (body text, attachments, subject tags, headers, rewriting, notices):
                         `set \"Spam Modify Subject\" off` switches one, `off` removes all body text;
                         every change keeps a backup of the lines and footer texts, `restore` puts one back
+    localsub <status|on|off|restore [backup]|backups>   Hide the loopback hop of webmail submissions in
+                        Exim's Received header (cPanel: a guarded received_header_text in
+                        /etc/exim.conf.local, backed up, validated by Exim, rolled back on failure)
     dmarc fetch         Read DMARC aggregate reports from the rua= mailbox (Config tab), store them,
                         delete the imported mails (cron: hourly; --dry-run, --keep, --json)
     dmarc import <file> Store report files (.xml, .xml.gz, .zip) or saved report mails (.eml)

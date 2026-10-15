@@ -57,6 +57,7 @@ pub mod layout;
 pub mod legacy;
 pub mod legacy_decommission;
 pub mod legacy_history;
+pub mod localsub;
 pub mod logindex;
 pub mod mailflow;
 pub mod mailscanner;

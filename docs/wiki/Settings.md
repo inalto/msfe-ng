@@ -109,3 +109,85 @@ msfe-ng footers off [--dry-run]                             all body text off
 msfe-ng footers restore [<backup>]                          put a backup back (default: the latest)
 msfe-ng footers backups                                     list the backups
 ```
+
+## Local submission privacy
+
+Webmail submits mail to Exim over authenticated SMTP on the server itself.
+Exim's stock `received_header_text` prints the sending host for every hop, so
+a message sent from Roundcube leaves with
+
+```
+Received: from localhost (server.example.com) [127.0.0.1]
+	by server.example.com with esmtpsa ...
+```
+
+and every recipient sees the loopback address and the server's own name.
+Neither MailScanner nor MSFE-NG rewrites trace headers (stripping `Received:`
+lines after reception would break exactly the tracing you want to keep), so
+the fix belongs in Exim's own template. This card installs a conditional
+template through cPanel's supported override, the `@CONFIG@` section of
+`/etc/exim.conf.local`, which `/scripts/buildeximconf` honours — it survives
+cPanel's nightly rebuilds and WHM's Exim Configuration Manager shows it.
+
+The template is Exim's stock one with a single condition added: when the
+connection was **authenticated and came from loopback** (`127.0.0.0/8` or
+`::1`), the `from …` clause is left out; `with esmtpsa`, the TLS version and
+cipher, the envelope sender, the message id and the `for` clause stay as they
+were. RFC 5321 allows a `Received:` line without a `from` clause, and
+`esmtpsa` still records that the submitter authenticated. Every other hop —
+external authenticated clients included, since they do not come from
+127.0.0.1 — prints exactly as before.
+
+The card shows the state Exim is actually in (read with `exim -bP
+received_header_text`): *exposed* (stock template), *hidden* (installed by
+MSFE-NG), *set by the administrator* (an equivalent guard written by hand,
+left alone), *conflict* (something else already sets `received_header_text`
+in the built `exim.conf`; Exim refuses an option set twice, so nothing is
+installed), or *not cPanel*. Where Exim allows it, a **preview** expands the
+template for two simulated hops — a webmail session on this server and an
+external authenticated client — so you can see both `Received:` lines before
+and after.
+
+**Hide the loopback hop** / **Show it again** does, in order: a byte-for-byte
+backup of `/etc/exim.conf.local` into `/etc/msfe-ng/localsub/<date-time>/`
+(included in `msfe-ng backup`; the last 10 are kept), the edit between the
+markers `# --- MSFE-NG local submission privacy start/end ---`, a rebuild with
+`/scripts/buildeximconf`, then a check: `exim -bV` must pass and the effective
+template must (or, when switching off, must no longer) carry the guard. If
+either fails, the backup is put back and Exim is rebuilt again — nothing
+stays half-applied. Only then is Exim restarted. **Put back** on a backup
+restores that exact file the same validated way. Everything is idempotent:
+applying twice changes nothing.
+
+The doctor check *webmail submissions hide the loopback hop* reports the
+state on every run: it warns while the stock template exposes the hop (with
+the switch as the fix and an **Apply** proposal that runs it), and warns
+again if the block is installed but no longer in effect — a cPanel or Exim
+update, or a hand edit — with the rebuild as the fix. The doctor never
+rebuilds Exim on its own, so an administrator's edit is not silently
+overwritten.
+
+From the command line:
+
+```
+msfe-ng localsub status [--json]          state, effective template, preview, backups
+msfe-ng localsub on [--dry-run]           install the template (backup, rebuild, validate, restart)
+msfe-ng localsub off [--dry-run]          remove it the same way
+msfe-ng localsub restore [<backup>] [--dry-run]   put a backup back (default: the latest)
+msfe-ng localsub backups                  list the backups
+```
+
+### Roundcube origin header (optional)
+
+Hiding the loopback hop leaves the chain without the real origin. Roundcube
+can add its own `Received:` line naming the browser's address and host —
+`$config['http_received_header'] = true` — and encrypt that address so only
+you can decode it (`$config['http_received_header_encrypt'] = true`).
+Receivers then see a sensible chain, browser then your server, and the real
+source of webmail spam becomes visible to the client-IP view and to auto-ban.
+**Mind the privacy trade-off**: unencrypted, it reveals your users' IP
+addresses to every recipient. It is off by default on cPanel, and the card
+only *shows* the current value: cPanel regenerates Roundcube's
+`config.inc.php` on every update, so a custom value must be applied through
+cPanel's own Roundcube customisation route, not by editing the file. MSFE-NG
+does not write Roundcube's configuration.

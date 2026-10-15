@@ -685,6 +685,60 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
                 ]),
             ),
         );
+        // Webmail submits over loopback; Exim's stock Received header then
+        // names that hop on every message. A privacy choice: proposed, never
+        // applied by --fix (an admin's own edit is not overwritten silently).
+        let (effective, _) = crate::localsub::effective();
+        let installed = crate::localsub::installed();
+        let conflict = crate::localsub::conflict();
+        const NAME: &str = "webmail submissions hide the loopback hop";
+        match crate::localsub::doctor_verdict(installed, effective, conflict.as_deref()) {
+            crate::localsub::DoctorVerdict::Ok(detail) => {
+                out.push(check(NAME, true, Level::Warn, detail, ""))
+            }
+            crate::localsub::DoctorVerdict::Exposed(detail) => {
+                let c = check(
+                    NAME,
+                    false,
+                    Level::Warn,
+                    detail,
+                    if conflict.is_some() {
+                        "remove or rewrite the received_header_text setting named above, then Settings → Local submission privacy → Hide the loopback hop (or msfe-ng localsub on)"
+                    } else {
+                        "Settings → Local submission privacy → Hide the loopback hop, or msfe-ng localsub on (adds a guarded received_header_text to /etc/exim.conf.local, backed up and validated)"
+                    },
+                );
+                out.push(if conflict.is_some() {
+                    c
+                } else {
+                    c.propose(
+                        "hide the loopback hop of authenticated webmail submissions in Exim's Received header (msfe-ng localsub on)",
+                        Proposal::Commands(vec![vec![
+                            "msfe-ng".into(),
+                            "localsub".into(),
+                            "on".into(),
+                        ]]),
+                    )
+                });
+            }
+            crate::localsub::DoctorVerdict::NotInEffect(detail) => out.push(
+                check(
+                    NAME,
+                    false,
+                    Level::Warn,
+                    detail,
+                    "/scripts/buildeximconf && /scripts/restartsrv_exim (or msfe-ng localsub off to drop the block)",
+                )
+                .propose(
+                    "rebuild Exim's configuration from exim.conf.local and restart Exim",
+                    Proposal::Commands(vec![
+                        vec!["/scripts/buildeximconf".into()],
+                        vec!["/scripts/restartsrv_exim".into()],
+                    ]),
+                ),
+            ),
+            crate::localsub::DoctorVerdict::Silent => {}
+        }
     }
     if cfg.panel == "cpanel" {
         // cPanel's Exim system filter rejects a list of attachment extensions
@@ -3134,6 +3188,15 @@ mod tests {
         .is_empty());
         assert!(plan(
             &[chk("cPanel virus scan in Exim (exiscan)", Level::Warn)],
+            true
+        )
+        .is_empty());
+        // a privacy choice: proposed, never applied by --fix
+        assert!(plan(
+            &[chk(
+                "webmail submissions hide the loopback hop",
+                Level::Warn
+            )],
             true
         )
         .is_empty());

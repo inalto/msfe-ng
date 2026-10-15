@@ -329,6 +329,32 @@ MailScanner setup is off. To keep exiscan on purpose, set `accept_exiscan =
 true` in `config.toml` (Config tab → msfe-ng config): the doctor then shows
 the check as OK, *kept on purpose*.
 
+## Webmail messages show `localhost` / `127.0.0.1` in their `Received:` header
+
+Roundcube submits to Exim over authenticated SMTP on the server itself, and
+Exim's stock `received_header_text` prints the sending host for every hop:
+`Received: from localhost (server.example.com) [127.0.0.1] by … with
+esmtpsa`. The log line `H=localhost (server.example.com) [127.0.0.1]` is the
+same fact and is fine to keep; the header is what recipients see. This is
+Exim's doing, identical with or without MSFE-NG — MailScanner only adds its
+own `X-…-MailScanner` headers and MSFE-NG never rewrites a message.
+
+Do not strip `Received:` lines after reception (in MailScanner or anywhere
+else): that breaks the tracing you want to keep and cannot tell webmail from
+an external client reliably. Fix it in Exim's template instead: **Settings →
+Local submission privacy → Hide the loopback hop** (or `msfe-ng localsub on`)
+installs a conditional `received_header_text` through cPanel's
+`/etc/exim.conf.local` (`@CONFIG@` section) that leaves out the `from …`
+clause only for hops that were *authenticated and from loopback* — with a
+backup, a rebuild, `exim -bV` and an effective-template check, and an
+automatic rollback when either fails. External authenticated clients, TLS
+details, envelope sender and message id are untouched. The doctor check
+*webmail submissions hide the loopback hop* says which state Exim is in and
+warns when the block is installed but a rebuild left it out. To show the real
+origin instead of nothing, Roundcube's `http_received_header` (ideally with
+`http_received_header_encrypt`) adds the browser's address — see the
+Settings page for the privacy trade-off.
+
 ## A `MailScanner.service` that fails at every boot
 
 The RPM engine runs as `mailscanner.service`, generated from its LSB

@@ -782,3 +782,82 @@ fn osint_exit_codes_end_to_end() {
     let o = osint(&d, true, &["--bogus"]);
     assert_eq!(o.status.code(), Some(2), "{o:?}");
 }
+
+#[test]
+fn localsub_flags_and_usage() {
+    let d = tmp("localsub");
+    std::fs::write(d.join("config.toml"), "").unwrap();
+    let out = msfe_ng(&d, &["localsub", "on", "--force"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unknown option"));
+    let out = msfe_ng(&d, &["localsub", "backups", "--dry-run"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let out = msfe_ng(&d, &["localsub"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains(
+        "msfe-ng localsub <status [--json] | on [--dry-run] | off [--dry-run] | restore [<backup>] [--dry-run] | backups>"
+    ));
+    let out = msfe_ng(&d, &["localsub", "backups"]);
+    assert!(
+        out.status.success() && String::from_utf8_lossy(&out.stdout).contains("no backups"),
+        "{out:?}"
+    );
+    let out = msfe_ng(&d, &["localsub", "restore"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+fn localsub(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_msfe-ng"))
+        .arg("localsub")
+        .args(args)
+        .env("MSFE_NG_CONFIG", dir.join("config.toml"))
+        .env("MSFE_NG_EXIM_CONF_LOCAL", dir.join("exim.conf.local"))
+        .env("MSFE_NG_EXIM_CONF", dir.join("exim.conf"))
+        .env("MSFE_NG_SKIP_EXIM_CMDS", "1")
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn localsub_on_off_restore_round_trip() {
+    let d = tmp("localsub-run");
+    std::fs::write(d.join("config.toml"), "").unwrap();
+    let original = "@CONFIG@\nsmtp_banner = hi\n\n@ROUTERSTART@\n";
+    std::fs::write(d.join("exim.conf.local"), original).unwrap();
+    // an exim.conf that already sets the option: refused, nothing written
+    std::fs::write(d.join("exim.conf"), "received_header_text = Received: x\n").unwrap();
+    let out = localsub(&d, &["on"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("already sets received_header_text"));
+    assert!(!d.join("localsub").exists());
+    std::fs::write(d.join("exim.conf"), "primary_hostname = h\n").unwrap();
+    let out = localsub(&d, &["on", "--dry-run"]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(!d.join("localsub").exists());
+    let out = localsub(&d, &["on"]);
+    assert!(out.status.success(), "{out:?}");
+    let now = std::fs::read_to_string(d.join("exim.conf.local")).unwrap();
+    assert!(
+        now.contains("MSFE-NG local submission privacy start")
+            && now.contains("def:authenticated_id")
+    );
+    let out = localsub(&d, &["status", "--json"]);
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && s.contains("\"installed\":true"),
+        "{out:?}"
+    );
+    let out = localsub(&d, &["restore"]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        std::fs::read_to_string(d.join("exim.conf.local")).unwrap(),
+        original
+    );
+    let out = localsub(&d, &["backups"]);
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("before \"on\""),
+        "{out:?}"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
