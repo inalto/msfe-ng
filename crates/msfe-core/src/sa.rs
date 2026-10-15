@@ -483,13 +483,17 @@ fn extract_helo(s: &str) -> Option<String> {
 pub fn learn(cfg: &Config, message: &[u8], action: &str) -> ControlOutcome {
     let mut transcript = Vec::new();
     let dbpath = dbpath_args(cfg);
+    // `--max-size 0`: sa-learn skips anything over 500 KB by default and
+    // reports "0 message(s) examined" — an admin who picked this message and
+    // clicked Learn meant it, whatever its size (issue #14). `--forget` goes
+    // through the same iterator, so it gets the flag too.
     let steps: &[(&str, &[&str])] = match action {
-        "ham" => &[("sa-learn", &["--ham", "--no-sync"])],
-        "spam" => &[("sa-learn", &["--spam", "--no-sync"])],
-        "forget" => &[("sa-learn", &["--forget", "--no-sync"])],
+        "ham" => &[("sa-learn", &["--ham", "--no-sync", "--max-size", "0"])],
+        "spam" => &[("sa-learn", &["--spam", "--no-sync", "--max-size", "0"])],
+        "forget" => &[("sa-learn", &["--forget", "--no-sync", "--max-size", "0"])],
         // learn as spam AND report to the collaborative networks
         "report" => &[
-            ("sa-learn", &["--spam", "--no-sync"]),
+            ("sa-learn", &["--spam", "--no-sync", "--max-size", "0"]),
             ("spamassassin", &["-r"]),
         ],
         _ => {
@@ -513,6 +517,17 @@ pub fn learn(cfg: &Config, message: &[u8], action: &str) -> ControlOutcome {
                         transcript.push(l.to_string());
                     }
                 }
+                // sa-learn exits 0 having examined nothing when it skipped
+                // the message: say so instead of leaving "0 examined" to read
+                let success = if *cmd == "sa-learn" && examined_nothing(&output) {
+                    transcript.push(
+                        "sa-learn examined no message: it skipped the input (not a parseable RFC 822 message?)"
+                            .into(),
+                    );
+                    false
+                } else {
+                    success
+                };
                 transcript.push(if success {
                     "→ ok".into()
                 } else {
@@ -535,6 +550,14 @@ pub fn learn(cfg: &Config, message: &[u8], action: &str) -> ControlOutcome {
     }
     own_bayes_db(cfg);
     ControlOutcome { ok, transcript }
+}
+
+/// `Learned tokens from 0 message(s) (0 message(s) examined)` — nothing was
+/// trained, whatever the exit status.
+fn examined_nothing(output: &str) -> bool {
+    output
+        .lines()
+        .any(|l| l.contains("(0 message(s) examined)"))
 }
 
 /// SpamAssassin's Bayes database status (`sa-learn --dump magic`), parsed into
@@ -842,7 +865,12 @@ mod tests {
         let out = learn(&cfg, b"From: a\n\nx\n", "spam");
         assert_eq!(
             out.transcript[0],
-            "$ sa-learn --spam --no-sync --dbpath /var/spool/MailScanner/spamassassin/bayes"
+            "$ sa-learn --spam --no-sync --max-size 0 --dbpath /var/spool/MailScanner/spamassassin/bayes"
+        );
+        let out = learn(&cfg, b"From: a\n\nx\n", "forget");
+        assert_eq!(
+            out.transcript[0],
+            "$ sa-learn --forget --no-sync --max-size 0 --dbpath /var/spool/MailScanner/spamassassin/bayes"
         );
         let out = bayes_repair(&cfg);
         assert_eq!(
@@ -857,7 +885,18 @@ mod tests {
         let (cfg, conf) = cfg_with_state_dir("");
         assert_eq!(bayes_dbpath(&cfg), None);
         let out = learn(&cfg, b"x", "ham");
-        assert_eq!(out.transcript[0], "$ sa-learn --ham --no-sync");
+        assert_eq!(out.transcript[0], "$ sa-learn --ham --no-sync --max-size 0");
         std::fs::remove_file(conf).unwrap();
+    }
+
+    #[test]
+    fn a_skipped_message_is_not_a_success() {
+        assert!(examined_nothing(
+            "Learned tokens from 0 message(s) (0 message(s) examined)\n"
+        ));
+        assert!(!examined_nothing(
+            "Learned tokens from 1 message(s) (1 message(s) examined)\n"
+        ));
+        assert!(!examined_nothing(""));
     }
 }

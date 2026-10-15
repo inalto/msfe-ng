@@ -64,8 +64,11 @@ Quarantine tab's header viewer links the same way.
 **Actions** (also need the stored copy):
 - **Learn as ham / spam / spam & report / Forget** — trains SpamAssassin's Bayes
   filter (*report* also submits to Razor/Pyzor — see Troubleshooting for the
-  one-time setup `engine configure` does). With "Reclassify the
-  database" on, the log entry's spam flag follows.
+  one-time setup `engine configure` does). The message is trained whatever
+  its size (`sa-learn --max-size 0`; sa-learn alone skips anything over
+  500 KB and reports "0 message(s) examined" — which the transcript now calls
+  a failure rather than a success). With "Reclassify the database" on, the
+  log entry's spam flag follows.
 - **Release (resend)** — to the original recipients. **Release (forward)** —
   to the address typed in the box. **Deliver to INBOX** — straight into a local
   account's mailbox via Dovecot LDA.
