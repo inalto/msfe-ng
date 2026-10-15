@@ -110,6 +110,12 @@ db_pass = ""
 mailscanner_conf = "$MS_CONF"
 mailscanner_custom_dir = "$(dirname "$MS_CONF")/custom"
 
+# Which perl the RPM engine runs under: "system" (the RPM's /usr/bin/perl) or
+# "cpanel" (cPanel's perl, with its SpamAssassin, DBI, DBD::mysql, MIME::Parser
+# — nothing is installed into it; when it lacks a module the engine stays on
+# system perl). Config → MailScanner engine perl; MSFE_NG_ENGINE_PERL at install.
+engine_perl = "${MSFE_NG_ENGINE_PERL:-system}"
+
 # Where copies of scanned messages are kept (archive/quarantine), so the
 # Messages tab can show content. Retention is the 'bodydays' policy setting.
 quarantine_dir = "/var/spool/MailScanner/quarantine"

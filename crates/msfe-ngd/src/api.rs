@@ -654,6 +654,11 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
         // ---- MailScanner service operations (root-only admin surface) -------
         ("GET", "/api/service/status") => service_status(cfg),
         ("POST", "/api/service/control") => service_control(req),
+        ("GET", "/api/engine/perl") => Response::json(
+            200,
+            &msfe_core::engineperl::state(cfg).to_json().to_string(),
+        ),
+        ("POST", "/api/engine/perl/apply") => engine_perl_apply(cfg),
         ("POST", "/api/service/mailflow") => service_mailflow(req, cfg),
         ("POST", "/api/service/cpanel-spamassassin") => service_cpanel_sa(req),
         ("POST", "/api/service/engine-latch") => {
@@ -1957,6 +1962,37 @@ fn service_status(cfg: &Config) -> Response {
     )
 }
 
+/// Re-point the engine's scripts at the perl `engine_perl` wants (after the
+/// setting was saved), restarting MailScanner when something changed.
+fn engine_perl_apply(cfg: &Config) -> Response {
+    match msfe_core::engineperl::apply(cfg, false, true) {
+        Ok(r) => {
+            let mut lines: Vec<String> = r.changed.iter().map(|c| format!("rewrote {c}")).collect();
+            lines.extend(r.notes.iter().cloned());
+            if r.restarted {
+                lines.push("MailScanner restarted".into());
+            }
+            if lines.is_empty() {
+                lines.push("nothing to change".into());
+            }
+            Response::json(
+                200,
+                &Json::Object(vec![
+                    ("ok".into(), Json::Bool(true)),
+                    ("changed".into(), Json::Int(r.changed.len() as i64)),
+                    (
+                        "transcript".into(),
+                        Json::Array(lines.iter().map(Json::str).collect()),
+                    ),
+                    ("state".into(), msfe_core::engineperl::state(cfg).to_json()),
+                ])
+                .to_string(),
+            )
+        }
+        Err(e) => Response::json(500, &format!("{{\"error\":\"{e}\"}}")),
+    }
+}
+
 fn service_control(req: &Request) -> Response {
     let v = Json::parse(&req.body).unwrap_or(Json::Null);
     let action = v.str_field("action");
@@ -2375,6 +2411,9 @@ fn osint_setting_error(changes: &[(String, String)]) -> Option<&'static str> {
             "osint_hibp_mode" if v != "direct" && v != "range" => {
                 return Some("osint_hibp_mode must be direct or range");
             }
+            "engine_perl" if v != "system" && v != "cpanel" => {
+                return Some("engine_perl must be system or cpanel");
+            }
             _ => {}
         }
     }
@@ -2720,31 +2759,49 @@ fn service_conf_write(req: &Request, cfg: &Config, config_file: &Path) -> Respon
     }
 }
 
+/// The update check asks GitHub (two HTTP round trips, up to 8 s each); the
+/// rail asks on every page load, so one answer is kept for an hour.
+static UPDATE_CACHE: std::sync::Mutex<Option<(std::time::Instant, String)>> =
+    std::sync::Mutex::new(None);
+const UPDATE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+
 fn service_update(cfg: &Config) -> Response {
+    if let Ok(c) = UPDATE_CACHE.lock() {
+        if let Some((at, body)) = c.as_ref() {
+            if at.elapsed() < UPDATE_CACHE_TTL {
+                return Response::json(200, body);
+            }
+        }
+    }
+    let body = service_update_body(cfg);
+    if let Ok(mut c) = UPDATE_CACHE.lock() {
+        *c = Some((std::time::Instant::now(), body.clone()));
+    }
+    Response::json(200, &body)
+}
+
+fn service_update_body(cfg: &Config) -> String {
     let latest = service::latest_version();
     let upgradable = latest
         .as_deref()
         .is_some_and(|l| service::version_newer(l, msfe_api::VERSION));
     let e = msfe_core::upgrade::engine_update(cfg);
     let opt = |v: Option<String>| v.map(Json::Str).unwrap_or(Json::Null);
-    Response::json(
-        200,
-        &Json::Object(vec![
-            ("current".into(), Json::str(msfe_api::VERSION)),
-            ("latest".into(), opt(latest)),
-            ("upgradable".into(), Json::Bool(upgradable)),
-            (
-                "engine".into(),
-                Json::Object(vec![
-                    ("version".into(), opt(e.version)),
-                    ("latest".into(), opt(e.latest)),
-                    ("rpm".into(), Json::Bool(e.rpm)),
-                    ("upgradable".into(), Json::Bool(e.upgradable)),
-                ]),
-            ),
-        ])
-        .to_string(),
-    )
+    Json::Object(vec![
+        ("current".into(), Json::str(msfe_api::VERSION)),
+        ("latest".into(), opt(latest)),
+        ("upgradable".into(), Json::Bool(upgradable)),
+        (
+            "engine".into(),
+            Json::Object(vec![
+                ("version".into(), opt(e.version)),
+                ("latest".into(), opt(e.latest)),
+                ("rpm".into(), Json::Bool(e.rpm)),
+                ("upgradable".into(), Json::Bool(e.upgradable)),
+            ]),
+        ),
+    ])
+    .to_string()
 }
 
 /// The DNS resolver situation (Service tab card).

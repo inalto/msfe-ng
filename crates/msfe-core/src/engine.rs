@@ -267,10 +267,21 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
     }
     setup_network_homes(&site, &mut created, &mut warnings);
 
+    // The engine's perl (engine_perl): re-asserted here because an RPM
+    // upgrade resets the shebangs and a cPanel perl bump removes the old one.
+    let perl = crate::engineperl::apply(cfg, false, false)?;
+    repaired.extend(perl.changed.iter().map(|c| format!("engine perl: {c}")));
+    warnings.extend(
+        perl.notes
+            .iter()
+            .filter(|n| n.contains("staying on"))
+            .cloned(),
+    );
+
     // MailScanner reads its config only at startup: leaving it running with
     // stale directives is how misfiled spool files kept happening after the
     // Exim Command fix was written to disk.
-    let restarted = if !set.is_empty() && service::status().active {
+    let restarted = if (!set.is_empty() || !perl.changed.is_empty()) && service::status().active {
         service::control("restart").ok
     } else {
         false

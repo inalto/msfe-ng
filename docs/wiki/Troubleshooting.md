@@ -223,6 +223,18 @@ ones as Exim would (`mailnull:mail`, 0750, nothing existing touched), the
 doctor check *delivery spool directories present* fails while any is
 missing, and `msfe-ng doctor --fix` creates them.
 
+## MailScanner does not start after a cPanel update: `bad interpreter`
+
+With `engine_perl = "cpanel"` the engine's scripts name the real path of
+cPanel's perl (`…/3rdparty/perl/542/bin/perl`). When cPanel moves to a newer
+perl the old directory disappears and the unit fails with *bad interpreter:
+No such file or directory*. The monitor cron re-points the scripts within
+five minutes and restarts MailScanner (and alerts via Telegram); the doctor
+check *MailScanner engine perl* fails meanwhile and `msfe-ng doctor --fix`
+or `msfe-ng engine perl --apply` does it at once. An RPM upgrade of
+MailScanner resets the shebangs to `/usr/bin/perl` instead: the same check
+warns and the same fix applies (the Service tab's upgrade already runs it).
+
 ## Two MailScanner engines (ConfigServer's `/usr/mailscanner` tree)
 
 Servers migrated from ConfigServer MSFE often still run its bundled engine —

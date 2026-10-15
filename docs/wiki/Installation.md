@@ -11,6 +11,9 @@ curl -fsSL https://raw.githubusercontent.com/inalto/msfe-ng/main/packaging/get.s
 
 # no MailScanner on the box yet? let the installer set it up too
 curl -fsSL https://raw.githubusercontent.com/inalto/msfe-ng/main/packaging/get.sh | MSFE_NG_WITH_ENGINE=1 sh
+
+# … and run it under cPanel's perl (its SpamAssassin and modules; see Config → MailScanner engine perl)
+curl -fsSL https://raw.githubusercontent.com/inalto/msfe-ng/main/packaging/get.sh | MSFE_NG_WITH_ENGINE=1 MSFE_NG_ENGINE_PERL=cpanel sh
 ```
 
 The engine installer (also `msfe-ng engine install`) fetches the MailScanner

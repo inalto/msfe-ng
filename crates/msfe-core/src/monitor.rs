@@ -117,6 +117,30 @@ fn run_with_dirs(cfg: &Config, dry: bool, in_dir: &Path, out_dir: &Path) -> Moni
         }
     }
 
+    // ---- 2b. the engine's perl (never deletes; a vanished perl stops MailScanner)
+    let perl = crate::engineperl::state(cfg);
+    if perl.applicable && !perl.ok() {
+        let broken = !perl.broken().is_empty();
+        match crate::engineperl::apply(cfg, dry, true) {
+            Ok(r) => {
+                notes.extend(r.changed.iter().map(|c| format!("engine perl: {c}")));
+                if r.restarted {
+                    notes.push("engine perl: MailScanner restarted".into());
+                }
+                if broken && cooled_down(cfg, "alert_engineperl", now) {
+                    alerts.push(format!(
+                        "MailScanner's scripts named a perl that no longer exists (cPanel moved to a new one?); re-pointed at {}.",
+                        perl.wanted
+                    ));
+                    if !dry {
+                        let _ = db::kv_set(cfg, "alert_engineperl", &now.to_string());
+                    }
+                }
+            }
+            Err(e) => alerts.push(format!("engine perl repair failed: {e}")),
+        }
+    }
+
     // ---- 3. alert checks ---------------------------------------------------
     let tg = telegram::configured(cfg);
     if cfg.alert_queue_size > 0 {

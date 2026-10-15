@@ -45,6 +45,10 @@ pub struct Config {
     pub delivery_runs_per_min: u32,
     /// A finished report is served again for this long (seconds).
     pub delivery_cache_secs: u64,
+    /// Which perl the RPM engine runs under: `system` (the RPM's own
+    /// shebangs) or `cpanel` (cPanel's perl, with its SpamAssassin and
+    /// modules). See `engineperl`.
+    pub engine_perl: String,
     /// OSINT view (Delivery → OSINT). Off until the operator enables it.
     pub osint_enabled: bool,
     pub osint_runs_per_min: u32,
@@ -196,6 +200,7 @@ impl Default for Config {
             geoip_url: "https://ipwho.is/{ip}".into(),
             delivery_runs_per_min: 6,
             delivery_cache_secs: 600,
+            engine_perl: "system".into(),
             osint_enabled: false,
             osint_runs_per_min: 3,
             osint_max_concurrent: 2,
@@ -334,6 +339,9 @@ impl Config {
                     c.delivery_runs_per_min = v.parse().unwrap_or(6).clamp(1, 60)
                 }
                 "delivery_cache_secs" => c.delivery_cache_secs = v.parse().unwrap_or(600),
+                "engine_perl" => {
+                    c.engine_perl = crate::engineperl::Choice::parse(&v).as_str().to_string()
+                }
                 "osint_enabled" => c.osint_enabled = truthy(&v),
                 "osint_runs_per_min" => c.osint_runs_per_min = v.parse().unwrap_or(3).clamp(1, 30),
                 "osint_max_concurrent" => {
@@ -469,6 +477,7 @@ impl Config {
                 "delivery_cache_secs".into(),
                 Json::Int(self.delivery_cache_secs as i64),
             ),
+            ("engine_perl".into(), Json::str(&self.engine_perl)),
             ("osint_enabled".into(), Json::Bool(self.osint_enabled)),
             (
                 "osint_runs_per_min".into(),

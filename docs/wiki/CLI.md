@@ -22,6 +22,7 @@ msfe-ng rules adopt [--from <dir>]  borrow existing on-disk rules into the custo
 msfe-ng import <dir> [--save]       import a legacy ConfigServer MSFE dir (e.g. /usr/msfe)
 
 msfe-ng engine <status|install|configure|enable|disable|lint>
+msfe-ng engine perl [--apply] [--json]       which perl the RPM engine runs under (engine_perl); --apply rewrites the shebangs
 msfe-ng engine migrate-legacy [--run]        ConfigServer MailScanner → the RPM (preflight without --run)
 msfe-ng legacy decommission [--run]          remove ConfigServer's front-end only, backed up first (preflight without --run)
 msfe-ng engine <wire|unwire> [--dry-run]     route mail through MailScanner via Exim (or undo)

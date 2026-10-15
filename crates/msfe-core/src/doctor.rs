@@ -130,6 +130,64 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
         return out;
     }
 
+    // Which perl the RPM engine runs under (engine_perl): a shebang naming a
+    // perl that is gone (cPanel moved to a new one) stops MailScanner from
+    // starting at all; one that does not match the setting (an RPM upgrade
+    // reset it) runs with the wrong modules and SpamAssassin.
+    let perl = crate::engineperl::state(cfg);
+    if perl.applicable {
+        let broken = perl.broken();
+        let stale = perl.stale();
+        let (ok, level, detail, fix) = if !broken.is_empty() {
+            (
+                false,
+                Level::Fail,
+                format!(
+                    "{} names {}, which does not exist — MailScanner cannot start (cPanel moved to a new perl?)",
+                    broken[0].path,
+                    broken[0].interp.as_deref().unwrap_or("?")
+                ),
+                format!("msfe-ng doctor --fix (or msfe-ng engine configure) re-points the engine's scripts at {}", perl.wanted),
+            )
+        } else if !stale.is_empty() {
+            (
+                false,
+                Level::Warn,
+                format!(
+                    "engine_perl = {} but {} of {} scripts run under {} instead of {} (an RPM upgrade resets the shebangs)",
+                    perl.setting.as_str(),
+                    stale.len(),
+                    perl.scripts.len(),
+                    stale[0].interp.as_deref().unwrap_or("?"),
+                    perl.wanted
+                ),
+                "msfe-ng doctor --fix (or msfe-ng engine configure) rewrites them and restarts MailScanner".to_string(),
+            )
+        } else if let (crate::engineperl::Choice::Cpanel, Some(why)) =
+            (perl.setting, &perl.cpanel_problem)
+        {
+            (
+                false,
+                Level::Warn,
+                format!("engine_perl = cpanel, but cPanel's perl cannot be used ({why}) — the engine stays on {}", crate::engineperl::SYSTEM_PERL),
+                "install what cPanel's perl lacks is not an option (cPanel owns it): keep engine_perl = system, or check /usr/local/cpanel/3rdparty/bin/perl".to_string(),
+            )
+        } else {
+            (
+                true,
+                Level::Warn,
+                format!(
+                    "engine_perl = {}: the engine's {} scripts run under {}",
+                    perl.setting.as_str(),
+                    perl.scripts.len(),
+                    perl.wanted
+                ),
+                String::new(),
+            )
+        };
+        out.push(check("MailScanner engine perl", ok, level, detail, &fix));
+    }
+
     let conf = std::fs::read_to_string(&cfg.mailscanner_conf).unwrap_or_default();
     let (configured, detail) = engine_configured_verdict(&conf, lay.supports_exim_command);
     out.push(check(
@@ -2259,6 +2317,8 @@ pub enum Fix {
     SpoolRepair,
     /// create the split-spool subdirectories Exim has not made yet.
     SpoolDirs,
+    /// re-point the engine's scripts at the perl `engine_perl` wants.
+    EnginePerl,
     /// start MailScanner: wired, latch on, but not running.
     Start,
     /// start unbound: resolv.conf points at loopback and it is down.
@@ -2312,6 +2372,13 @@ pub fn plan(checks: &[Check], engine_targets_exim: bool) -> Vec<Fix> {
             "message archive configured" | "auto-ban match rules on disk" => Some(Fix::Sync),
             "spool files correctly placed" => Some(Fix::SpoolRepair),
             "delivery spool directories present" => Some(Fix::SpoolDirs),
+            "MailScanner engine perl"
+                if c.fix
+                    .as_deref()
+                    .is_some_and(|f| f.starts_with("msfe-ng doctor --fix")) =>
+            {
+                Some(Fix::EnginePerl)
+            }
             "MailScanner running" if wired && latch_on => Some(Fix::Start),
             "local DNS resolver answering" => Some(Fix::ResolverStart),
             "stale MailScanner service unit" => Some(Fix::StaleUnit),
@@ -2407,6 +2474,20 @@ pub fn fix(cfg: &Config, config_file: &Path) -> Vec<String> {
                     Err(e) => done.push(format!("spool repair failed: {e}")),
                 }
             }
+            Fix::EnginePerl => match crate::engineperl::apply(cfg, false, true) {
+                Ok(r) => {
+                    for c in &r.changed {
+                        done.push(format!("engine perl: {c}"));
+                    }
+                    if r.restarted {
+                        done.push("engine perl: MailScanner restarted".into());
+                    }
+                    if r.changed.is_empty() {
+                        done.push("engine perl: nothing to rewrite".into());
+                    }
+                }
+                Err(e) => done.push(format!("engine perl: failed ({e})")),
+            },
             Fix::SpoolDirs => {
                 let (_, outq) = service::queue_dirs(cfg);
                 match crate::engine::create_exim_spool_dirs(&outq, false) {
@@ -2999,6 +3080,14 @@ mod tests {
                 Fix::Snapshot
             ]
         );
+        // the engine's perl: a stale or vanished shebang is mechanical, an
+        // unusable cPanel perl is a decision (the fix text says which)
+        let mut stale = chk("MailScanner engine perl", Level::Warn);
+        stale.fix = Some("msfe-ng doctor --fix (or msfe-ng engine configure) rewrites them".into());
+        assert_eq!(plan(&[stale], false), vec![Fix::EnginePerl]);
+        let mut unusable = chk("MailScanner engine perl", Level::Warn);
+        unusable.fix = Some("install what cPanel's perl lacks is not an option".into());
+        assert!(plan(&[unusable], false).is_empty());
         // a dead loopback resolver is restarted; a stale unit is mechanical;
         // the exiscan double scan is a decision
         assert_eq!(

@@ -37,6 +37,7 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
         ("exim", _) => Some(NONE),
         ("engine", Some("wire" | "unwire")) => Some(DRY),
         ("engine", Some("migrate-legacy")) => Some(&["--run"]),
+        ("engine", Some("perl")) => Some(&["--apply", "--json"]),
         ("legacy", Some("decommission")) => Some(&["--run"]),
         ("db", Some("import-legacy")) => Some(&["--database", "--dry-run"]),
         ("db", _) => Some(NONE),
@@ -136,7 +137,7 @@ fn usage_of(cmd: &str) -> &'static str {
         "exim" => "msfe-ng exim <status|enable-scanning|disable-scanning|enable-cpanel-spamassassin|disable-cpanel-spamassassin>",
         "selftest" => "msfe-ng selftest [--to <address>]",
         "engine" => {
-            "msfe-ng engine <status|install|configure|enable|disable|lint|wire|unwire> [--dry-run]"
+            "msfe-ng engine <status|install|configure|enable|disable|lint|perl [--apply] [--json]|wire|unwire> [--dry-run]"
         }
         "service" => {
             "msfe-ng service <status|start|stop|reload|restart|queue-fix|spool-repair [--dry-run]|units [--json]|unit <name> <enable|start|restart|enable-now>>"
@@ -210,7 +211,7 @@ fn main() -> ExitCode {
         "service" if matches!(sub, Some("units" | "unit")) => cmd_service_units(sub, rest),
         "service" => cmd_service(args.get(1).map(String::as_str)),
         "rules" => cmd_rules(args.get(1).map(String::as_str)),
-        "engine" => cmd_engine(args.get(1).map(String::as_str)),
+        "engine" => cmd_engine(args.get(1).map(String::as_str), rest),
         "legacy" => cmd_legacy(args.get(1).map(String::as_str)),
         "autoban" => cmd_autoban(args.get(1).map(String::as_str)),
         "report" => cmd_report(sub, rest),
@@ -1496,7 +1497,7 @@ fn cmd_doctor(fix: bool, all: bool) -> ExitCode {
 /// MailScanner engine management: `status` reports whether the engine is
 /// installed and running; `install` runs the bundled unattended installer
 /// (official MailScanner v5 rpm + dependencies; never touches Exim).
-fn cmd_engine(sub: Option<&str>) -> ExitCode {
+fn cmd_engine(sub: Option<&str>, rest: &[String]) -> ExitCode {
     use msfe_core::service;
     let cfg = Config::load(&config_path());
     let lay = msfe_core::layout::resolve(&cfg);
@@ -1525,7 +1526,15 @@ fn cmd_engine(sub: Option<&str>) -> ExitCode {
                 return ExitCode::from(1);
             }
             match std::process::Command::new("sh").arg(script).status() {
-                Ok(s) if s.success() => ExitCode::SUCCESS,
+                Ok(s) if s.success() => {
+                    // the RPM's shebangs name system perl: re-assert engine_perl
+                    if let Ok(r) = msfe_core::engineperl::apply(&cfg, false, false) {
+                        for c in &r.changed {
+                            println!("engine perl: {c}");
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
                 Ok(_) => {
                     eprintln!("msfe-ng engine install: failed (see output above)");
                     ExitCode::from(1)
@@ -1652,6 +1661,69 @@ fn cmd_engine(sub: Option<&str>) -> ExitCode {
                 }
             }
         }
+        Some("perl") => {
+            use msfe_core::engineperl;
+            let apply = rest.iter().any(|a| a == "--apply");
+            let json = rest.iter().any(|a| a == "--json");
+            let s = engineperl::state(&cfg);
+            if apply {
+                match engineperl::apply(&cfg, false, true) {
+                    Ok(r) => {
+                        for c in &r.changed {
+                            println!("rewrote {c}");
+                        }
+                        for n in &r.notes {
+                            println!("{n}");
+                        }
+                        if r.restarted {
+                            println!("MailScanner restarted");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("msfe-ng engine perl: {e}");
+                        return ExitCode::from(1);
+                    }
+                }
+            }
+            let s = if apply { engineperl::state(&cfg) } else { s };
+            if json {
+                println!("{}", s.to_json());
+            } else {
+                println!("engine_perl = {}", s.setting.as_str());
+                if !s.applicable {
+                    println!("not the RPM engine: its perl is not managed");
+                } else {
+                    println!("wanted: {}", s.wanted);
+                    match (&s.cpanel_perl, &s.cpanel_problem) {
+                        (Some(p), None) => println!(
+                            "cPanel perl: {p} (loads {})",
+                            engineperl::REQUIRED_MODULES.join(", ")
+                        ),
+                        (Some(p), Some(why)) => println!("cPanel perl: {p} — unusable: {why}"),
+                        (None, _) => println!("cPanel perl: not here"),
+                    }
+                    for sc in &s.scripts {
+                        println!(
+                            "  {:<28} {}{}",
+                            sc.path,
+                            sc.interp.as_deref().unwrap_or("(no perl shebang)"),
+                            if sc.interp.is_some() && !sc.interp_exists {
+                                "  MISSING"
+                            } else if sc.interp.as_deref() == Some(s.wanted.as_str()) {
+                                ""
+                            } else {
+                                "  (stale)"
+                            }
+                        );
+                    }
+                }
+            }
+            if s.ok() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
         Some("lint") => {
             let r = service::lint(&cfg);
             println!("{}", r.output);
@@ -1664,7 +1736,7 @@ fn cmd_engine(sub: Option<&str>) -> ExitCode {
             }
         }
         _ => {
-            eprintln!("usage: msfe-ng engine <status|install|configure|enable|disable|lint|wire|unwire> [--dry-run]");
+            eprintln!("usage: {}", usage_of("engine"));
             ExitCode::from(2)
         }
     }

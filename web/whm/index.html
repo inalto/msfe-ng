@@ -27,7 +27,7 @@
         <div style="display:flex;align-items:center;gap:.4rem">
           <button class="iconbtn" id="themebtn" title="Toggle light / dark / auto">◑ Theme</button>
         </div>
-        <div class="version">{{VIEW}} · {{PANEL}} · v{{VERSION}}</div>
+        <div class="version" id="railver">{{VIEW}} · {{PANEL}} · v{{VERSION}}</div>
         <div class="links"><a class="star" href="https://github.com/inalto/msfe-ng" target="_blank" rel="noopener" title="Like MSFE-NG? A star on GitHub helps others find it">★ Star</a> · <a href="https://github.com/inalto/msfe-ng" target="_blank" rel="noopener">GitHub</a> · <a href="https://github.com/inalto/msfe-ng/wiki" target="_blank" rel="noopener">Wiki</a> · <a href="https://github.com/inalto/msfe-ng/issues" target="_blank" rel="noopener">Issues</a></div>
       </div>
     </aside>
@@ -4843,6 +4843,39 @@ async function renderConfig(){
     el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},
       'Sets MailScanner’s global “Spam Checks = yes”, so SpamAssassin runs on mail for every domain (this is the authoritative switch — it overrides any per-domain rule). MailScanner is restarted to apply the change.'));
   maint.append(sc);
+  // Engine perl — which perl the RPM MailScanner runs under (engine_perl)
+  const ep=el('div',{class:'card'},el('h2',{},'MailScanner engine perl'),
+    el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},
+      'The RPM engine ships on system perl, where every module has to be installed and a second SpamAssassin ends up beside cPanel’s. cPanel’s own perl already carries Mail::SpamAssassin (with cPanel’s rule updates), DBI, DBD::mysql and MIME::Parser; choosing it points the engine’s five perl scripts at its real path. The choice is re-asserted by Configure for Exim, after an engine upgrade and by the monitor cron, so a cPanel perl bump or an RPM update cannot leave the engine on a perl that is gone. Nothing is ever installed into cPanel’s perl: when it lacks a module the engine stays on system perl and the doctor says why.'));
+  maint.append(ep);
+  const epState=el('pre',{class:'log',style:'font-size:.78rem'},'loading…');
+  const epSel=el('select');[['system','system perl (the RPM’s own, /usr/bin/perl)'],['cpanel','cPanel’s perl (/usr/local/cpanel/3rdparty/bin/perl)']].forEach(([v,l])=>epSel.append(el('option',{value:v},l)));
+  epSel.value=cconf.engine_perl||'system';
+  const epBtn=el('button',{class:'act'},'Save and apply');
+  const epOut=el('pre',{class:'log',style:'display:none'},'');
+  async function epLoad(){
+    const st=await api('/api/engine/perl');
+    if(!st||st.error){epState.textContent=(st&&st.error)||'no answer';return;}
+    if(!st.applicable){epState.textContent='Not the RPM engine (ConfigServer tree): its perl is not managed here.';epSel.disabled=true;epBtn.disabled=true;return;}
+    const lines=['setting: '+st.setting+'   wanted: '+st.wanted,
+      'cPanel perl: '+(st.cpanel_perl?st.cpanel_perl+(st.cpanel_problem?'  — unusable: '+st.cpanel_problem:'  (loads Mail::SpamAssassin, DBI, MIME::Parser)'):'not here')];
+    (st.scripts||[]).forEach(x=>lines.push('  '+x.path.padEnd(28)+' '+(x.interp||'(no perl shebang)')+(x.interp&&!x.interp_exists?'  MISSING':x.interp===st.wanted?'':'  (stale)')));
+    epState.textContent=lines.join('\n');
+  }
+  epBtn.onclick=async()=>{
+    const v=epSel.value;
+    if(v==='cpanel'&&!confirm('Point MailScanner at cPanel’s perl?\n\nThe five perl scripts of the engine get cPanel’s perl in their shebang (only if it loads Mail::SpamAssassin, DBI and MIME::Parser) and MailScanner is restarted. SpamAssassin rules then come from cPanel’s copy.'))return;
+    if(v==='system'&&!confirm('Point MailScanner back at system perl and restart it?'))return;
+    epBtn.disabled=true;epOut.style.display='';epOut.textContent='Saving…';
+    const r=await api('/api/service/conf/apply',{method:'POST',body:{which:'msfe',changes:{engine_perl:v}}});
+    if(!(r&&r.ok)){epOut.textContent=(r&&r.error)||'Save failed';epBtn.disabled=false;return;}
+    const a=await api('/api/engine/perl/apply',{method:'POST'});
+    epOut.textContent=((a&&a.transcript)||[(a&&a.error)||'no response']).join('\n');
+    toast(a&&a.ok?'Engine perl: '+v:'Apply failed — see output');
+    cconf.engine_perl=v;epBtn.disabled=false;epLoad();
+  };
+  ep.append(epState,el('label',{class:'field'},'Run the engine under',epSel),el('div',{class:'ctl'},epBtn),epOut);
+  epLoad();
   const scout=el('pre',{class:'log',style:'display:none'},'');
   const scbtn=el('button',{class:'act'},'Enable spam checks for all domains');
   scbtn.onclick=async()=>{
@@ -5233,6 +5266,23 @@ async function refreshDoctor(){
 }
 refreshDoctor();
 setInterval(refreshDoctor,60000);
+// A newer release: said in the rail under the version, with the way to it
+// (Service → Updates). The daemon keeps the answer for an hour; the page
+// asks once after load and then every six hours.
+async function checkUpdateBadge(){
+  let r;try{r=await api('/api/service/update');}catch(e){return;}
+  const v=$('#railver');if(!v)return;
+  v.querySelectorAll('.upd').forEach(x=>x.remove());
+  const ours=r&&r.upgradable&&r.latest;
+  const eng=r&&r.engine&&r.engine.upgradable&&r.engine.latest;
+  if(!ours&&!eng)return;
+  const txt=ours?('MSFE-NG v'+r.latest+' available'):('MailScanner '+r.engine.latest+' available');
+  const a=el('a',{class:'upd',href:'#',style:'display:block;color:var(--warning);text-decoration:none;margin-top:.15rem',title:(ours&&eng?'MSFE-NG v'+r.latest+' and MailScanner '+r.engine.latest+' are available — ':'')+'open Service → Updates'},'⬆ '+txt+(ours&&eng?' (+ engine)':''));
+  a.onclick=e=>{e.preventDefault();const b=document.querySelector('#tabs button[data-tab="service"]');if(b)b.click();};
+  v.append(a);
+}
+setTimeout(checkUpdateBadge,4000);
+setInterval(checkUpdateBadge,6*3600*1000);
 
 // deep link: #msg=<id> opens the full message view directly, #qmsg=<id> the
 // same screen with Back leading to the Quarantine tab

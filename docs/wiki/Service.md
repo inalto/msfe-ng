@@ -138,6 +138,12 @@ newer, an **Upgrade … now** button appears:
 
 The last line of the card links to the project on GitHub, where you can star it.
 
+You do not have to come here to learn about a release: the sidebar shows
+*⬆ MSFE-NG vX available* (or *MailScanner … available*) under the version
+line whenever something newer exists, and clicking it opens this tab. The
+page checks once after loading and then every six hours; the daemon asks
+GitHub at most once an hour.
+
 **Private DNS resolver** appears as a card until unbound answers on loopback
 and `resolv.conf` points there — see [Troubleshooting](Troubleshooting), *DNS
 blocklists*, for what the install does.

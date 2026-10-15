@@ -139,6 +139,36 @@ rule) and restarts MailScanner.
 
 ![Maintenance cards](https://raw.githubusercontent.com/inalto/msfe-ng/main/docs/img/config-maintenance.png)
 
+## MailScanner engine perl
+
+The RPM engine ships with `#!/usr/bin/perl` shebangs: system perl, where
+every module MailScanner needs has to be installed (cpanm for what EL does
+not package) and where a second SpamAssassin ends up beside cPanel's — with
+its own `sa-update` and its own rule directory. cPanel's perl
+(`/usr/local/cpanel/3rdparty/bin/perl`) already carries Mail::SpamAssassin
+with the rules cPanel keeps updated, DBI, DBD::mysql, MIME::Parser and the
+rest, which is how the ConfigServer engine always ran.
+
+`engine_perl = "cpanel"` (this card, or the key in `config.toml`,
+`MSFE_NG_ENGINE_PERL=cpanel` at install) points the engine's five perl
+scripts (`MailScanner`, `ms-create-locks`, `ms-peek`, `ms-sa-cache`,
+`ms-upgrade-conf`) at the *real* path of cPanel's perl (for example
+`/usr/local/cpanel/3rdparty/perl/542/bin/perl`, never the symlink, so a cPanel
+update cannot silently switch the engine to a perl nobody checked) and
+restarts MailScanner. The card shows what each script runs under now.
+
+What keeps it true: *Configure for Exim*, the engine upgrade (an RPM update
+resets the shebangs) and `msfe-ng engine install` re-assert the choice; the
+five-minute monitor cron repairs scripts whose perl has disappeared (cPanel
+moving from `perl/542` to a newer one removes the old directory and
+MailScanner would not start) and sends a Telegram alert when it did; the
+doctor check *MailScanner engine perl* fails on a vanished perl, warns on a
+stale shebang, and `--fix` rewrites them. cPanel's perl is used only when it
+loads Mail::SpamAssassin, DBI and MIME::Parser — nothing is ever installed
+into it; when it lacks something the engine stays on system perl and the
+doctor says why. The ConfigServer engine is not touched. CLI:
+`msfe-ng engine perl [--apply] [--json]`.
+
 ## Database & Bayes maintenance
 
 - **Backup now** — timestamped SQL dump into `backup_dir`

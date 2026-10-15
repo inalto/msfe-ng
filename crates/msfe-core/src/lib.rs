@@ -45,6 +45,7 @@ pub mod doctor;
 pub mod emlcheck;
 pub mod engine;
 pub mod engine_migration;
+pub mod engineperl;
 pub mod footers;
 pub mod geoip;
 pub mod housekeeping;
