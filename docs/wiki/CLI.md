@@ -36,7 +36,7 @@ msfe-ng report <ip> [--category <id|name>]... [--comment <text>] [--dry-run] [--
 msfe-ng report list [--ip <ip>] [--limit n] [--json]   the reports sent so far, newest first (backup_dir/reports.jsonl)
 msfe-ng digest [--dry-run]          quarantine digests to digest-enabled domains (cron: daily)
 msfe-ng housekeeping                prune old log rows and bodies per retention (cron: nightly)
-msfe-ng selftest                    send GTUBE / EICAR / clean test mail through the MTA
+msfe-ng selftest [--to <address>]   send GTUBE / EICAR / clean test mail through the MTA (default recipient: the first cPanel account's own mailbox, else root@localhost)
 msfe-ng spambox <enable|disable|status>
 
 msfe-ng db-migrate [--status]       apply / list SQL migrations

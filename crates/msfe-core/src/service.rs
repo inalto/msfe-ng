@@ -417,8 +417,13 @@ pub fn control(action: &str) -> ControlOutcome {
             }
         }
     };
-    let ok = run("systemctl", &[sysd_verb, crate::layout::service_unit()])
-        || run("service", &[SYSV_NAME, action]);
+    let unit = crate::layout::service_unit();
+    let ok = run("systemctl", &[sysd_verb, unit]) || run("service", &[SYSV_NAME, action]);
+    // Starting it by hand means it is meant to run: make it come back after
+    // a reboot too, or mail routed through it waits until someone notices.
+    if ok && action == "start" {
+        run("systemctl", &["enable", unit]);
+    }
     ControlOutcome { ok, transcript }
 }
 

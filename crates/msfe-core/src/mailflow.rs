@@ -227,22 +227,24 @@ fn set_account_sa(root: &Path, user: &str, home: &Path, on: bool) -> io::Result<
         } else {
             "disable_spam_assassin"
         };
-        let out = std::process::Command::new("uapi")
-            .args([
-                "--output=json",
-                &format!("--user={user}"),
-                "SpamAssassin",
-                call,
-            ])
-            .output()?;
-        let text = String::from_utf8_lossy(&out.stdout);
-        if !out.status.success() || !text.contains("\"status\":1") {
-            return Err(io::Error::other(format!(
-                "uapi SpamAssassin {call} for {user} failed: {}",
-                text.trim()
-            )));
+        // cPanel 138 moved the functions from the SpamAssassin module to
+        // Email ("could not find the function … in the module SpamAssassin");
+        // older versions have only the former. Try Email, then SpamAssassin.
+        let mut last = String::new();
+        for module in ["Email", "SpamAssassin"] {
+            let out = std::process::Command::new("uapi")
+                .args(["--output=json", &format!("--user={user}"), module, call])
+                .output()?;
+            let text = String::from_utf8_lossy(&out.stdout);
+            if out.status.success() && text.contains("\"status\":1") {
+                return Ok(());
+            }
+            last = format!("uapi {module} {call} for {user} failed: {}", text.trim());
+            if !text.contains("could not find the function") {
+                break;
+            }
         }
-        return Ok(());
+        return Err(io::Error::other(last));
     }
     let flag = home.join(".spamassassinenable");
     if on {

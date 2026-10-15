@@ -209,6 +209,20 @@ the Exim message-id format* when the probe would go wrong, and the monitor
 cron moves misfiled files every 5 minutes (**Queues → Fix misplaced spool
 files** / `msfe-ng service spool-repair` do it by hand).
 
+## Fresh server: `Cannot create + lock clean body /var/spool/exim/input/s/…`
+
+Exim creates its split-spool subdirectories (`input/a`…`input/9`,
+`msglog/a`…) lazily, the first time it queues a message there; MailScanner
+never creates them. On a server that has not queued mail before wiring,
+every scanned message fails at the write-out with `Could not open file
+>/var/spool/exim/input/<c>/<id>-D: No such file or directory` and waits in
+the scanning queue for the next attempt, while the queue looks healthy.
+Lint says the same earlier: *directory /var/spool/exim/input for outqueuedir
+does not exist*. `engine wire` and `engine configure` now create the missing
+ones as Exim would (`mailnull:mail`, 0750, nothing existing touched), the
+doctor check *delivery spool directories present* fails while any is
+missing, and `msfe-ng doctor --fix` creates them.
+
 ## Two MailScanner engines (ConfigServer's `/usr/mailscanner` tree)
 
 Servers migrated from ConfigServer MSFE often still run its bundled engine —

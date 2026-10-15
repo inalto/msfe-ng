@@ -15,9 +15,19 @@ curl -fsSL https://raw.githubusercontent.com/inalto/msfe-ng/main/packaging/get.s
 
 The engine installer (also `msfe-ng engine install`) fetches the MailScanner
 v5 RPM from the project's GitHub release, verifies it, runs `ms-configure`
-unattended and fills in perl modules EL does not package. ClamAV: cPanel's
-own (`cpanel-clamav`) is kept when present — EPEL's packages conflict with
-it; otherwise EPEL's clamd + freshclam are installed. `engine configure`
+unattended and fills in the perl modules MailScanner's own lint still misses:
+the distro package first (`perl-<Name-With-Dashes>`, most are in EL/EPEL),
+cpanm only for what is not packaged (with `perl-LWP-Protocol-https`, which
+cpanm needs to reach its index), plus `DBD::SQLite` for the Processing
+Attempts Database, which lint only warns about. A module that cannot be
+installed is reported at the end and the installer exits 1 — after the
+remaining steps (SpamAssassin, DBI + the MySQL driver, ClamAV) have run.
+Re-running with an engine already present skips the package and
+`ms-configure` steps but always re-checks those dependencies;
+`MSFE_NG_ENGINE_FORCE=1` redoes everything. ClamAV: cPanel's own
+(`cpanel-clamav`) is kept when present and installed through cPanel's own
+package tooling on a cPanel host that lacks it — EPEL's packages conflict
+with it; elsewhere EPEL's clamd + freshclam are installed. `engine configure`
 points MailScanner at whichever clamd socket exists.
 
 What it does: preflight check, installs the daemon + CLI under `/opt/msfe-ng`,

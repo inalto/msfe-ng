@@ -531,6 +531,29 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
         },
         "msfe-ng service spool-repair (or Queues tab → Fix misplaced spool files), then msfe-ng engine configure to stop it recurring",
     ));
+    // Exim creates its split-spool subdirectories lazily; on a server that
+    // has not queued mail yet MailScanner cannot write a scanned message out
+    // and it waits in the scanning queue while everything else looks fine.
+    let missing_dirs = crate::engine::missing_exim_spool_dirs(&outq);
+    if outq.parent().is_some_and(Path::is_dir) && crate::engine::exim_split_spool() {
+        out.push(check(
+            "delivery spool directories present",
+            missing_dirs.is_empty(),
+            Level::Fail,
+            if missing_dirs.is_empty() {
+                format!("{} and its msglog have every split-spool subdirectory", outq.display())
+            } else {
+                format!(
+                    "{} split-spool director{} missing under {} (first: {}) — Exim creates them on first use, MailScanner does not: a scanned message cannot be written out and stays in the scanning queue",
+                    missing_dirs.len(),
+                    if missing_dirs.len() == 1 { "y is" } else { "ies are" },
+                    outq.parent().unwrap_or(&outq).display(),
+                    missing_dirs[0].display()
+                )
+            },
+            "msfe-ng doctor --fix (or msfe-ng engine configure) creates the missing ones as Exim would, mailnull:mail 0750, touching nothing that exists",
+        ));
+    }
     let scanning = mailflow::scanning_state(cfg);
     out.push(check(
         "scanning kill switch",
@@ -2234,6 +2257,8 @@ pub enum Fix {
     Sync,
     /// `service spool-repair`.
     SpoolRepair,
+    /// create the split-spool subdirectories Exim has not made yet.
+    SpoolDirs,
     /// start MailScanner: wired, latch on, but not running.
     Start,
     /// start unbound: resolv.conf points at loopback and it is down.
@@ -2286,6 +2311,7 @@ pub fn plan(checks: &[Check], engine_targets_exim: bool) -> Vec<Fix> {
             "phishing site lists updating" if engine_targets_exim => Some(Fix::PhishingUpdate),
             "message archive configured" | "auto-ban match rules on disk" => Some(Fix::Sync),
             "spool files correctly placed" => Some(Fix::SpoolRepair),
+            "delivery spool directories present" => Some(Fix::SpoolDirs),
             "MailScanner running" if wired && latch_on => Some(Fix::Start),
             "local DNS resolver answering" => Some(Fix::ResolverStart),
             "stale MailScanner service unit" => Some(Fix::StaleUnit),
@@ -2379,6 +2405,18 @@ pub fn fix(cfg: &Config, config_file: &Path) -> Vec<String> {
                 match service::repair_spool(&outq, false) {
                     Ok(r) => done.push(format!("spool repair: {} file(s) moved", r.moved)),
                     Err(e) => done.push(format!("spool repair failed: {e}")),
+                }
+            }
+            Fix::SpoolDirs => {
+                let (_, outq) = service::queue_dirs(cfg);
+                match crate::engine::create_exim_spool_dirs(&outq, false) {
+                    Ok(made) => done.push(format!(
+                        "delivery spool: {} missing director{} created under {}",
+                        made.len(),
+                        if made.len() == 1 { "y" } else { "ies" },
+                        outq.parent().unwrap_or(&outq).display()
+                    )),
+                    Err(e) => done.push(format!("delivery spool directories not created: {e}")),
                 }
             }
             Fix::Start => {
@@ -2930,6 +2968,7 @@ mod tests {
             chk("configuration snapshot", Level::Warn),
             chk("message archive configured", Level::Warn),
             chk("spool files correctly placed", Level::Fail),
+            chk("delivery spool directories present", Level::Fail),
             chk("scanning kill switch", Level::Warn),
             chk("cPanel SpamAssassin double scan", Level::Warn),
             chk("DNS blocklists answering", Level::Warn),
@@ -2944,6 +2983,7 @@ mod tests {
                 Fix::PhishingUpdate,
                 Fix::Sync,
                 Fix::SpoolRepair,
+                Fix::SpoolDirs,
                 Fix::Snapshot
             ],
             "decisions are never planned; configure listed once"
@@ -2955,6 +2995,7 @@ mod tests {
                 Fix::LoggingModules,
                 Fix::Sync,
                 Fix::SpoolRepair,
+                Fix::SpoolDirs,
                 Fix::Snapshot
             ]
         );

@@ -54,14 +54,19 @@ engine_perl() {
 }
 MS_BIN="$(find_engine)"
 MS_PERL="perl"
+# An engine already here: the package and ms-configure steps are done, but
+# the dependency steps below are idempotent and always run — a first run that
+# died half-way (a module cpanm could not fetch) must not leave SpamAssassin,
+# the DB driver or ClamAV unchecked on the second.
+SKIP_PACKAGE=0
 if [ -n "$MS_BIN" ]; then
     MS_PERL="$(engine_perl "$MS_BIN")"
     [ -n "$MS_PERL" ] || MS_PERL="perl"
     info "MailScanner engine already installed at $MS_BIN"
     info "engine perl: $MS_PERL"
     if [ "${MSFE_NG_ENGINE_FORCE:-0}" != 1 ]; then
-        info "nothing to do (set MSFE_NG_ENGINE_FORCE=1 to reinstall)"
-        exit 0
+        info "package and ms-configure steps skipped (MSFE_NG_ENGINE_FORCE=1 redoes them); checking dependencies"
+        SKIP_PACKAGE=1
     fi
 fi
 # Only an actual install needs the package manager; recognising an engine
@@ -75,48 +80,77 @@ fi
 # shellcheck disable=SC2086  # MS_PERL is a command line, split on purpose
 perl_has() { $MS_PERL "-M$1" -e1 >/dev/null 2>&1; }
 
+# cpanm, able to reach its index: it fetches cpanmetadb over HTTPS, which
+# needs LWP::Protocol::https ("Finding X on cpanmetadb failed" without it).
+ensure_cpanm() {
+    command -v cpanm >/dev/null 2>&1 || run "$PKG" -y install perl-App-cpanminus
+    perl -MLWP::Protocol::https -e1 >/dev/null 2>&1 \
+        || run "$PKG" -y install perl-LWP-Protocol-https >/dev/null 2>&1 || true
+}
+# install_module <Perl::Module>: the distro package first (perl-Perl-Module,
+# most of what MailScanner needs is in EL/EPEL), cpanm only when none is
+# packaged. 0 once the engine's perl loads it.
+install_module() {
+    _mod=$1
+    _pkg="perl-$(printf '%s' "$_mod" | sed 's/::/-/g')"
+    if "$PKG" -y install "$_pkg" >/dev/null 2>&1 && perl_has "$_mod"; then
+        info "installed $_mod ($_pkg)"
+        return 0
+    fi
+    ensure_cpanm
+    if cpanm --notest "$_mod" && perl_has "$_mod"; then
+        info "installed $_mod (cpanm)"
+        return 0
+    fi
+    return 1
+}
+
 # Work under $HOME (/root in real runs), not /tmp (cPanel securetmp noexec).
 work="${HOME:-/root}/.msfe-ng-engine.$$"
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work"
 cd "$work"
 
-info "downloading MailScanner $MS_VERSION"
-curl -fsSL -o "$RPM" "$BASE/$RPM"
-curl -fsSL -o sha256sums "$BASE/sha256sums"
-grep -E "[[:space:]]$RPM\$" sha256sums | sha256sum -c - || die "checksum FAILED for $RPM"
-info "checksum OK"
+if [ "$SKIP_PACKAGE" != 1 ]; then
+    info "downloading MailScanner $MS_VERSION"
+    curl -fsSL -o "$RPM" "$BASE/$RPM"
+    curl -fsSL -o sha256sums "$BASE/sha256sums"
+    grep -E "[[:space:]]$RPM\$" sha256sums | sha256sum -c - || die "checksum FAILED for $RPM"
+    info "checksum OK"
 
-info "installing engine package"
-run "$PKG" -y install "./$RPM"
+    info "installing engine package"
+    run "$PKG" -y install "./$RPM"
 
-info "installing engine dependencies (ms-configure, unattended)"
-# Every flag is passed so ms-configure never prompts. cPanel-safe choices:
-#   --MTA=none          cPanel ships its own Exim; never install a distro MTA
-#   --installClamav=N   leave AV to the admin (clamd is picked up if present)
-#   --SELPermissive=N   never weaken SELinux as a side effect
-run /usr/sbin/ms-configure \
-    --MTA=none \
-    --installEPEL=Y \
-    --installPowerTools=Y \
-    --installCPAN=Y \
-    --installClamav=N \
-    --configClamav=N \
-    --installTNEF=Y \
-    --installUnrar=N \
-    --installidn=Y \
-    --SELPermissive=N \
-    --ramdiskSize=0
+    info "installing engine dependencies (ms-configure, unattended)"
+    # Every flag is passed so ms-configure never prompts. cPanel-safe choices:
+    #   --MTA=none          cPanel ships its own Exim; never install a distro MTA
+    #   --installClamav=N   leave AV to the admin (clamd is picked up if present)
+    #   --SELPermissive=N   never weaken SELinux as a side effect
+    run /usr/sbin/ms-configure \
+        --MTA=none \
+        --installEPEL=Y \
+        --installPowerTools=Y \
+        --installCPAN=Y \
+        --installClamav=N \
+        --configClamav=N \
+        --installTNEF=Y \
+        --installUnrar=N \
+        --installidn=Y \
+        --SELPermissive=N \
+        --ramdiskSize=0
+fi
 
 # ms-configure tolerates individual CPAN build failures, and some required
 # modules (e.g. Sys::Hostname::Long) are not packaged in EL/EPEL at all — so
-# verify with MailScanner's own lint and cpanm whatever is still missing.
+# verify with MailScanner's own lint and install whatever is still missing,
+# the distro package first. A module that cannot be installed is recorded
+# and reported at the end; the remaining steps still run.
 [ -n "$MS_BIN" ] || MS_BIN="$(find_engine)"
 [ -n "$MS_BIN" ] && MS_PERL="$(engine_perl "$MS_BIN")"
 [ -n "$MS_PERL" ] || MS_PERL="perl"
+FAILED_MODULES=""
 if [ "$DRY" != 1 ] && [ -n "$MS_BIN" ]; then
     info "verifying perl dependencies ($MS_BIN --lint)"
-    command -v cpanm >/dev/null 2>&1 || run "$PKG" -y install perl-App-cpanminus
     tries=0
     while [ "$tries" -lt 20 ]; do
         missing="$( { "$MS_BIN" --lint 2>&1 || true; } \
@@ -124,11 +158,21 @@ if [ "$DRY" != 1 ] && [ -n "$MS_BIN" ]; then
             | head -1 | sed 's|/|::|g')"
         [ -n "$missing" ] || break
         info "installing missing perl module: $missing"
-        cpanm --notest "$missing" || die "cpanm $missing failed — install it manually, then re-run"
+        if ! install_module "$missing"; then
+            info "WARNING: could not install $missing — the lint stops at the first missing module, so others may follow"
+            FAILED_MODULES="$FAILED_MODULES $missing"
+            break
+        fi
         tries=$((tries + 1))
     done
     if [ "$tries" -gt 0 ]; then
-        info "installed $tries missing perl module(s) via cpanm"
+        info "installed $tries missing perl module(s)"
+    fi
+    # Not a "Can't locate" line: the Processing Attempts Database needs
+    # DBD::SQLite, and lint only warns about it.
+    if ! perl_has DBD::SQLite; then
+        info "installing DBD::SQLite (Processing Attempts Database)"
+        install_module DBD::SQLite || FAILED_MODULES="$FAILED_MODULES DBD::SQLite"
     fi
 fi
 
@@ -140,7 +184,7 @@ elif ! perl_has Mail::SpamAssassin; then
     info "installing SpamAssassin (Mail::SpamAssassin, for $MS_PERL)"
     run "$PKG" -y install spamassassin || true
     if ! perl_has Mail::SpamAssassin; then
-        command -v cpanm >/dev/null 2>&1 || run "$PKG" -y install perl-App-cpanminus
+        ensure_cpanm
         run cpanm --notest Mail::SpamAssassin \
             || info "WARNING: Mail::SpamAssassin still missing — install it manually"
     fi
@@ -165,10 +209,26 @@ fi
 # fresh by cPanel, socket /run/clamav/clamd.sock) which conflicts with EPEL's
 # packages — keep it and never install a second one beside it.
 CPANEL_CLAMD="${MSFE_NG_CPANEL_CLAMD:-/usr/local/cpanel/3rdparty/bin/clamd}"
+CPANEL_PKGS="${MSFE_NG_CPANEL_PKGS:-/scripts/check_cpanel_pkgs}"
 if [ "${MSFE_NG_NO_CLAMAV:-0}" != 1 ]; then
     if [ -x "$CPANEL_CLAMD" ]; then
         info "using cPanel's ClamAV ($CPANEL_CLAMD) — engine configure picks up its socket"
         [ "$DRY" = 1 ] || run systemctl enable --now clamd 2>/dev/null || true
+    elif [ -x "$CPANEL_PKGS" ] && ! command -v clamd >/dev/null 2>&1; then
+        # a cPanel host without ClamAV: cPanel's own package, with signatures
+        # it keeps fresh, rather than EPEL's (which conflicts with it later)
+        if [ "$DRY" = 1 ]; then
+            info "would install cPanel's ClamAV (check_cpanel_pkgs --targets clamav)"
+        else
+            info "installing cPanel's ClamAV (set MSFE_NG_NO_CLAMAV=1 to skip)"
+            run /scripts/update_local_rpm_versions --edit target_settings.clamav installed || true
+            run "$CPANEL_PKGS" --fix --targets clamav || true
+            if [ -x "$CPANEL_CLAMD" ]; then
+                run systemctl enable --now clamd 2>/dev/null || true
+            else
+                info "WARNING: cPanel's ClamAV did not install — continuing without AV"
+            fi
+        fi
     elif [ "$DRY" = 1 ]; then
         info "would ensure ClamAV (clamd + freshclam) is installed and running"
     else
@@ -197,3 +257,6 @@ run systemctl disable --now mailscanner 2>/dev/null || true
 info "MailScanner engine installed (service left disabled)"
 info "verify the configuration with:  msfe-ng engine lint"
 info "mail flow is UNCHANGED — Exim wiring is a separate, explicit step"
+if [ -n "$FAILED_MODULES" ]; then
+    die "perl module(s) still missing:$FAILED_MODULES — install them for $MS_PERL (dnf perl-<Name-With-Dashes>, or cpanm), then re-run this installer"
+fi

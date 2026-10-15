@@ -195,8 +195,9 @@ pub fn configure(cfg: &Config) -> io::Result<ConfigureReport> {
 
     // Incoming split-spool skeleton (ours to create and own; pointless when the
     // named-queue wiring owns the incoming path). The outgoing dir is the
-    // MTA's real spool — never created or chowned here.
-    let mut created = Vec::new();
+    // MTA's real spool: only the split subdirectories Exim has not created
+    // yet are added (as Exim would), nothing existing is touched.
+    let mut created = create_exim_spool_dirs(&out, false)?;
     let mut chown_failed = Vec::new();
     if method.is_some() {
         // named-queue dirs are managed by wire(); the two-config spool by Exim
@@ -951,6 +952,46 @@ fn sendmail2_for(method: Option<EximMethod>) -> String {
     }
 }
 
+/// Exim's delivery spool (`<spool>/input`, `<spool>/msglog`) and, with
+/// `split_spool_directory`, their single-character subdirectories. Exim
+/// creates them lazily on first use and MailScanner never does: on a server
+/// that has not queued mail yet, a scanned message cannot be written out
+/// (`Cannot create + lock clean body …/input/s/<id>-D`) and waits in the
+/// scanning queue. The ones missing, in creation order; none when the spool
+/// itself is not there (no Exim here) or the spool is not split.
+pub fn missing_exim_spool_dirs(out: &Path) -> Vec<std::path::PathBuf> {
+    let Some(base) = out.parent() else {
+        return vec![];
+    };
+    if !base.is_dir() || !exim_split_spool() {
+        return vec![];
+    }
+    let msglog = base.join("msglog");
+    let mut dirs = vec![out.to_path_buf(), msglog.clone()];
+    dirs.extend(split_subdirs(out));
+    dirs.extend(split_subdirs(&msglog));
+    dirs.into_iter().filter(|d| !d.is_dir()).collect()
+}
+
+/// Create what `missing_exim_spool_dirs` lists, as Exim itself would
+/// (`mailnull:mail`, 0750). Existing directories are never touched — the
+/// spool is the MTA's. The paths created, as text.
+pub fn create_exim_spool_dirs(out: &Path, dry: bool) -> io::Result<Vec<String>> {
+    let missing = missing_exim_spool_dirs(out);
+    let mut done = Vec::new();
+    for d in missing {
+        if dry {
+            done.push(format!("would create {}", d.display()));
+            continue;
+        }
+        std::fs::create_dir(&d)?;
+        set_perms_0750(&d);
+        chown_user_mail(&d, "mailnull");
+        done.push(d.display().to_string());
+    }
+    Ok(done)
+}
+
 /// Exim's split-spool layout: one single-character subdir per id character.
 fn split_subdirs(input: &Path) -> Vec<std::path::PathBuf> {
     ('a'..='z')
@@ -1161,8 +1202,20 @@ pub fn wire(cfg: &Config, dry: bool) -> io::Result<WireReport> {
         }
     }
 
-    // 2. MailScanner.conf: scan the named queue, emit into the normal queue
+    // 1b. Exim's own split spool: the subdirectories a fresh server lacks
     let (_, outgoing) = service::queue_dir_targets();
+    let made = create_exim_spool_dirs(&outgoing, dry)?;
+    if !made.is_empty() {
+        actions.push(format!(
+            "{} {} missing delivery-spool director{} under {} (Exim creates them lazily; MailScanner cannot write into a missing one)",
+            if dry { "would create" } else { "created" },
+            made.len(),
+            if made.len() == 1 { "y" } else { "ies" },
+            outgoing.parent().unwrap_or(&outgoing).display()
+        ));
+    }
+
+    // 2. MailScanner.conf: scan the named queue, emit into the normal queue
     let incoming = incoming_dir_directive(&input, split);
     let outgoing = outgoing.display().to_string();
     let exim_cmd = exim_command();
@@ -1652,15 +1705,38 @@ pub(crate) mod tests {
             ..Default::default()
         };
 
+        std::fs::create_dir_all(base.join("exim")).unwrap();
+
         // dry run changes nothing
         let dry = wire(&cfg, true).unwrap();
         assert!(dry.dry_run && !dry.actions.is_empty());
         assert!(!Path::new(&cfg.mailscannerq_conf).exists());
         assert!(!is_wired(&cfg));
+        assert!(!base.join("exim/input/a").exists());
+        assert!(
+            dry.actions
+                .iter()
+                .any(|a| a.starts_with("would create 126 missing delivery-spool")),
+            "{:?}",
+            dry.actions
+        );
 
         // real wire
-        wire(&cfg, false).unwrap();
+        let real = wire(&cfg, false).unwrap();
         assert!(is_wired(&cfg));
+        // Exim's split spool got the subdirectories a fresh server lacks,
+        // input and msglog alike; a second wire has nothing left to create
+        assert!(base.join("exim/input/a").is_dir() && base.join("exim/msglog/Z").is_dir());
+        assert!(
+            real.actions
+                .iter()
+                .any(|a| a.starts_with("created 126 missing delivery-spool")),
+            "{:?}",
+            real.actions
+        );
+        assert!(missing_exim_spool_dirs(&base.join("exim/input")).is_empty());
+        // no spool at all (no Exim here): nothing to create
+        assert!(missing_exim_spool_dirs(&base.join("nowhere/input")).is_empty());
         // queue commands: the named queue by -qG, the delivery queue bare
         assert_eq!(exim_queue_args(Some("mailscanner")), vec!["-qGmailscanner"]);
         assert!(exim_queue_args(None).is_empty());

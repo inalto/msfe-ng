@@ -111,6 +111,7 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
         ("acctdns", Some("fix")) => Some(&["--record", "--json"]),
         ("acctdns", Some("txt")) => Some(&["--json"]),
         ("acctdns", Some("mta-sts")) => Some(&["--policy", "--mode", "--json"]),
+        ("selftest", _) => Some(&["--to"]),
         ("acctdns", _) => Some(NONE),
         ("dmarc", Some("fetch")) => Some(&["--dry-run", "--keep", "--json"]),
         ("dmarc", Some("import" | "status")) => Some(&["--json"]),
@@ -133,6 +134,7 @@ fn rejected_flag<'a>(cmd: &str, sub: Option<&str>, rest: &'a [String]) -> Option
 fn usage_of(cmd: &str) -> &'static str {
     match cmd {
         "exim" => "msfe-ng exim <status|enable-scanning|disable-scanning|enable-cpanel-spamassassin|disable-cpanel-spamassassin>",
+        "selftest" => "msfe-ng selftest [--to <address>]",
         "engine" => {
             "msfe-ng engine <status|install|configure|enable|disable|lint|wire|unwire> [--dry-run]"
         }
@@ -200,7 +202,7 @@ fn main() -> ExitCode {
         "conf" => cmd_conf(sub, rest),
         "sync" => cmd_sync(args.get(1).map(String::as_str)),
         "spambox" => cmd_spambox(args.get(1).map(String::as_str)),
-        "selftest" => cmd_selftest(),
+        "selftest" => cmd_selftest(rest),
         "housekeeping" => cmd_housekeeping(),
         "monitor" => cmd_monitor(args.get(1).map(String::as_str)),
         "digest" => cmd_digest(args.get(1).map(String::as_str)),
@@ -519,11 +521,28 @@ fn cmd_spambox(sub: Option<&str>) -> ExitCode {
 
 /// End-to-end scan test: send GTUBE (spam), EICAR (virus) and a clean message
 /// to the local MTA, then (if the DB is configured) confirm they were logged.
-fn cmd_selftest() -> ExitCode {
+fn cmd_selftest(rest: &[String]) -> ExitCode {
     const GTUBE: &str = "XJS*C4JDBQADN1.NSBN3*2IDNEN*GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X";
     const EICAR: &str = "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
     let from = "msfe-ng-selftest@localhost";
-    let to = "root@localhost";
+    let mut to: Option<String> = None;
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        if a == "--to" {
+            to = it.next().cloned();
+        }
+    }
+    if let Some(t) = &to {
+        if !t.contains('@') || t.contains(char::is_whitespace) {
+            eprintln!(
+                "msfe-ng selftest: '{t}' is not an address\nusage: {}",
+                usage_of("selftest")
+            );
+            return ExitCode::from(2);
+        }
+    }
+    let to = to.unwrap_or_else(|| selftest_recipient(Path::new("/")));
+    let to = to.as_str();
 
     let cases = [
         (
@@ -541,17 +560,27 @@ fn cmd_selftest() -> ExitCode {
     ];
 
     let mut sent = 0;
+    let mut last_err = String::new();
     for (label, body) in &cases {
         match smtp_send("127.0.0.1:25", from, to, label, body) {
             Ok(()) => {
                 println!("sent {label} → {to}");
                 sent += 1;
             }
-            Err(e) => eprintln!("failed to send {label}: {e}"),
+            Err(e) => {
+                last_err = e.to_string();
+                eprintln!("failed to send {label}: {e}");
+            }
         }
     }
     if sent == 0 {
-        eprintln!("selftest: could not send any mail (is the MTA listening on 127.0.0.1:25?)");
+        // a refusal is the MTA's own verdict; only a failed connection
+        // means it may not be listening at all
+        if last_err.contains("got:") {
+            eprintln!("selftest: the MTA refused the test mail for {to} (its reply is above) — pick a mailbox it accepts with --to <address>");
+        } else {
+            eprintln!("selftest: could not reach the MTA on 127.0.0.1:25 ({last_err})");
+        }
         return ExitCode::from(1);
     }
     println!(
@@ -561,6 +590,20 @@ fn cmd_selftest() -> ExitCode {
 }
 
 /// Minimal SMTP submission to the local MTA (the selftest's three messages).
+/// Where the test mail goes when `--to` is not given: on cPanel the first
+/// account's own mailbox (`<user>@<main domain>`, from /etc/trueuserdomains
+/// — cPanel's Exim refuses `root@localhost` with "root cannot accept local
+/// mail deliveries"), elsewhere root's mailbox.
+fn selftest_recipient(root: &Path) -> String {
+    let tud = std::fs::read_to_string(root.join("etc/trueuserdomains")).unwrap_or_default();
+    tud.lines()
+        .filter_map(|l| l.split_once(':'))
+        .map(|(d, u)| (d.trim().to_ascii_lowercase(), u.trim()))
+        .find(|(d, u)| !d.is_empty() && !u.is_empty() && *u != "nobody" && !d.starts_with('*'))
+        .map(|(d, u)| format!("{u}@{d}"))
+        .unwrap_or_else(|| "root@localhost".to_string())
+}
+
 fn smtp_send(addr: &str, from: &str, to: &str, subject: &str, body: &str) -> std::io::Result<()> {
     let subject = format!("[MSFE-NG selftest] {subject}");
     msfe_core::smtpprobe::submit_local(
@@ -4510,5 +4553,21 @@ mod tests {
         assert_eq!(osint_exit(Partial), 4);
         assert_eq!(osint_exit(Cancelled), 4);
         assert_eq!(osint_exit(Failed), 3);
+    }
+
+    #[test]
+    fn selftest_recipient_is_the_first_cpanel_account_mailbox_or_root() {
+        let d = std::env::temp_dir().join(format!("msfe-selftest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("etc")).unwrap();
+        // no cPanel: root's mailbox
+        assert_eq!(selftest_recipient(&d), "root@localhost");
+        std::fs::write(
+            d.join("etc/trueuserdomains"),
+            "*: nobody\nhost.example.com: nobody\nExample.COM: alice\nexample.org: bob\n",
+        )
+        .unwrap();
+        assert_eq!(selftest_recipient(&d), "alice@example.com");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
