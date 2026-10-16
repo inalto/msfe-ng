@@ -20,6 +20,15 @@ A structured editor — no tabs to get wrong. Each rule has a **direction**
 Custom rules are merged *ahead of* the generated domain rules (first match
 wins). **Save & apply** rewrites the file and reloads MailScanner if it changed.
 
+Every generated ruleset ends with an explicit `FromOrTo: default …` line, so
+mail matching no rule is decided in the file and the config test has nothing
+to warn about: the whitelist and blacklist end with `default no` (a sender on
+no list is simply not listed — the same decision MailScanner would take
+without the line). The one exception is `archive.rules`: `Archive Mail` takes
+a path and has no value meaning *off*, so leaving `default` out is the only
+way to archive nothing but the configured domains; the config test reports
+that as OK *by design*.
+
 ## Live ruleset file
 
 The file as MailScanner currently reads it, parsed. Lines that are neither

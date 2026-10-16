@@ -394,6 +394,10 @@ fn list_file(
             }
         }
     }
+    // Explicit fallback: a sender on no list is simply not listed. MailScanner
+    // would decide the same without the line (the engine default is no), but
+    // the config test flags a ruleset that leaves the choice implicit.
+    c.push_str("FromOrTo:\tdefault\tno\n");
     RuleFile {
         name: name.into(),
         contents: c,
@@ -510,6 +514,15 @@ mod tests {
         assert!(bl
             .contents
             .contains("To: *@* and From: *@bad.example\tyes\n"));
+        // the explicit fallback comes last, after every listed sender
+        for f in [wl, bl] {
+            assert!(
+                f.contents.ends_with("FromOrTo:\tdefault\tno\n"),
+                "{}",
+                f.contents
+            );
+            assert_eq!(f.contents.matches("default").count(), 1);
+        }
     }
 
     #[test]

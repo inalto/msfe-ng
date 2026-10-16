@@ -92,7 +92,10 @@ each naming the file and setting it is about — click one to open it there:
 - from **spamassassin --lint** with MailScanner's `spamassassin.conf`: lines it
   cannot parse, unknown options;
 - from **MSFE-NG**: every file, directory and command a setting names exists;
-  every ruleset parses and its values fit the setting's type; the scanners and
+  every ruleset parses and its values fit the setting's type (a ruleset
+  without a `default` line is a warning, except where no value means *off* —
+  `Archive Mail`, where "no match" is the only way to say "archive nothing
+  else", is reported as OK *by design*); the scanners and
   spam lists named are defined (defunct blocklists flagged); filename patterns
   compile; `conf.d` fragments and phishing lists parse; directives the engine
   does not know (typos); files the scanning user cannot read; and the doctor

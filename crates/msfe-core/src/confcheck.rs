@@ -159,7 +159,14 @@ fn check_rulesets(tree: &Tree, schema: Option<&msdefs::Schema>, out: &mut Vec<Fi
                 _ => {}
             }
         }
-        if !has_default {
+        // A path-valued ruleset (Archive Mail) has no value that means "off":
+        // leaving `default` out is the only way to say "archive nothing else",
+        // so its absence is the intended shape, not an oversight.
+        let no_off_value = key.eq_ignore_ascii_case("Archive Mail")
+            || def.is_some_and(|d| matches!(d.ty, msdefs::Ty::Dir | msdefs::Ty::File));
+        if !has_default && no_off_value {
+            out.push(finding(Level::Ok, format!("{key}: ruleset has no 'default' rule by design — mail matching no rule is left alone (there is no value meaning off)")).file(id).key(key));
+        } else if !has_default {
             out.push(finding(Level::Warn, format!("{key}: ruleset has no 'default' rule — mail matching no rule gets the engine default")).file(id).key(key));
         }
     }
@@ -605,7 +612,7 @@ mod tests {
         std::fs::create_dir_all(etc.join("rules")).unwrap();
         std::fs::create_dir_all(etc.join("conf.d")).unwrap();
         let conf = format!(
-            "%etc-dir% = {e}\n%rules-dir% = {e}/rules\nMax Children = 5\nSpam Checks = %rules-dir%/spam.rules\nRequired SpamAssassin Score = %rules-dir%/score.rules\n\
+            "%etc-dir% = {e}\n%rules-dir% = {e}/rules\nMax Children = 5\nSpam Checks = %rules-dir%/spam.rules\nRequired SpamAssassin Score = %rules-dir%/score.rules\nArchive Mail = %rules-dir%/archive.rules\n\
              Virus Scanners = clamd bogus\nSpam List Definitions = %etc-dir%/spam.lists.conf\nSpam List = SPAMCOP UNDEFINED SORBS\nFilename Rules = %etc-dir%/filename.rules.conf\nSendmail = /nonexistent/sendmail\n{conf_extra}",
             e = etc.display()
         );
@@ -618,6 +625,11 @@ mod tests {
         std::fs::write(
             etc.join("rules/score.rules"),
             "To: *@b.example 4.5\nTo: *@c.example high\n",
+        )
+        .unwrap();
+        std::fs::write(
+            etc.join("rules/archive.rules"),
+            "FromOrTo: *@kept.example /var/spool/MailScanner/archive\n",
         )
         .unwrap();
         std::fs::write(etc.join("virus.scanners.conf"), "clamd\t/bin/false\t/usr\n").unwrap();
@@ -695,6 +707,15 @@ mod tests {
         assert!(has(
             Level::Warn,
             "Required SpamAssassin Score: ruleset has no 'default' rule"
+        ));
+        // a path-valued ruleset has no "off": the missing default is by design
+        assert!(has(
+            Level::Ok,
+            "Archive Mail: ruleset has no 'default' rule by design"
+        ));
+        assert!(!has(
+            Level::Warn,
+            "Archive Mail: ruleset has no 'default' rule"
         ));
         assert!(has(Level::Fail, "Virus Scanners names 'bogus'"));
         assert!(has(Level::Ok, "scanner 'clamd' defined"));
