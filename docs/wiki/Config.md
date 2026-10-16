@@ -226,6 +226,12 @@ validated with the engine's own perl when you save (a bad regex is refused
 with perl's message) and the site config is linted afterwards; **Test
 against recent mail** shows which of the last 200 subjects or senders would
 match. Whitelisted mail skips SpamAssassin, so match rules never touch it.
+**Also reject at SMTP time** (not for body rules) additionally refuses
+matching mail in Exim's DATA ACL with a 550, before MailScanner — the
+source is then banned from the reject log (reason `smtp`); the table's
+**SMTP** column marks those rules and counts the last day's refusals. How
+it is wired, what is never refused and what to verify on the host:
+[Rules → Reject at SMTP time](Rules#reject-at-smtp-time).
 
 **Never banned**, whatever the rules: your own, loopback and private
 addresses; anything in `csf.allow` or `csf.ignore`; an address csf already
@@ -239,8 +245,11 @@ ticked, a Telegram line. **Dry run now** shows what the current settings
 would ban right now, without banning.
 
 CLI: `msfe-ng autoban status`, `msfe-ng autoban run [--dry-run]`, `msfe-ng
-autoban rules`. The doctor warns when rules are enabled without csf and
-when the SpamAssassin file behind the rules is stale (`--fix` syncs).
+autoban rules`, `msfe-ng autoban rejects`, `msfe-ng autoban smtp-off`. The
+doctor warns when rules are enabled without csf, when the SpamAssassin
+file behind the rules is stale (`--fix` syncs), and when the Exim fragment
+behind the SMTP-time rejects is stale or not included by the built
+`exim.conf`.
 
 ## Telegram alerts
 

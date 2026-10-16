@@ -153,6 +153,36 @@ protected by it. Raise the count, shorten the ban, or add the address to
 `csf.allow` (never banned again). Match rules are checked with **Test
 against recent mail** before saving for exactly this reason.
 
+## A sender gets `550 Rejected by local policy (MSFE-NG rule #n)`
+
+A match rule with **Also reject at SMTP time** refused the message in
+Exim's DATA ACL; it was never queued, so it is not in the Messages tab.
+Rules tab → *Auto-ban match rules* → **Refused at SMTP time** lists it
+(time, IP, rule, sender, subject), as does `msfe-ng autoban rejects`; the
+rule number in the 550 is the row to look at. If the sender is legitimate:
+**edit** the rule and untick the box (the rule keeps blocking and banning
+through MailScanner), tighten the pattern, or add the sender to the
+whitelist (Lists tab) — whitelisted senders are never refused and the
+whitelist file is regenerated with the fragment on the next save or sync.
+If the source was banned as well, **unban** it from Config → *Recent
+auto-bans* (reason `smtp`). To stop every SMTP-time reject at once:
+`msfe-ng autoban smtp-off` (removes `/etc/msfe-ng/exim/smtp-deny.conf`
+and restarts Exim; the next save or sync puts it back unless the boxes are
+unticked).
+
+The reverse problem — a flagged rule that does not refuse anything while
+MailScanner still catches the messages — is wiring: `msfe-ng doctor`
+(*SMTP-time rejects wired*) tells whether the fragment exists, whether the
+cPanel hook `ACL_CHECK_MESSAGE_PRE_BLOCK/custom_begin_check_message_pre`
+has the include line, and whether the built `/etc/exim.conf` carries it.
+The block directory is cPanel's documented hook point but is not verified
+by MSFE-NG itself: `ls /usr/local/cpanel/etc/exim/acls/` must list it; if
+cPanel calls it differently, set `MSFE_NG_SMTP_DENY_BLOCK=<name>` for the
+daemon and the cron, re-save a rule and run `/scripts/buildeximconf &&
+/scripts/restartsrv_exim`. Exim must also have been restarted after the
+last change to the fragment (the save does that; check the toast or
+`msfe-ng autoban rules`).
+
 ## A configuration change did not take effect
 
 MailScanner reads `MailScanner.conf`, `spamassassin.conf`, `spam.lists.conf`,

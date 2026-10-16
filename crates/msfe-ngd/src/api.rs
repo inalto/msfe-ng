@@ -1293,6 +1293,23 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                 &autoban_report_json(&msfe_core::autoban::run(cfg, config_file, dry)).to_string(),
             )
         }
+        ("GET", "/api/autoban/rejects") => {
+            let limit = req
+                .query_param("limit")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(50)
+                .clamp(1, 500);
+            Response::json(
+                200,
+                &Json::Array(
+                    msfe_core::smtpdeny::recent(limit)
+                        .iter()
+                        .map(msfe_core::smtpdeny::reject_json)
+                        .collect(),
+                )
+                .to_string(),
+            )
+        }
         ("GET", "/api/autoban/history") => {
             let limit = req
                 .query_param("limit")
@@ -2984,9 +3001,62 @@ fn autoban_state(cfg: &Config, config_file: &Path) -> Response {
             ),
             ("last_run".into(), Json::str(kv("autoban_last_run"))),
             ("last_id".into(), Json::str(kv("autoban_last_id"))),
+            ("smtp".into(), smtp_state_json(cfg, config_file, &matches)),
         ])
         .to_string(),
     )
+}
+
+/// The SMTP-time reject wiring and the last day's counts per rule.
+fn smtp_state_json(
+    cfg: &Config,
+    config_file: &Path,
+    matches: &[msfe_core::autoban::MatchRule],
+) -> Json {
+    use msfe_core::smtpdeny;
+    let active = smtpdeny::active(matches).len();
+    let applicable = smtpdeny::applicable(cfg);
+    let recent = if applicable && active > 0 {
+        smtpdeny::recent(1000)
+    } else {
+        Vec::new()
+    };
+    let counts = smtpdeny::counts(&recent, smtpdeny::local_now_secs(), 86_400);
+    let verdict = smtpdeny::doctor(cfg, config_file, matches);
+    let (status, detail) = match &verdict {
+        smtpdeny::DoctorVerdict::Silent => ("off", String::new()),
+        smtpdeny::DoctorVerdict::Ok(d) => ("ok", d.clone()),
+        smtpdeny::DoctorVerdict::Warn(d) => ("warn", d.clone()),
+    };
+    Json::Object(vec![
+        ("applicable".into(), Json::Bool(applicable)),
+        ("active".into(), Json::Int(active as i64)),
+        (
+            "fragment".into(),
+            Json::str(smtpdeny::fragment_path(config_file).display().to_string()),
+        ),
+        (
+            "hook".into(),
+            Json::str(smtpdeny::hook_path().display().to_string()),
+        ),
+        (
+            "fragment_present".into(),
+            Json::Bool(smtpdeny::fragment_present(config_file)),
+        ),
+        ("hooked".into(), Json::Bool(smtpdeny::hooked(config_file))),
+        ("built".into(), Json::Bool(smtpdeny::built(config_file))),
+        ("status".into(), Json::str(status)),
+        ("detail".into(), Json::str(detail)),
+        (
+            "rejects_24h".into(),
+            Json::Object(
+                counts
+                    .iter()
+                    .map(|(id, n)| (id.to_string(), Json::Int(*n as i64)))
+                    .collect(),
+            ),
+        ),
+    ])
 }
 
 /// Validate and store the whole match-rule list, then sync so the
@@ -3030,6 +3100,22 @@ fn autoban_save_rules(req: &Request, cfg: &Config, config_file: &Path) -> Respon
         if r.comment.len() > 200 || r.pattern.len() > 500 {
             return fail("comment (200) or pattern (500) too long".into());
         }
+        if r.smtp && !msfe_core::smtpdeny::smtp_allowed(&r.field) {
+            return fail(
+                "a body rule cannot reject at SMTP time (Exim's DATA ACL sees the headers and the envelope, not the body)"
+                    .into(),
+            );
+        }
+        if r.smtp && r.enabled {
+            if !msfe_core::smtpdeny::applicable(cfg) {
+                return fail(
+                    "rejecting at SMTP time needs cPanel's Exim (its custom ACL hook)".into(),
+                );
+            }
+            if let Err(e) = msfe_core::smtpdeny::check_with_exim(&r.matcher, &r.pattern) {
+                return fail(e);
+            }
+        }
         rules.push(r);
     }
     let policy = sync::policy_dir(config_file);
@@ -3037,20 +3123,25 @@ fn autoban_save_rules(req: &Request, cfg: &Config, config_file: &Path) -> Respon
         Ok(s) => s,
         Err(e) => return Response::json(500, &format!("{{\"error\":\"save failed: {e}\"}}")),
     };
+    // the Exim fragment first (validated, rolled back, Exim restarted when it
+    // changed), then the rule files; sync's own pass finds it up to date
+    let smtp = msfe_core::smtpdeny::refresh(cfg, config_file, false);
     match sync::run(cfg, config_file, None) {
         Ok(r) => {
-            if r.changed > 0 {
+            let changed = r.changed;
+            if changed > 0 {
                 sync::reload_mailscanner();
             }
             Response::json(
                 200,
                 &Json::Object(vec![
                     ("ok".into(), Json::Bool(true)),
-                    ("changed".into(), Json::Int(r.changed as i64)),
+                    ("changed".into(), Json::Int(changed as i64)),
                     (
                         "rules".into(),
                         Json::Array(saved.iter().map(autoban::match_rule_json).collect()),
                     ),
+                    ("smtp".into(), msfe_core::smtpdeny::report_json(&smtp)),
                 ])
                 .to_string(),
             )

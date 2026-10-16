@@ -247,6 +247,16 @@ pub fn run(
             changed += 1;
         }
     }
+    // the rules that reject at SMTP time, as Exim's ACL fragment (a no-op
+    // when nothing differs; Exim, not MailScanner, is restarted when it
+    // changed, so it does not count in `changed`; a failure never blocks the
+    // rule files above)
+    let smtp = crate::smtpdeny::refresh(cfg, policy_path, false);
+    if !smtp.ok {
+        if let Some(l) = smtp.actions.iter().find(|l| l.starts_with('✗')) {
+            eprintln!("sync: SMTP-time rejects: {l}");
+        }
+    }
     Ok(SyncReport {
         files: files_n,
         changed,
@@ -471,6 +481,7 @@ mod tests {
                 pattern: "win a prize".into(),
                 block: true,
                 ban_secs: 3600,
+                smtp: false,
                 comment: String::new(),
                 created: String::new(),
             }],

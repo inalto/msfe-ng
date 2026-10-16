@@ -8,7 +8,9 @@
 //! SpamAssassin rules named `MSFE_MATCH_<id>` (rendered by `sync` into the
 //! site rules dir): score 100 when the rule blocks delivery (the domain's
 //! high-spam action takes it), 0.01 when it only tags the message so the
-//! source can be banned. Every ban is a row in the `autoban` table.
+//! source can be banned. A rule flagged `smtp` is also refused at `DATA` by
+//! Exim (`smtpdeny`); those never reach the log, so the run tails
+//! `exim_rejectlog` for them. Every ban is a row in the `autoban` table.
 //!
 //! Safeguards are fixed: never own, loopback or private addresses, never an
 //! address csf already allows or denies, never an address that also
@@ -126,6 +128,9 @@ pub struct MatchRule {
     pub block: bool,
     /// Ban the source for this long (0 = no ban).
     pub ban_secs: u64,
+    /// Also refuse the message at SMTP time (Exim's DATA ACL, `smtpdeny`);
+    /// never for `body`.
+    pub smtp: bool,
     pub comment: String,
     pub created: String,
 }
@@ -260,6 +265,7 @@ pub fn match_rule_from_json(j: &Json) -> MatchRule {
         pattern: json_str(j.get("pattern")),
         block: json_bool(j.get("block")),
         ban_secs: json_u64(j.get("ban_secs")),
+        smtp: json_bool(j.get("smtp")),
         comment: json_str(j.get("comment")),
         created: json_str(j.get("created")),
     }
@@ -274,6 +280,7 @@ pub fn match_rule_json(r: &MatchRule) -> Json {
         ("pattern".into(), Json::str(&r.pattern)),
         ("block".into(), Json::Bool(r.block)),
         ("ban_secs".into(), Json::Int(r.ban_secs as i64)),
+        ("smtp".into(), Json::Bool(r.smtp)),
         ("comment".into(), Json::str(&r.comment)),
         ("created".into(), Json::str(&r.created)),
     ])
@@ -377,7 +384,7 @@ pub fn matched_rules(spamreport: &str) -> Vec<u32> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     pub ip: String,
-    /// `high` | `spam` | `match`
+    /// `high` | `spam` | `match` | `smtp` (refused at SMTP time, from the reject log)
     pub reason: String,
     pub rule_id: Option<u32>,
     pub count: u32,
@@ -594,10 +601,20 @@ pub fn run(cfg: &Config, config_file: &Path, dry_run: bool) -> Report {
     let max_id = rows.iter().map(|r| r.id).max().unwrap_or(since);
     let now = crate::dbtools::now_secs();
     rep.candidates = evaluate(&rows, &rules, &matches, now);
+    // the second source: messages Exim refused at DATA for a rule that bans
+    let (rejects, cursor) = crate::smtpdeny::new_rejects(cfg, &matches);
+    for c in crate::smtpdeny::candidates(&rejects, &matches) {
+        match rep.candidates.iter_mut().find(|x| x.ip == c.ip) {
+            Some(x) if x.seconds >= c.seconds => {}
+            Some(x) => *x = c,
+            None => rep.candidates.push(c),
+        }
+    }
     rep.transcript.push(format!(
-        "auto-ban{}: {} new message(s) since id {since}, {} candidate(s)",
+        "auto-ban{}: {} new message(s) since id {since}, {} refused at SMTP time, {} candidate(s)",
         if dry_run { " (dry run)" } else { "" },
         rows.len(),
+        rejects.len(),
         rep.candidates.len()
     ));
     let recent: Vec<String> = db::query(cfg, &recent_bans_sql(window))
@@ -668,7 +685,11 @@ pub fn run(cfg: &Config, config_file: &Path, dry_run: bool) -> Report {
             c.count,
             c.seconds,
             db::quote(&c.detail),
-            c.sample_id
+            if c.sample_id == 0 {
+                "NULL".to_string()
+            } else {
+                c.sample_id.to_string()
+            }
         );
         if let Err(e) = db::exec_stdin(cfg, &sql) {
             rep.transcript.push(format!("autoban table: {e}"));
@@ -690,6 +711,9 @@ pub fn run(cfg: &Config, config_file: &Path, dry_run: bool) -> Report {
     if !dry_run {
         let _ = db::kv_set(cfg, "autoban_last_id", &max_id.to_string());
         let _ = db::kv_set(cfg, "autoban_last_run", &now.to_string());
+        if let Some(c) = cursor {
+            let _ = db::kv_set(cfg, "autoban_rejectlog_pos", &c.to_kv());
+        }
     }
     rep.transcript.push(format!(
         "→ {} banned, {} skipped",
@@ -950,6 +974,7 @@ mod tests {
             pattern: pattern.into(),
             block,
             ban_secs: ban,
+            smtp: false,
             comment: String::new(),
             created: String::new(),
         }

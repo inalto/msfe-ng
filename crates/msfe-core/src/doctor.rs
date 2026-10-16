@@ -975,6 +975,46 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
         }
     }
 
+    // ---- SMTP-time rejects (match rules in Exim's DATA ACL) ----------------
+    // Silent while no rule rejects at SMTP time and nothing is left behind;
+    // a stale or missing fragment is sync's job, a hook cPanel does not read
+    // needs the admin (the block directory is assumed, not verified here).
+    {
+        let matches = crate::autoban::load_match_rules(&crate::sync::policy_dir(config_file));
+        const NAME: &str = "SMTP-time rejects wired";
+        match crate::smtpdeny::doctor(cfg, config_file, &matches) {
+            crate::smtpdeny::DoctorVerdict::Silent => {}
+            crate::smtpdeny::DoctorVerdict::Ok(detail) => {
+                out.push(check(NAME, true, Level::Warn, detail, ""))
+            }
+            crate::smtpdeny::DoctorVerdict::Warn(detail) => {
+                let include_missing = detail.contains("does not include");
+                let c = check(
+                    NAME,
+                    false,
+                    Level::Warn,
+                    detail,
+                    if include_missing {
+                        "ls /usr/local/cpanel/etc/exim/acls/ must list the block directory named above; if cPanel calls it differently, set MSFE_NG_SMTP_DENY_BLOCK for the daemon and the cron, re-save a rule, then /scripts/buildeximconf && /scripts/restartsrv_exim (wiki: Rules → Reject at SMTP time)"
+                    } else {
+                        "msfe-ng sync (or msfe-ng doctor --fix) regenerates the fragment, adds the include line and restarts Exim"
+                    },
+                );
+                out.push(if include_missing {
+                    c.propose(
+                        "rebuild Exim's configuration from the cPanel ACL hooks and restart Exim",
+                        Proposal::Commands(vec![
+                            vec!["/scripts/buildeximconf".into()],
+                            vec!["/scripts/restartsrv_exim".into()],
+                        ]),
+                    )
+                } else {
+                    c
+                });
+            }
+        }
+    }
+
     // ---- message bodies (archive) ----------------------------------------
     let (settings, _, _) = crate::sync::load_policy(&crate::sync::policy_dir(config_file));
     let archive_on = settings
@@ -2424,6 +2464,13 @@ pub fn plan(checks: &[Check], engine_targets_exim: bool) -> Vec<Fix> {
             }
             "phishing site lists updating" if engine_targets_exim => Some(Fix::PhishingUpdate),
             "message archive configured" | "auto-ban match rules on disk" => Some(Fix::Sync),
+            "SMTP-time rejects wired"
+                if c.fix
+                    .as_deref()
+                    .is_some_and(|f| f.starts_with("msfe-ng sync")) =>
+            {
+                Some(Fix::Sync)
+            }
             "spool files correctly placed" => Some(Fix::SpoolRepair),
             "delivery spool directories present" => Some(Fix::SpoolDirs),
             "MailScanner engine perl"
@@ -3160,6 +3207,32 @@ mod tests {
             plan(&[chk("auto-ban match rules on disk", Level::Warn)], false),
             vec![Fix::Sync]
         );
+        // the SMTP-time fragment: sync regenerates it, but a hook cPanel does
+        // not read is the admin's (no sync proposed)
+        let smtp = |fix: &str| Check {
+            name: "SMTP-time rejects wired",
+            level: Level::Warn,
+            detail: String::new(),
+            fix: Some(fix.into()),
+            url: None,
+            proposal: None,
+        };
+        assert_eq!(
+            plan(
+                &[smtp(
+                    "msfe-ng sync (or msfe-ng doctor --fix) regenerates the fragment"
+                )],
+                false
+            ),
+            vec![Fix::Sync]
+        );
+        assert!(plan(
+            &[smtp(
+                "ls /usr/local/cpanel/etc/exim/acls/ must list the block"
+            )],
+            false
+        )
+        .is_empty());
         assert!(plan(&[chk("auto-ban firewall", Level::Warn)], true).is_empty());
         // cPanel's plugins are switched off only when its spamd is off
         let plug = |fix: &str| Check {

@@ -41,7 +41,8 @@ fn accepted_flags(cmd: &str, sub: Option<&str>) -> Option<&'static [&'static str
         ("legacy", Some("decommission")) => Some(&["--run"]),
         ("db", Some("import-legacy")) => Some(&["--database", "--dry-run"]),
         ("db", _) => Some(NONE),
-        ("autoban", Some("run")) => Some(DRY),
+        ("autoban", Some("run" | "smtp-off")) => Some(DRY),
+        ("autoban", Some("rejects")) => Some(&["--limit", "--json"]),
         ("autoban", _) => Some(NONE),
         ("report", Some("list")) => Some(&["--ip", "--limit", "--json"]),
         ("report", _) => Some(&["--category", "--comment", "--dry-run", "--json"]),
@@ -147,7 +148,7 @@ fn usage_of(cmd: &str) -> &'static str {
         }
         "mailscanner" => "msfe-ng mailscanner <status|enable-logging|disable-logging>",
         "legacy" => "msfe-ng legacy decommission [--run]",
-        "autoban" => "msfe-ng autoban <status|run [--dry-run]|rules>",
+        "autoban" => "msfe-ng autoban <status|run [--dry-run]|rules|rejects [--limit n] [--json]|smtp-off [--dry-run]>",
         "report" => "msfe-ng report <ip> [--category <id|name>]... [--comment <text>] [--dry-run] [--json] | report list [--ip <ip>] [--limit n] [--json]",
         "upgrade" => "msfe-ng upgrade [--check]",
         "doctor" => "msfe-ng doctor [--fix | --apply <check name> | --all | ack <check name> [--days <n> | --forever] [--note <text>] | unack <check name> | acks]",
@@ -217,7 +218,7 @@ fn main() -> ExitCode {
         "rules" => cmd_rules(args.get(1).map(String::as_str)),
         "engine" => cmd_engine(args.get(1).map(String::as_str), rest),
         "legacy" => cmd_legacy(args.get(1).map(String::as_str)),
-        "autoban" => cmd_autoban(args.get(1).map(String::as_str)),
+        "autoban" => cmd_autoban(args.get(1).map(String::as_str), rest),
         "report" => cmd_report(sub, rest),
         "doctor" => {
             if matches!(sub, Some("ack" | "unack" | "acks")) {
@@ -1152,9 +1153,10 @@ fn cmd_report(sub: Option<&str>, rest: &[String]) -> ExitCode {
     }
 }
 
-/// `msfe-ng autoban <status|run [--dry-run]|rules>`: the minute cron's
-/// command, its state, and the match rules.
-fn cmd_autoban(sub: Option<&str>) -> ExitCode {
+/// `msfe-ng autoban <status|run [--dry-run]|rules|rejects|smtp-off>`: the
+/// minute cron's command, its state, the match rules, the messages Exim
+/// refused at SMTP time for them, and the kill switch for those rejects.
+fn cmd_autoban(sub: Option<&str>, rest: &[String]) -> ExitCode {
     use msfe_core::autoban;
     let cfg = Config::load(&config_path());
     let policy = msfe_core::sync::policy_dir(&config_path());
@@ -1237,7 +1239,7 @@ fn cmd_autoban(sub: Option<&str>) -> ExitCode {
             }
             for m in &matches {
                 println!(
-                    "#{} {} {} {} {:?} — block: {}, ban: {}{}",
+                    "#{} {} {} {} {:?} — block: {}, ban: {}, smtp: {}{}",
                     m.id,
                     if m.enabled { "on " } else { "off" },
                     m.field,
@@ -1249,6 +1251,7 @@ fn cmd_autoban(sub: Option<&str>) -> ExitCode {
                     } else {
                         "no".into()
                     },
+                    if m.smtp { "yes" } else { "no" },
                     if m.comment.is_empty() {
                         String::new()
                     } else {
@@ -1256,10 +1259,71 @@ fn cmd_autoban(sub: Option<&str>) -> ExitCode {
                     }
                 );
             }
+            match msfe_core::smtpdeny::doctor(&cfg, &config_path(), &matches) {
+                msfe_core::smtpdeny::DoctorVerdict::Silent => {}
+                msfe_core::smtpdeny::DoctorVerdict::Ok(d) => println!("SMTP-time rejects: {d}"),
+                msfe_core::smtpdeny::DoctorVerdict::Warn(d) => {
+                    println!("SMTP-time rejects: WARNING — {d}")
+                }
+            }
             ExitCode::SUCCESS
         }
+        Some("rejects") => {
+            use msfe_core::smtpdeny;
+            let limit = rest
+                .iter()
+                .position(|a| a == "--limit")
+                .and_then(|i| rest.get(i + 1))
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(50);
+            let rejects = smtpdeny::recent(limit);
+            if rest.iter().any(|a| a == "--json") {
+                println!(
+                    "{}",
+                    msfe_core::Json::Array(rejects.iter().map(smtpdeny::reject_json).collect())
+                );
+                return ExitCode::SUCCESS;
+            }
+            if rejects.is_empty() {
+                println!(
+                    "no message refused at SMTP time by a match rule in {} ({} rule(s) reject at SMTP time)",
+                    smtpdeny::rejectlog_path().display(),
+                    smtpdeny::active(&matches).len()
+                );
+            }
+            for r in &rejects {
+                println!(
+                    "{} {} rule #{} from <{}>{}",
+                    r.ts,
+                    r.ip,
+                    r.rule_id,
+                    r.sender,
+                    if r.subject.is_empty() {
+                        format!(" ({})", r.what)
+                    } else {
+                        format!(" — {:?}", r.subject)
+                    }
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Some("smtp-off") => {
+            let dry = rest.iter().any(|a| a == "--dry-run");
+            let r = msfe_core::smtpdeny::remove(&cfg, &config_path(), dry);
+            for l in &r.actions {
+                println!("{l}");
+            }
+            if r.ok {
+                if !dry && r.changed {
+                    println!("SMTP-time rejects switched off; the rules keep their flag and come back on the next save or sync — untick \"Also reject at SMTP time\" to keep them off");
+                }
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
         _ => {
-            eprintln!("usage: msfe-ng autoban <status|run [--dry-run]|rules>");
+            eprintln!("usage: {}", usage_of("autoban"));
             ExitCode::from(2)
         }
     }
@@ -4502,6 +4566,8 @@ COMMANDS:
     housekeeping        Prune old mail-log rows (cleanmysql retention)
     monitor [--dry-run] Auto-clean the delivery queue, fix misfiled spool files, send Telegram alerts (cron)
     autoban <status|run [--dry-run]|rules>   Temporary csf bans for spam sources and match rules (cron: every minute)
+    autoban rejects [--limit n] [--json]     Messages Exim refused at DATA for a match rule set to reject at SMTP time
+    autoban smtp-off [--dry-run]             Remove the Exim fragment behind those rejects (the kill switch; a save puts it back)
     report <ip> [--category <id|name>]... [--comment <text>] [--dry-run] [--json]
                         Report one address to AbuseIPDB (manual; categories 10,19 by default; the comment is
                         public; needs abuseipdb_key; --dry-run validates and prints without sending)

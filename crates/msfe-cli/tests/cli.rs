@@ -368,6 +368,67 @@ fn autoban_status_is_off_by_default_and_flags_are_checked() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// `autoban rejects` reads the reject log for our tag; `autoban smtp-off`
+/// is the kill switch and a no-op without a fragment.
+#[test]
+fn autoban_rejects_and_smtp_off() {
+    let d = tmp("autoban-rejects");
+    std::fs::write(d.join("config.toml"), "panel = \"cpanel\"\n").unwrap();
+    let log = d.join("exim_rejectlog");
+    std::fs::write(
+        &log,
+        "2026-10-16 09:00:02 1vAbCd-0001xy-Zz H=mx.bad.example (ehlo) [203.0.113.5]:5555 F=<spam@bad.example> rejected after DATA: MSFE-NG rule #3: subject contains account suspended\n\
+         Envelope-from: <spam@bad.example>\n\
+         \x20 Subject: Your account suspended!\n\
+         \n\
+         2026-10-16 09:00:03 H=(y) [203.0.113.9]:1 F=<a@b.c> rejected RCPT <x@y.z>: relay not permitted\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_msfe-ng"))
+        .args(["autoban", "rejects", "--limit", "10"])
+        .env("MSFE_NG_CONFIG", d.join("config.toml"))
+        .env("MSFE_NG_EXIM_REJECTLOG", &log)
+        .env("MSFE_NG_SKIP_EXIM_CMDS", "1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        text.trim(),
+        "2026-10-16 09:00:02 203.0.113.5 rule #3 from <spam@bad.example> — \"Your account suspended!\""
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_msfe-ng"))
+        .args(["autoban", "rejects", "--json"])
+        .env("MSFE_NG_CONFIG", d.join("config.toml"))
+        .env("MSFE_NG_EXIM_REJECTLOG", &log)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with("[{\"ts\":\"2026-10-16 09:00:02\""));
+    // flags are checked
+    let out = msfe_ng(&d, &["autoban", "rejects", "--dry-run"]);
+    assert_eq!(out.status.code(), Some(2));
+    // nothing to switch off
+    let out = Command::new(env!("CARGO_BIN_EXE_msfe-ng"))
+        .args(["autoban", "smtp-off"])
+        .env("MSFE_NG_CONFIG", d.join("config.toml"))
+        .env("MSFE_NG_EXIM_ACL_DIR", d.join("acls"))
+        .env("MSFE_NG_SKIP_EXIM_CMDS", "1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("no fragment on disk"));
+    assert!(!d.join("exim").exists());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 /// A resolver on loopback that answers every query NXDOMAIN at once, so the
 /// DMARC lookups of a scan neither reach the network nor wait for a timeout.
 fn nxdomain_resolver() -> String {

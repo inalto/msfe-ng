@@ -88,6 +88,7 @@ pub mod rules;
 pub mod sa;
 pub mod service;
 pub mod setup;
+pub mod smtpdeny;
 pub mod smtpprobe;
 pub mod snapshot;
 pub mod spambox;

@@ -33,6 +33,8 @@ msfe-ng mailscanner <status|enable-logging|disable-logging>
 
 msfe-ng monitor [--dry-run]         auto-clean rules, spool repair, Telegram alerts (cron: every 5 min)
 msfe-ng autoban <status|run [--dry-run]|rules>   temporary csf bans for spam sources and match rules (cron: every minute)
+msfe-ng autoban rejects [--limit n] [--json]     messages Exim refused at DATA for a match rule set to reject at SMTP time (from exim_rejectlog)
+msfe-ng autoban smtp-off [--dry-run]             remove the Exim fragment behind those rejects and restart Exim (the kill switch; a save or sync puts it back)
 msfe-ng report <ip> [--category <id|name>]... [--comment <text>] [--dry-run] [--json]   report one address to AbuseIPDB by hand (categories 10 Web Spam + 19 Bad Web Bot by default; the comment is public; --dry-run validates and prints without sending; exit 1 when refused or failed)
 msfe-ng report list [--ip <ip>] [--limit n] [--json]   the reports sent so far, newest first (backup_dir/reports.jsonl)
 msfe-ng digest [--dry-run]          quarantine digests to digest-enabled domains (cron: daily)
@@ -80,7 +82,10 @@ msfe-ng delivery osint monitor history 3
 
 Environment: `MSFE_NG_SOCKET` (daemon socket), `MSFE_NG_CONFIG` (config file),
 `MSFE_NG_MIGRATIONS` (migrations dir), `MSFE_NG_DMARC_LOCK` (the DMARC fetch
-lock file, default `/run/msfe-ng-dmarc.lock`).
+lock file, default `/run/msfe-ng-dmarc.lock`), `MSFE_NG_SMTP_DENY_BLOCK` (the
+cPanel ACL block directory the SMTP-time reject hook goes into, default
+`ACL_CHECK_MESSAGE_PRE_BLOCK`; set it for the daemon and the cron alike, see
+[Rules → Reject at SMTP time](Rules#reject-at-smtp-time)).
 
 ## `/etc/msfe-ng/config.toml`
 

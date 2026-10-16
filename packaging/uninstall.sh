@@ -79,7 +79,21 @@ if [ -x "$BINDIR/msfe-ng" ]; then
     "$BINDIR/msfe-ng" delivery inbox uninstall >/dev/null 2>&1 || true
     # the local submission privacy template (exim.conf.local @CONFIG@ block)
     "$BINDIR/msfe-ng" localsub off >/dev/null 2>&1 || true
+    # the SMTP-time reject fragment of the match rules (Exim restarted)
+    "$BINDIR/msfe-ng" autoban smtp-off >/dev/null 2>&1 || true
 fi
+# The include line for that fragment in cPanel's message-check ACL hook is
+# harmless on its own (.include_if_exists) but ours to clean up; the block
+# directory is the one the daemon writes to (overridable, see the wiki).
+SMTP_DENY_HOOK="${MSFE_NG_EXIM_ACL_DIR:-/usr/local/cpanel/etc/exim/acls}/${MSFE_NG_SMTP_DENY_BLOCK:-ACL_CHECK_MESSAGE_PRE_BLOCK}/custom_begin_check_message_pre"
+if [ -f "$SMTP_DENY_HOOK" ] && grep -q "include_if_exists $CONFDIR/exim/smtp-deny.conf" "$SMTP_DENY_HOOK"; then
+    sed -i "\|include_if_exists $CONFDIR/exim/smtp-deny.conf|d" "$SMTP_DENY_HOOK"
+    [ -s "$SMTP_DENY_HOOK" ] || rm -f "$SMTP_DENY_HOOK"
+    # the built exim.conf keeps the line until cPanel's next rebuild; with the
+    # fragment gone it includes nothing (include_if_exists)
+    info "removed the SMTP-time reject include from $SMTP_DENY_HOOK"
+fi
+rm -f "$CONFDIR/exim/smtp-deny.conf" "$CONFDIR/exim/smtp-deny-whitelist"
 rm -rf /var/spool/msfe-ng/diag /var/cache/msfe-ng/delivery
 # MailScanner's `Exim Command` must not point at the shim we are removing
 # (MailScanner would then silently assume short message ids).

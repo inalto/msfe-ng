@@ -128,10 +128,13 @@ function abRuleForm(rule){
   const enabled=el('input',{type:'checkbox',...(rule.enabled!==false?{checked:'checked'}:{})});
   const field=el('select');AB_FIELDS.forEach(([k,label])=>field.append(el('option',{value:k,...((isHdr?'header':rule.field||'subject')===k?{selected:'selected'}:{})},label)));
   const hname=el('input',{type:'text',placeholder:'X-Mailer',value:isHdr?rule.field.slice(7):'',style:'width:9rem;display:'+(isHdr?'':'none')});
-  field.onchange=()=>{hname.style.display=field.value==='header'?'':'none';};
+  field.onchange=()=>{hname.style.display=field.value==='header'?'':'none';smtpSync();};
   const matcher=el('select');[['contains','contains (literal, case-insensitive)'],['regex','regex (Perl, as SpamAssassin reads it)']].forEach(([k,label])=>matcher.append(el('option',{value:k,...((rule.matcher||'contains')===k?{selected:'selected'}:{})},label)));
   const pattern=el('input',{type:'text',value:rule.pattern||'',placeholder:'text or /regex/i',style:'width:100%'});
   const block=el('input',{type:'checkbox',...(rule.block!==false?{checked:'checked'}:{})});
+  const smtp=el('input',{type:'checkbox',...(rule.smtp?{checked:'checked'}:{})});
+  const smtpNote=el('span',{class:'muted',style:'font-size:.75rem'});
+  function smtpSync(){const body=field.value==='body';smtp.disabled=body;if(body){smtp.checked=false;smtpNote.textContent=' (not for body rules: Exim\u2019s DATA ACL sees headers and envelope only)';}else smtpNote.textContent=' (Exim answers 550 at DATA; nothing is queued or scanned; the source is banned from the reject log)';}
   const banOn=el('input',{type:'checkbox',...((rule.ban_secs||0)>0?{checked:'checked'}:{})});
   const ban=abDuration((rule.ban_secs||0)>0?rule.ban_secs:86400,1);
   const comment=el('input',{type:'text',value:rule.comment||'',placeholder:'why (shown in the ban history)',style:'width:100%'});
@@ -153,9 +156,11 @@ function abRuleForm(rule){
     el('label',{class:'field',style:'grid-column:1/-1'},'Pattern ',pattern),
     el('label',{class:'field'},'Block delivery ',block,el('span',{class:'muted',style:'font-size:.75rem'},' (score 100 → the domain\u2019s high-spam action)')),
     el('label',{class:'field'},'Ban the source ',banOn,' for ',ban.wrap),
+    el('label',{class:'field',style:'grid-column:1/-1'},'Also reject at SMTP time ',smtp,smtpNote),
     el('label',{class:'field',style:'grid-column:1/-1'},'Comment ',comment));
+  smtpSync();
   const wrap=el('div',{},grid,el('div',{class:'ctl'},testBtn),testOut);
-  return {wrap,read:()=>({id:rule.id||0,enabled:enabled.checked,field:readField(),matcher:matcher.value,pattern:pattern.value,block:block.checked,ban_secs:banOn.checked?ban.secs():0,comment:comment.value,created:rule.created||''})};
+  return {wrap,read:()=>({id:rule.id||0,enabled:enabled.checked,field:readField(),matcher:matcher.value,pattern:pattern.value,block:block.checked,ban_secs:banOn.checked?ban.secs():0,smtp:smtp.checked&&!smtp.disabled,comment:comment.value,created:rule.created||''})};
 }
 // Edit one rule (new or existing) in a modal and save the whole list.
 async function banRuleEditor(rule,onSaved){
@@ -173,11 +178,19 @@ async function banRuleEditor(rule,onSaved){
     const res=await api('/api/autoban/rules',{method:'PUT',body:{rules}});
     save.disabled=false;
     if(!res||res.error){err.textContent=(res&&res.error)||'save failed';err.style.display='';return;}
-    toast(res.changed?'Rule saved — MailScanner reloaded':'Rule saved');
+    toast(abSaveToast(res));
+    if(res.smtp&&!res.smtp.ok){err.textContent='Saved, but the SMTP-time reject fragment was not applied:\n'+(res.smtp.transcript||[]).join('\n');err.style.display='';err.style.whiteSpace='pre-wrap';return;}
     m.close();if(onSaved)onSaved(res);
   };
   const all=Object.assign(el('a',{class:'iplink',style:'font-size:.8rem'},'All match rules →'),{onclick:()=>{m.close();gotoMatchRules();}});
   m.body.append(form.wrap,err,el('div',{class:'ctl'},save,all));
+}
+// What a PUT /api/autoban/rules did: the SpamAssassin file (MailScanner reloaded) and/or the Exim fragment (Exim restarted).
+function abSaveToast(res){
+  const parts=[];
+  if(res.changed)parts.push('MailScanner reloaded');
+  if(res.smtp&&res.smtp.ok&&res.smtp.changed)parts.push(res.smtp.restarted?'Exim restarted':'Exim fragment written');
+  return 'Rule saved'+(parts.length?' — '+parts.join(', '):'');
 }
 // From a message: a rule prefilled with its subject / sender, or a one-off csf ban of its client IP.
 function banRuleFromMessage(msg){
@@ -200,13 +213,16 @@ function banRuleFromMessage(msg){
 // The match-rules table with edit/delete/add; `draw` redraws the caller.
 function matchRulesTable(st,draw){
   const rt=el('table');
-  rt.append(el('tr',{},el('th',{},'#'),el('th',{},'On'),el('th',{},'Field'),el('th',{},'Pattern'),el('th',{},'Block'),el('th',{},'Ban'),el('th',{},'Comment'),el('th',{},'')));
-  if(!st.rules.length)rt.append(el('tr',{},el('td',{colspan:'8',class:'muted'},'No match rules yet — add one, or use “Ban rule…” on a message.')));
+  const counts=(st.smtp&&st.smtp.rejects_24h)||{};
+  rt.append(el('tr',{},el('th',{},'#'),el('th',{},'On'),el('th',{},'Field'),el('th',{},'Pattern'),el('th',{},'Block'),el('th',{},'Ban'),el('th',{title:'Also refused by Exim at DATA (550), before MailScanner; the number is how many were refused in the last 24 h'},'SMTP'),el('th',{},'Comment'),el('th',{},'')));
+  if(!st.rules.length)rt.append(el('tr',{},el('td',{colspan:'9',class:'muted'},'No match rules yet — add one, or use “Ban rule…” on a message.')));
   st.rules.forEach(r=>{
     const edit=el('a',{class:'iplink'},'edit');edit.onclick=()=>banRuleEditor(r,draw);
     const del=el('a',{class:'iplink',style:'margin-left:.5rem;color:var(--critical)'},'delete');
     del.onclick=async()=>{if(!confirm(`Delete match rule #${r.id}?`))return;const res=await api('/api/autoban/rules',{method:'PUT',body:{rules:st.rules.filter(x=>x.id!==r.id)}});toast(res&&res.ok?'Rule deleted':(res&&res.error)||'failed');draw();};
-    rt.append(el('tr',{},el('td',{},'#'+r.id),el('td',{},r.enabled?'✓':'—'),el('td',{},r.field+' '+r.matcher),el('td',{style:'word-break:break-all'},el('code',{},r.pattern)),el('td',{},r.block?'✓':'—'),el('td',{},r.ban_secs?abFmt(r.ban_secs):'—'),el('td',{class:'muted'},r.comment||''),el('td',{style:'white-space:nowrap'},edit,del)));
+    const n=counts[String(r.id)]||0;
+    const smtpCell=r.smtp?el('span',{title:n+' refused in the last 24 h'},'✓'+(n?' '+n:'')):el('span',{},'—');
+    rt.append(el('tr',{},el('td',{},'#'+r.id),el('td',{},r.enabled?'✓':'—'),el('td',{},r.field+' '+r.matcher),el('td',{style:'word-break:break-all'},el('code',{},r.pattern)),el('td',{},r.block?'✓':'—'),el('td',{},r.ban_secs?abFmt(r.ban_secs):'—'),el('td',{style:'white-space:nowrap'},smtpCell),el('td',{class:'muted'},r.comment||''),el('td',{style:'white-space:nowrap'},edit,del)));
   });
   const add=el('button',{class:'act plain'},'Add match rule');add.onclick=()=>banRuleEditor({id:0,enabled:true,field:'subject',matcher:'contains',pattern:'',block:true,ban_secs:86400,comment:''},draw);
   return [rt,el('div',{class:'ctl'},add)];
@@ -221,7 +237,7 @@ function gotoMatchRules(){
 function renderMatchRulesCard(v){
   const card=el('div',{class:'card',id:'autoban-rules-card'},el('h2',{},'Auto-ban match rules'),
     el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},
-      'Rules on the subject, sender, recipient, a header or the body of a message — the ones “Ban rule…” creates from the Messages list. A blocking rule scores the message 100, so it follows the domain\u2019s high-spam action and is never delivered; with a ban, the sending IP is banned in csf for the given time by the minute cron. Whitelisted mail skips SpamAssassin, so these rules never touch it.'));
+      'Rules on the subject, sender, recipient, a header or the body of a message — the ones “Ban rule…” creates from the Messages list. A blocking rule scores the message 100, so it follows the domain\u2019s high-spam action and is never delivered; with a ban, the sending IP is banned in csf for the given time by the minute cron. A rule set to also reject at SMTP time is refused by Exim at DATA before MailScanner ever sees the message (column SMTP). Whitelisted mail skips SpamAssassin, so these rules never touch it.'));
   v.append(card);
   const holder=el('div',{});card.append(holder);
   async function draw(){
@@ -231,8 +247,31 @@ function renderMatchRulesCard(v){
     if(!st.csf_available)holder.append(el('div',{class:'note bad'},'csf is not installed on this server — rules block delivery, but nothing is banned until it is.'));
     holder.append(...matchRulesTable(st,draw),
       el('div',{class:'muted',style:'font-size:.78rem'},'Thresholds, a dry run and the recent auto-bans are in the ',Object.assign(el('a',{class:'iplink'},'Config tab'),{onclick:()=>{document.querySelector('#tabs button[data-tab="config"]').click();}}),'.'));
+    holder.append(...await smtpRejectsBlock(st));
   }
   draw();
+}
+// "Refused at SMTP time": the wiring state and the last rejects with our tag
+// from exim_rejectlog (these messages never reach the Messages tab).
+async function smtpRejectsBlock(st){
+  const sm=st.smtp||{};
+  const out=[el('h3',{style:'font-size:.95rem;margin:.9rem 0 .3rem'},'Refused at SMTP time')];
+  const intro=el('div',{class:'muted',style:'font-size:.8rem;margin-bottom:.3rem'},
+    'A rule with “Also reject at SMTP time” is also an Exim deny in the DATA ACL: the sending server gets ',el('code',{},'550 Rejected by local policy (MSFE-NG rule #n)'),', nothing is queued or scanned, and the minute cron bans the source from ',el('code',{},'/var/log/exim_rejectlog'),'. Authenticated submissions, loopback and whitelisted senders are never refused. Removing ',el('code',{},sm.fragment||'/etc/msfe-ng/exim/smtp-deny.conf'),' (',el('code',{},'msfe-ng autoban smtp-off'),') switches the rejects off at once.');
+  out.push(intro);
+  if(!sm.applicable){out.push(el('div',{class:'muted',style:'font-size:.8rem'},'Available on cPanel servers only (Exim\u2019s custom ACL hook).'));return out;}
+  if(sm.status==='warn')out.push(el('div',{class:'note bad'},sm.detail));
+  else if(sm.status==='ok')out.push(el('div',{class:'muted',style:'font-size:.8rem'},sm.detail));
+  else{out.push(el('div',{class:'muted',style:'font-size:.8rem'},'No rule rejects at SMTP time. Tick “Also reject at SMTP time” on a subject, sender, recipient or header rule to refuse matching mail on the connection.'));return out;}
+  const rejects=await api('/api/autoban/rejects?limit=50');
+  const t=el('table');
+  t.append(el('tr',{},el('th',{},'When'),el('th',{},'IP'),el('th',{},'Rule'),el('th',{},'Sender'),el('th',{},'Subject')));
+  if(!rejects||!rejects.length)t.append(el('tr',{},el('td',{colspan:'5',class:'muted'},'Nothing refused yet (the last 4 MB of the reject log are searched).')));
+  (rejects||[]).forEach(r=>{
+    t.append(el('tr',{},el('td',{class:'muted',style:'white-space:nowrap'},r.ts),el('td',{},ipLink(r.ip)),el('td',{},'#'+r.rule_id),el('td',{style:'word-break:break-all'},r.sender||''),el('td',{style:'word-break:break-all'},r.subject||el('span',{class:'muted'},r.what))));
+  });
+  out.push(t);
+  return out;
 }
 function renderAutobanCard(card,cconf){
   const holder=el('div',{});card.append(holder);
