@@ -11,6 +11,19 @@ Pick a **ruleset** (spam.scanning, virus.scanning, spam.action, spamhigh.action,
 virus.delivery, spam.score, spamhigh.score, archive, spam.whitelist,
 spam.blacklist).
 
+## Auto-ban match rules
+
+The first card lists the auto-ban **match rules** — the ones **Ban rule…**
+creates from a message in the Messages list or from the sender view: a
+pattern on the subject, the sender, the recipient, a header or the body,
+whether a match blocks delivery (the message scores 100 and follows the
+domain's high-spam action) and for how long the sending IP is banned in csf
+by the minute cron. Edit, delete or add rules here; the same table sits in
+the Config tab's *Auto-ban spam sources* card next to the thresholds, the dry
+run and the recent bans, and both ban modals link straight to this card
+(**All match rules →**). Details on how the rules work: [Config →
+Auto-ban](Config#auto-ban-spam-sources-csf).
+
 ## Custom rules
 
 A structured editor — no tabs to get wrong. Each rule has a **direction**

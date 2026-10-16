@@ -45,7 +45,8 @@ email address is a link: an IP opens the client-IP view (history, reverse DNS,
 location, **csf ban** of the address or its /24 or /16), an address opens the
 sender view (history, black/white list for the address or its domain, and
 **Ban rule…** — an auto-ban match rule that blocks mail from it and bans the
-IP that sends it). Message-ID, References and similar headers stay plain; the
+IP that sends it; every match rule is listed in the [Rules](Rules) tab, and
+the ban modals link there with **All match rules →**). Message-ID, References and similar headers stay plain; the
 Quarantine tab's header viewer links the same way.
 
 **Message content** (needs a stored copy — quarantine or archive):

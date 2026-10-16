@@ -176,7 +176,8 @@ async function banRuleEditor(rule,onSaved){
     toast(res.changed?'Rule saved — MailScanner reloaded':'Rule saved');
     m.close();if(onSaved)onSaved(res);
   };
-  m.body.append(form.wrap,err,el('div',{class:'ctl'},save));
+  const all=Object.assign(el('a',{class:'iplink',style:'font-size:.8rem'},'All match rules →'),{onclick:()=>{m.close();gotoMatchRules();}});
+  m.body.append(form.wrap,err,el('div',{class:'ctl'},save,all));
 }
 // From a message: a rule prefilled with its subject / sender, or a one-off csf ban of its client IP.
 function banRuleFromMessage(msg){
@@ -193,7 +194,45 @@ function banRuleFromMessage(msg){
     if(k==='ip'){showIp(msg.clientip);return;}
     banRuleEditor({id:0,enabled:true,field:k,matcher:'contains',pattern:k==='subject'?msg.subject:msg.from,block:true,ban_secs:86400,comment:''});
   };
-  m.body.append(el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.85rem'},'A match rule blocks every message that matches (it follows the domain\u2019s high-spam action) and can ban the sending IP; edit the details on the next screen.'),sel,el('div',{class:'ctl'},go));
+  const all=Object.assign(el('a',{class:'iplink',style:'font-size:.8rem'},'All match rules →'),{onclick:()=>{m.close();gotoMatchRules();}});
+  m.body.append(el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.85rem'},'A match rule blocks every message that matches (it follows the domain\u2019s high-spam action) and can ban the sending IP; edit the details on the next screen.'),sel,el('div',{class:'ctl'},go,all));
+}
+// The match-rules table with edit/delete/add; `draw` redraws the caller.
+function matchRulesTable(st,draw){
+  const rt=el('table');
+  rt.append(el('tr',{},el('th',{},'#'),el('th',{},'On'),el('th',{},'Field'),el('th',{},'Pattern'),el('th',{},'Block'),el('th',{},'Ban'),el('th',{},'Comment'),el('th',{},'')));
+  if(!st.rules.length)rt.append(el('tr',{},el('td',{colspan:'8',class:'muted'},'No match rules yet — add one, or use “Ban rule…” on a message.')));
+  st.rules.forEach(r=>{
+    const edit=el('a',{class:'iplink'},'edit');edit.onclick=()=>banRuleEditor(r,draw);
+    const del=el('a',{class:'iplink',style:'margin-left:.5rem;color:var(--critical)'},'delete');
+    del.onclick=async()=>{if(!confirm(`Delete match rule #${r.id}?`))return;const res=await api('/api/autoban/rules',{method:'PUT',body:{rules:st.rules.filter(x=>x.id!==r.id)}});toast(res&&res.ok?'Rule deleted':(res&&res.error)||'failed');draw();};
+    rt.append(el('tr',{},el('td',{},'#'+r.id),el('td',{},r.enabled?'✓':'—'),el('td',{},r.field+' '+r.matcher),el('td',{style:'word-break:break-all'},el('code',{},r.pattern)),el('td',{},r.block?'✓':'—'),el('td',{},r.ban_secs?abFmt(r.ban_secs):'—'),el('td',{class:'muted'},r.comment||''),el('td',{style:'white-space:nowrap'},edit,del)));
+  });
+  const add=el('button',{class:'act plain'},'Add match rule');add.onclick=()=>banRuleEditor({id:0,enabled:true,field:'subject',matcher:'contains',pattern:'',block:true,ban_secs:86400,comment:''},draw);
+  return [rt,el('div',{class:'ctl'},add)];
+}
+// Rules tab → the match-rules card (from the ban modals and the Config card).
+function gotoMatchRules(){
+  document.querySelector('#tabs button[data-tab="rules"]').click();
+  setTimeout(()=>{const c=document.getElementById('autoban-rules-card');if(c)c.scrollIntoView({behavior:'smooth',block:'start'});},400);
+}
+// The Rules tab's card: the match rules on their own (thresholds, dry run and
+// the ban history stay in the Config tab's auto-ban card).
+function renderMatchRulesCard(v){
+  const card=el('div',{class:'card',id:'autoban-rules-card'},el('h2',{},'Auto-ban match rules'),
+    el('div',{class:'muted',style:'margin-bottom:.5rem;font-size:.8rem'},
+      'Rules on the subject, sender, recipient, a header or the body of a message — the ones “Ban rule…” creates from the Messages list. A blocking rule scores the message 100, so it follows the domain\u2019s high-spam action and is never delivered; with a ban, the sending IP is banned in csf for the given time by the minute cron. Whitelisted mail skips SpamAssassin, so these rules never touch it.'));
+  v.append(card);
+  const holder=el('div',{});card.append(holder);
+  async function draw(){
+    holder.innerHTML='';
+    const st=await api('/api/autoban');
+    if(!st||st.error){holder.append(el('div',{class:'empty'},'cannot load the auto-ban rules'));return;}
+    if(!st.csf_available)holder.append(el('div',{class:'note bad'},'csf is not installed on this server — rules block delivery, but nothing is banned until it is.'));
+    holder.append(...matchRulesTable(st,draw),
+      el('div',{class:'muted',style:'font-size:.78rem'},'Thresholds, a dry run and the recent auto-bans are in the ',Object.assign(el('a',{class:'iplink'},'Config tab'),{onclick:()=>{document.querySelector('#tabs button[data-tab="config"]').click();}}),'.'));
+  }
+  draw();
 }
 function renderAutobanCard(card,cconf){
   const holder=el('div',{});card.append(holder);
@@ -226,18 +265,9 @@ function renderAutobanCard(card,cconf){
       draw();
     };
     holder.append(el('h3',{style:'font-size:.95rem;margin:.6rem 0 .3rem'},'Thresholds'),th,tg,el('div',{class:'ctl'},saveTh));
-    // match rules
-    const rt=el('table');
-    rt.append(el('tr',{},el('th',{},'#'),el('th',{},'On'),el('th',{},'Field'),el('th',{},'Pattern'),el('th',{},'Block'),el('th',{},'Ban'),el('th',{},'Comment'),el('th',{},'')));
-    if(!st.rules.length)rt.append(el('tr',{},el('td',{colspan:'8',class:'muted'},'No match rules yet — add one, or use “Ban rule…” on a message.')));
-    st.rules.forEach(r=>{
-      const edit=el('a',{class:'iplink'},'edit');edit.onclick=()=>banRuleEditor(r,draw);
-      const del=el('a',{class:'iplink',style:'margin-left:.5rem;color:var(--critical)'},'delete');
-      del.onclick=async()=>{if(!confirm(`Delete match rule #${r.id}?`))return;const res=await api('/api/autoban/rules',{method:'PUT',body:{rules:st.rules.filter(x=>x.id!==r.id)}});toast(res&&res.ok?'Rule deleted':(res&&res.error)||'failed');draw();};
-      rt.append(el('tr',{},el('td',{},'#'+r.id),el('td',{},r.enabled?'✓':'—'),el('td',{},r.field+' '+r.matcher),el('td',{style:'word-break:break-all'},el('code',{},r.pattern)),el('td',{},r.block?'✓':'—'),el('td',{},r.ban_secs?abFmt(r.ban_secs):'—'),el('td',{class:'muted'},r.comment||''),el('td',{style:'white-space:nowrap'},edit,del)));
-    });
-    const add=el('button',{class:'act plain'},'Add match rule');add.onclick=()=>banRuleEditor({id:0,enabled:true,field:'subject',matcher:'contains',pattern:'',block:true,ban_secs:86400,comment:''},draw);
-    holder.append(el('h3',{style:'font-size:.95rem;margin:.9rem 0 .3rem'},'Match rules'),rt,el('div',{class:'ctl'},add));
+    // match rules (the same table as the Rules tab's card)
+    holder.append(el('h3',{style:'font-size:.95rem;margin:.9rem 0 .3rem'},'Match rules'),...matchRulesTable(st,draw),
+      el('div',{class:'muted',style:'font-size:.78rem'},'The rules are also listed in the ',Object.assign(el('a',{class:'iplink'},'Rules tab'),{onclick:gotoMatchRules}),'.'));
     // dry run + history
     const out=el('pre',{class:'log',style:'display:none;max-height:14rem'});
     const dry=el('button',{class:'act plain'},'Dry run now');
@@ -1515,6 +1545,7 @@ async function renderRules(){
       } else toast(r.error||'adopt failed');
      }});
   v.append(el('div',{class:'ctl'},el('span',{class:'muted'},'Ruleset:'),fsel,adoptAll));
+  renderMatchRulesCard(v);
 
   // Custom rules editor
   const cc=el('div',{class:'card'},el('h2',{},'Custom rules'),
