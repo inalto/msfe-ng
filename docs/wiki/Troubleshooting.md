@@ -191,8 +191,13 @@ MailScanner reads `MailScanner.conf`, `spamassassin.conf`, `spam.lists.conf`,
 hand edit does not. The doctor's *MailScanner config newer than the running
 service* names the files the running engine has not read — `msfe-ng service
 restart` (or the tab's **Restart MailScanner now** banner) applies them.
-Rulesets, filename rules and phishing lists are re-read per batch and only
-need a reload.
+Rulesets (`rules/*.rules`) and phishing lists are re-read per batch.
+`filename.rules.conf`, `filetype.rules.conf` and the `archives.*` rule files
+are read when a child starts (`Config::Read`), so a hand edit takes effect
+only after **Reload MailScanner** (`msfe-ng service reload`, which restarts
+the children) or when they recycle on their own (*Restart Every*, two hours
+by default). A save from the Config tab reloads for you; a message scanned
+in between still hits the old rule.
 
 ## A save was refused or rolled back
 
