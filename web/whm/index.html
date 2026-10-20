@@ -2267,7 +2267,8 @@ async function renderService(){
   };
   upBtn.onclick=async()=>{
     upBtn.disabled=true;
-    const r=await api('/api/service/update');
+    // the explicit check skips the daemon's hour-long cache
+    const r=await api('/api/service/update?refresh=1');
     upBtn.disabled=false;
     upline.innerHTML='';engline.innerHTML='';selfBtn.style.display='none';engBtn.style.display='none';
     if(!r||!r.latest){upline.append(el('span',{class:'muted'},'Could not reach the release server.'));}

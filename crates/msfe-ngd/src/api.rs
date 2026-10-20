@@ -1278,7 +1278,7 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
         ("GET", "/api/service/rules/view") => service_rules_view(req, cfg),
         ("GET", "/api/service/conf") => service_conf_read(req, cfg, config_file),
         ("PUT", "/api/service/conf") => service_conf_write(req, cfg, config_file),
-        ("GET", "/api/service/update") => service_update(cfg),
+        ("GET", "/api/service/update") => service_update(cfg, req.query_param("refresh").is_some()),
         (m, p) if p.starts_with("/api/jobs/") => {
             jobs_route(m, &p["/api/jobs/".len()..], req, cfg, config_file)
         }
@@ -2828,16 +2828,20 @@ fn service_conf_write(req: &Request, cfg: &Config, config_file: &Path) -> Respon
 }
 
 /// The update check asks GitHub (two HTTP round trips, up to 8 s each); the
-/// rail asks on every page load, so one answer is kept for an hour.
+/// rail asks on every page load, so one answer is kept for an hour. The
+/// admin's explicit "Check for updates" passes `refresh` and gets a fresh
+/// answer (which then replaces the kept one).
 static UPDATE_CACHE: std::sync::Mutex<Option<(std::time::Instant, String)>> =
     std::sync::Mutex::new(None);
 const UPDATE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
 
-fn service_update(cfg: &Config) -> Response {
-    if let Ok(c) = UPDATE_CACHE.lock() {
-        if let Some((at, body)) = c.as_ref() {
-            if at.elapsed() < UPDATE_CACHE_TTL {
-                return Response::json(200, body);
+fn service_update(cfg: &Config, refresh: bool) -> Response {
+    if !refresh {
+        if let Ok(c) = UPDATE_CACHE.lock() {
+            if let Some((at, body)) = c.as_ref() {
+                if at.elapsed() < UPDATE_CACHE_TTL {
+                    return Response::json(200, body);
+                }
             }
         }
     }
