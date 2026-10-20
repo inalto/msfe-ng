@@ -192,6 +192,8 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                 offset: stats::clamp_int(req.query_param("offset").as_deref(), 0, 0, 10_000_000)
                     as u32,
                 limit: stats::clamp_int(req.query_param("limit").as_deref(), 50, 1, 500) as u32,
+                sort: req.query_param("sort").unwrap_or_default(),
+                dir: req.query_param("dir").unwrap_or_default(),
             };
             stat_response(stats::messages(cfg, &f))
         }
@@ -1731,7 +1733,7 @@ fn quarantine_listing(
         if let Ok(rows) = msfe_core::db::query(
             cfg,
             &format!(
-                "SELECT message_id, from_address, to_address, subject, sascore \
+                "SELECT message_id, from_address, to_address, subject, sascore, clientip \
                  FROM maillog WHERE message_id IN ({})",
                 quoted.join(",")
             ),
@@ -1759,6 +1761,10 @@ fn quarantine_listing(
                 o.push(("to".into(), Json::str(&m[1])));
                 o.push(("subject".into(), Json::str(&m[2])));
                 o.push(("sascore".into(), Json::str(&m[3])));
+                let ip = m.get(4).map(String::as_str).unwrap_or("");
+                if !ip.is_empty() && ip != "NULL" {
+                    o.push(("clientip".into(), Json::str(ip)));
+                }
             }
             Json::Object(o)
         })

@@ -176,6 +176,36 @@ pub struct MessageFilter {
     pub days: u32,
     pub offset: u32,
     pub limit: u32,
+    /// Column to sort on (`time|score|from|ip|subject|size|status`); anything
+    /// else sorts on time.
+    pub sort: String,
+    /// `asc` or `desc`; anything else is `desc`.
+    pub dir: String,
+}
+
+/// The ORDER BY clause for a message list: the sort column is allow-listed,
+/// never interpolated, and newest-first always breaks ties.
+fn order_by_sql(sort: &str, dir: &str) -> String {
+    let col = match sort {
+        "score" => "sascore",
+        "from" => "from_address",
+        "ip" => "clientip",
+        "subject" => "subject",
+        "size" => "size",
+        // ranks like the status badge: infected, high spam, spam, blacklisted,
+        // then clean/whitelisted
+        "status" => {
+            "((virusinfected=1 OR nameinfected=1 OR otherinfected=1)*4 \
+             + ishighspam*3 + isspam*2 + spamblacklisted*1)"
+        }
+        _ => "msg_ts",
+    };
+    let dir = if dir == "asc" { "ASC" } else { "DESC" };
+    if col == "msg_ts" {
+        format!("ORDER BY msg_ts {dir}")
+    } else {
+        format!("ORDER BY {col} {dir}, msg_ts DESC")
+    }
 }
 
 fn status_where(status: &str) -> &'static str {
@@ -297,7 +327,8 @@ pub fn messages(cfg: &Config, f: &MessageFilter) -> io::Result<Json> {
                 spamwhitelisted, spamblacklisted, body_path, clientip, \
                 nameinfected, otherinfected \
          FROM maillog WHERE {where_sql} \
-         ORDER BY msg_ts DESC LIMIT {limit} OFFSET {offset}"
+         {order} LIMIT {limit} OFFSET {offset}",
+        order = order_by_sql(&f.sort, &f.dir)
     );
     let rows = db::query(cfg, &sql)?;
     let items = rows
@@ -663,6 +694,40 @@ mod tests {
         // LIKE search on the other fields, quoted
         assert!(counts_sql("subject", "o'k", 0)
             .contains(&format!("subject LIKE {}", sql_quote("%o'k%"))));
+    }
+
+    #[test]
+    fn order_by_is_allow_listed() {
+        assert_eq!(order_by_sql("", ""), "ORDER BY msg_ts DESC");
+        assert_eq!(order_by_sql("time", "asc"), "ORDER BY msg_ts ASC");
+        assert_eq!(order_by_sql("bogus", "asc"), "ORDER BY msg_ts ASC");
+        assert_eq!(
+            order_by_sql("score", "asc"),
+            "ORDER BY sascore ASC, msg_ts DESC"
+        );
+        assert_eq!(
+            order_by_sql("size", "sideways"),
+            "ORDER BY size DESC, msg_ts DESC"
+        );
+        assert_eq!(
+            order_by_sql("from", "desc"),
+            "ORDER BY from_address DESC, msg_ts DESC"
+        );
+        assert_eq!(
+            order_by_sql("ip", "asc"),
+            "ORDER BY clientip ASC, msg_ts DESC"
+        );
+        assert_eq!(
+            order_by_sql("subject", "asc"),
+            "ORDER BY subject ASC, msg_ts DESC"
+        );
+        let st = order_by_sql("status", "desc");
+        assert!(st.contains("*4") && st.contains("ishighspam*3"));
+        assert!(st.ends_with(" DESC, msg_ts DESC"));
+        // raw input never reaches the SQL
+        let evil = order_by_sql("msg_ts; DROP TABLE maillog", "asc; --");
+        assert_eq!(evil, "ORDER BY msg_ts DESC");
+        assert_eq!(order_by_sql("bogus", "up"), "ORDER BY msg_ts DESC");
     }
 
     #[test]

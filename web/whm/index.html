@@ -1274,13 +1274,13 @@ async function renderLists(){
 }
 
 // ---- Messages (MailControl-style: filters, search, pagination, detail) -------
-const msgF={status:'all',field:'from',text:'',days:0,offset:0,limit:50};
+const msgF={status:'all',field:'from',text:'',days:0,offset:0,limit:50,sort:'time',dir:'desc'};
 function msgLimit(){return (PREFS.rows_per_page&&PREFS.rows_per_page>=10)?PREFS.rows_per_page:50;}
 let msgTimer=null;
 // Messages panel view: 'log' (the message log) or 'quarantine' (on disk);
 // kept across a trip to the message screen, like the search in msgF
 let MSG_VIEW='log';
-const QUAR_F={kind:''}; // the Quarantine view's kind chip ('' = spam and held)
+const QUAR_F={kind:'',sort:'time',dir:'desc'}; // the Quarantine view's kind chip ('' = spam and held) and column sort
 const MSG_FIELDS=[['from','From'],['from_domain','Sender domain'],['to','To'],['subject','Subject'],['id','Message ID'],['ip','Client IP']];
 const MSG_DAYS=[[0,'any time'],[1,'last 24 hours'],[3,'last 3 days'],[7,'last 7 days'],[14,'last 14 days'],[30,'last 30 days'],[90,'last 90 days']];
 // [status, label, colour, key in /api/messages/counts, title]
@@ -1503,7 +1503,25 @@ async function renderMessages(){
   }
   card.append(out);
 
-  const header=()=>el('tr',{},el('th',{}),...['Time','Score','From / To','Client IP','Subject','Size','Status'].map(h=>el('th',{style:'white-space:nowrap'},h)));
+  // column headers sort: Log on the server (whole log), Quarantine in the
+  // browser (the copies loaded); a second click flips the direction
+  const SORT_COLS=[['Time','time'],['Score','score'],['From / To','from'],['Client IP','ip'],['Subject','subject'],['Size','size'],['Status','status']];
+  const sortSt=()=>isQ?QUAR_F:msgF;
+  const header=()=>el('tr',{},el('th',{}),...SORT_COLS.map(([h,k])=>{
+    const st=sortSt(),on=(st.sort||'time')===k,dir=st.dir==='asc'?'asc':'desc';
+    const th=el('th',{style:'white-space:nowrap;cursor:pointer;user-select:none',tabindex:'0',title:'Sort by '+(k==='from'?'From':h),
+      ...(on?{'aria-sort':dir==='asc'?'ascending':'descending'}:{})},h,on?(dir==='asc'?' ▲':' ▼'):'');
+    const go=()=>{
+      if(on)st.dir=dir==='asc'?'desc':'asc';
+      // text columns start A→Z, the rest biggest/newest first
+      else{st.sort=k;st.dir=['from','ip','subject'].includes(k)?'asc':'desc';}
+      msgF.offset=0;
+      if(isQ&&QDATA)drawQuarantine(QDATA);else loadList();
+    };
+    th.onclick=go;
+    th.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();go();}};
+    return th;
+  }));
   // throbber: in place of the table on the first load, beside the info line
   // (with the current rows dimmed) on a reload
   function busy(){
@@ -1511,6 +1529,7 @@ async function renderMessages(){
     if(!t.rows.length)t.append(el('tr',{},el('td',{class:'empty'},b,' Loading messages…')));
     else{info.querySelector('.throbber')?.remove();info.prepend(b);t.classList.add('loading');}
   }
+  let QDATA=null; // the last quarantine listing, re-sorted without a refetch
   let loadSeq=0,countSeq=0; // a slower, older response never overwrites a newer one
   async function loadCounts(){
     const seq=++countSeq;
@@ -1524,7 +1543,7 @@ async function renderMessages(){
   async function loadList(){isQ?loadQuarantine():loadLog();}
   async function loadLog(){
     const seq=++loadSeq;
-    const q=`status=${msgF.status}&field=${msgF.field}&text=${encodeURIComponent(msgF.text)}&days=${msgF.days}&offset=${msgF.offset}&limit=${msgLimit()}`;
+    const q=`status=${msgF.status}&field=${msgF.field}&text=${encodeURIComponent(msgF.text)}&days=${msgF.days}&offset=${msgF.offset}&limit=${msgLimit()}&sort=${encodeURIComponent(msgF.sort||'time')}&dir=${msgF.dir==='asc'?'asc':'desc'}`;
     busy();
     const data=await api('/api/messages?'+q);
     if(seq!==loadSeq)return;
@@ -1568,15 +1587,38 @@ async function renderMessages(){
     busy();
     const d=await api('/api/quarantine?'+p.toString());
     if(seq!==loadSeq)return;
+    if(d&&d.error){toast(d.error);}
+    QDATA=d||{};
+    drawQuarantine(QDATA);
+  }
+  // sort the loaded copies in the browser: missing values always last, ties
+  // newest first
+  function sortQuarantine(list){
+    const k=QUAR_F.sort||'time',sgn=QUAR_F.dir==='asc'?1:-1;
+    const num=v=>{const n=parseFloat(v);return Number.isFinite(n)?n:null;};
+    const str=v=>v?String(v).toLowerCase():null;
+    const key={score:e=>num(e.sascore),from:e=>str(e.from),ip:e=>str(e.clientip),subject:e=>str(e.subject),
+      size:e=>num(e.size),status:e=>e.kind||null}[k];
+    const byTime=(a,b)=>((a.mtime||0)-(b.mtime||0))||String(a.date||'').localeCompare(String(b.date||''));
+    return list.slice().sort((a,b)=>{
+      if(!key)return sgn*byTime(a,b);
+      const x=key(a),y=key(b);
+      if(x===null||y===null){if(x!==y)return x===null?1:-1;return -byTime(a,b);}
+      const c=typeof x==='number'?x-y:(x<y?-1:x>y?1:0);
+      return c?sgn*c:-byTime(a,b);
+    });
+  }
+  function drawQuarantine(d){
     t.classList.remove('loading');
     t.innerHTML='';info.innerHTML='';
-    if(d&&d.error){toast(d.error);}
-    ENTRIES=(d&&d.entries)||[];
-    COUNTS=d&&!d.error?{all:(d.spam||0)+(d.held||0),spam:d.spam||0,held:d.held||0}:null;
+    ENTRIES=sortQuarantine(d.entries||[]);
+    COUNTS='total' in d&&!d.error?{all:(d.spam||0)+(d.held||0),spam:d.spam||0,held:d.held||0}:null;
     drawChips();
-    info.textContent=d&&!d.error?(d.filtered
-      ?`${d.total} match(es), ${qfmtB(d.bytes)} — of ${d.disk_total} item(s), ${qfmtB(d.disk_bytes)} on disk${d.truncated?' — showing first '+ENTRIES.length:''}`
-      :`${d.total} item(s), ${qfmtB(d.bytes)}${d.truncated?' — showing first '+ENTRIES.length:''}`):'';
+    const sorted=d.truncated&&!((QUAR_F.sort||'time')==='time'&&QUAR_F.dir!=='asc')?' — sorted on this page':'';
+    const more=d.truncated?' — showing first '+ENTRIES.length+sorted:'';
+    info.textContent='total' in d&&!d.error?(d.filtered
+      ?`${d.total} match(es), ${qfmtB(d.bytes)} — of ${d.disk_total} item(s), ${qfmtB(d.disk_bytes)} on disk${more}`
+      :`${d.total} item(s), ${qfmtB(d.bytes)}${more}`):'';
     t.append(header());
     if(!ENTRIES.length){t.append(emptyRow());updateBulk();return;}
     ENTRIES.forEach(e=>{
@@ -1590,7 +1632,7 @@ async function renderMessages(){
         el('td',{class:'num'},e.sascore||'—'),
         el('td',{},el('div',{},e.from?senderLink(e.from):el('span',{class:'muted'},'—')),
           el('div',{class:'muted'},e.to?[e.to,' ',deliveryTestLink(e.to),' ',osintLink(e.to)]:'—')),
-        el('td',{}),
+        el('td',{style:'white-space:nowrap'},e.clientip?ipLink(e.clientip):''),
         el('td',{},el('div',{},e.subject||el('span',{class:'muted'},inLog?'(no subject)':'(not in message log)')),
           el('div',{style:'font-size:.85em;white-space:nowrap'},idCopy(e.id),' ',copyIcon(e.id,'message id'))),
         el('td',{class:'num'},fmtSize(e.size)),

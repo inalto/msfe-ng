@@ -9,7 +9,8 @@ One panel, two views, switched at the top of the card:
   *spam*, *high spam*, *infected*, *whitelist*, *blacklist*, *held*; a 🔒
   means a copy is in quarantine).
 - **Quarantine** — what is actually on disk in the quarantine directory, in
-  the same columns (no client IP); see [Quarantine](Quarantine).
+  the same columns, client IP included when the message log knows the
+  message; see [Quarantine](Quarantine).
 
 The chosen view, the search and the filter are kept while you open a message
 and come back, and when you leave the tab and return to it.
@@ -35,6 +36,8 @@ and come back, and when you leave the tab and return to it.
   **Clear all** removes both. An empty result names what is filtered
   (*No messages match — Clean, sender domain example.com, last 7 days.*) with
   a **Clear search** button.
+- **Sort** — click a column header; again to flip. In Log the whole log is
+  sorted; in Quarantine the 2000 newest copies on screen are.
 - The Dashboard's *Show messages from* link opens the **Log** view with a
   *Sender domain* search and the Dashboard's window already set — the pills
   show it.
