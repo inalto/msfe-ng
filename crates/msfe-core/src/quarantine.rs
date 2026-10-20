@@ -579,8 +579,14 @@ pub fn list_quarantine_where(base: &Path, cap: usize, filter: &ListFilter) -> Qu
             }
         }
     }
-    // newest first, stable within a date
-    entries.sort_by(|a, b| b.date.cmp(&a.date).then(a.id.cmp(&b.id)));
+    // newest first, like the message log: by date, then by the file's time
+    // (stable on the id when two share a second)
+    entries.sort_by(|a, b| {
+        b.date
+            .cmp(&a.date)
+            .then(b.mtime.cmp(&a.mtime))
+            .then(a.id.cmp(&b.id))
+    });
     let total = entries.len();
     let bytes = entries.iter().map(|e| e.size).sum();
     let truncated = total > cap;

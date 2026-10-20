@@ -1503,7 +1503,7 @@ async function renderMessages(){
   }
   card.append(out);
 
-  const header=()=>el('tr',{},el('th',{}),...['Time','Score','From / To','Client IP','Subject','Size','Status'].map(h=>el('th',{},h)));
+  const header=()=>el('tr',{},el('th',{}),...['Time','Score','From / To','Client IP','Subject','Size','Status'].map(h=>el('th',{style:'white-space:nowrap'},h)));
   // throbber: in place of the table on the first load, beside the info line
   // (with the current rows dimmed) on a reload
   function busy(){
