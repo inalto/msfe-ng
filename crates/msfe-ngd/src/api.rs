@@ -195,6 +195,12 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
             };
             stat_response(stats::messages(cfg, &f))
         }
+        ("GET", "/api/messages/counts") => {
+            let field = req.query_param("field").unwrap_or_else(|| "from".into());
+            let text = req.query_param("text").unwrap_or_default();
+            let days = stats::clamp_int(req.query_param("days").as_deref(), 0, 0, 3650) as u32;
+            stat_response(stats::message_counts(cfg, &field, &text, days))
+        }
         ("GET", "/api/messages/detail") => {
             let id = req.query_param("id").unwrap_or_default();
             let mut detail = match stats::message_detail(cfg, &id) {
@@ -1762,6 +1768,9 @@ fn quarantine_listing(
         &Json::Object(vec![
             ("total".into(), Json::Int(l.total as i64)),
             ("bytes".into(), Json::Int(l.bytes as i64)),
+            // per kind over the same search and dates, whatever `kind` asks for
+            ("spam".into(), Json::Int(l.spam as i64)),
+            ("held".into(), Json::Int(l.held as i64)),
             ("disk_total".into(), Json::Int(l.disk_total as i64)),
             ("disk_bytes".into(), Json::Int(l.disk_bytes as i64)),
             (

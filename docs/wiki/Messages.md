@@ -2,20 +2,45 @@
 
 ![Messages](https://raw.githubusercontent.com/inalto/msfe-ng/main/docs/img/messages.png)
 
-The message log: one row per message MailScanner scanned, with time, score,
-From/To, client IP, subject, size and a status badge (*clean*, *spam*, *high
-spam*, *infected*, *whitelist*, *blacklist*, *held*; a 🔒 means a copy is in
-quarantine).
+One panel, two views, switched at the top of the card:
+
+- **Log** — the message log: one row per message MailScanner scanned, with
+  time, score, From/To, client IP, subject, size and a status badge (*clean*,
+  *spam*, *high spam*, *infected*, *whitelist*, *blacklist*, *held*; a 🔒
+  means a copy is in quarantine).
+- **Quarantine** — what is actually on disk in the quarantine directory, in
+  the same columns (no client IP); see [Quarantine](Quarantine).
+
+The chosen view, the search and the filter are kept while you open a message
+and come back, and when you leave the tab and return to it.
 
 ## Finding messages
 
-- **Status filters** — All, Blocked (releasable), Clean, Low Spam, High Spam,
-  Infected, Attachments, Whitelist, Blacklist, Quarantined.
-- **Search** by From, To, Subject, Message ID or Client IP, combined with a
-  time window (24 hours … 90 days). For what MailScanner and Exim actually
-  *did* with a message, search its id on the [Logs](Logs) tab.
-- **Refresh** / **auto-refresh** (interval from Settings).
-- Paging: prev / next / jump to page; page size from Settings.
+- **Search** — pick the field (From, Sender domain, To, Subject, Message ID,
+  Client IP), type, **Search**; combine with a **time window** (24 hours … 90
+  days). The bar is shared by both views: in **Quarantine** the text searches
+  sender, recipient, subject and message id at once (the field select is
+  greyed out) and the window becomes the first quarantine date. For what
+  MailScanner and Exim actually *did* with a message, search its id on the
+  [Logs](Logs) tab.
+- **Status chips** — in **Log**: All, Clean, Low spam, High spam, Infected,
+  Attachments, Whitelist, Blacklist, Quarantined; in **Quarantine**: All,
+  Spam, Held. Each chip shows how many messages it holds **for the current
+  search and window**, so an empty filter is visible before you click it; a
+  chip at 0 is dimmed. *Quarantined* is mail held in quarantine — a copy on
+  disk can be released. *Attachments*, *Whitelist* and *Blacklist* are often
+  0 on a quiet server.
+- **Active filters** — a search or a window shows as pills under the chips
+  (*Sender domain: example.com ✕*, *last 7 days ✕*); **✕** removes one,
+  **Clear all** removes both. An empty result names what is filtered
+  (*No messages match — Clean, sender domain example.com, last 7 days.*) with
+  a **Clear search** button.
+- The Dashboard's *Show messages from* link opens the **Log** view with a
+  *Sender domain* search and the Dashboard's window already set — the pills
+  show it.
+- **Refresh** / **auto-refresh** (interval from Settings; a refresh waits
+  while messages are selected).
+- Paging (Log): prev / next / jump to page; page size from Settings.
 
 ## Tools
 
@@ -24,12 +49,17 @@ quarantine).
 - **SpamAssassin Bayes** — token counts and training state of the Bayes DB.
 - **SpamAssassin lint** — runs `spamassassin --lint` and shows the verdict.
 
-## Bulk release
+## Bulk actions
 
-Messages whose body is still on disk have a checkbox. Select some, optionally
-type a forward address, and **Release selected**: they are re-sent through
-Exim to their original recipients (or forwarded). A per-message result list is
-shown for anything that could not be released.
+Tick rows and a selection bar appears.
+
+- **Log** — only messages whose body is still on disk have a checkbox.
+  Optionally type a forward address, then **Release selected**: they are
+  re-sent through Exim to their original recipients (or forwarded). A
+  per-message result list is shown for anything that could not be released.
+- **Quarantine** — **Copy to INBOX**, **Release selected** (the selected
+  copies that have a message log row; same forward box) and **Purge
+  selected**. See [Quarantine](Quarantine).
 
 ## Message view
 
@@ -47,7 +77,7 @@ sender view (history, black/white list for the address or its domain, and
 **Ban rule…** — an auto-ban match rule that blocks mail from it and bans the
 IP that sends it; every match rule is listed in the [Rules](Rules) tab, and
 the ban modals link there with **All match rules →**). Message-ID, References and similar headers stay plain; the
-Quarantine tab's header viewer links the same way.
+Quarantine view's header viewer links the same way.
 
 **Message content** (needs a stored copy — quarantine or archive):
 - **View source** — the raw message, escaped, in a new tab.

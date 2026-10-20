@@ -284,6 +284,7 @@ mod tests {
     fn unprivileged_peer_cannot_reach_admin_routes() {
         for (m, p) in [
             ("GET", "/api/messages"),
+            ("GET", "/api/messages/counts"),
             ("GET", "/"),
             ("GET", "/whm"),
             ("POST", "/api/config"),

@@ -197,11 +197,12 @@ fn status_where(status: &str) -> &'static str {
     }
 }
 
-/// Filtered, searchable, paginated message list with a total count.
-pub fn messages(cfg: &Config, f: &MessageFilter) -> io::Result<Json> {
-    let mut wheres = vec![status_where(&f.status).to_string()];
-    if !f.text.is_empty() {
-        let col = match f.field.as_str() {
+/// The search part of a message filter (field/text and the day window),
+/// without the status: shared by the list and the per-status counts.
+fn search_wheres(field: &str, text: &str, days: u32) -> Vec<String> {
+    let mut wheres = Vec::new();
+    if !text.is_empty() {
+        let col = match field {
             "to" => "to_address",
             "subject" => "subject",
             "id" => "message_id",
@@ -211,16 +212,74 @@ pub fn messages(cfg: &Config, f: &MessageFilter) -> io::Result<Json> {
             _ => "from_address",
         };
         if col == "from_domain" {
-            wheres.push(format!("from_domain = {}", sql_quote(&f.text)));
+            wheres.push(format!("from_domain = {}", sql_quote(text)));
         } else {
-            let like = sql_quote(&format!("%{}%", f.text));
+            let like = sql_quote(&format!("%{text}%"));
             wheres.push(format!("{col} LIKE {like}"));
         }
     }
-    if f.days > 0 {
-        let days = f.days.clamp(1, 3650);
+    if days > 0 {
+        let days = days.clamp(1, 3650);
         wheres.push(format!("msg_ts >= (NOW() - INTERVAL {days} DAY)"));
     }
+    wheres
+}
+
+/// The statuses the Messages tab counts, in the order of the counts query.
+pub const COUNTED_STATUSES: [&str; 8] = [
+    "clean",
+    "lowspam",
+    "highspam",
+    "infected",
+    "attachments",
+    "wl",
+    "bl",
+    "quarantined",
+];
+
+/// One query counting every status for a search: `COUNT(*)` plus a
+/// `SUM(<status condition>)` per entry of [`COUNTED_STATUSES`].
+fn counts_sql(field: &str, text: &str, days: u32) -> String {
+    let sums: Vec<String> = COUNTED_STATUSES
+        .iter()
+        .map(|s| format!("COALESCE(SUM({}),0)", status_where(s)))
+        .collect();
+    let mut wheres = search_wheres(field, text, days);
+    if wheres.is_empty() {
+        wheres.push("1=1".into());
+    }
+    format!(
+        "SELECT COUNT(*), {} FROM maillog WHERE {}",
+        sums.join(", "),
+        wheres.join(" AND ")
+    )
+}
+
+/// Per-status message counts for a search (field/text and day window), so
+/// the status filters can show what each would return before a click.
+pub fn message_counts(cfg: &Config, field: &str, text: &str, days: u32) -> io::Result<Json> {
+    let rows = db::query(cfg, &counts_sql(field, text, days))?;
+    let r = rows.first().cloned().unwrap_or_default();
+    let n = |i: usize| -> i64 {
+        r.get(i)
+            .and_then(|v| v.split('.').next())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    };
+    let mut o = vec![
+        ("available".into(), Json::Bool(true)),
+        ("all".into(), Json::Int(n(0))),
+    ];
+    for (i, s) in COUNTED_STATUSES.iter().enumerate() {
+        o.push(((*s).into(), Json::Int(n(i + 1))));
+    }
+    Ok(Json::Object(o))
+}
+
+/// Filtered, searchable, paginated message list with a total count.
+pub fn messages(cfg: &Config, f: &MessageFilter) -> io::Result<Json> {
+    let mut wheres = vec![status_where(&f.status).to_string()];
+    wheres.extend(search_wheres(&f.field, &f.text, f.days));
     let where_sql = wheres.join(" AND ");
     let total: i64 = db::query(
         cfg,
@@ -589,6 +648,22 @@ pub fn clamp_int(raw: Option<&str>, default: u32, min: u32, max: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counts_sql_sums_every_status_over_the_search() {
+        let sql = counts_sql("from_domain", "example.com", 7);
+        assert!(sql.starts_with("SELECT COUNT(*), COALESCE(SUM("));
+        for s in COUNTED_STATUSES {
+            assert!(sql.contains(&format!("SUM({})", status_where(s))), "{s}");
+        }
+        assert!(sql.contains("from_domain = 'example.com'"));
+        assert!(sql.contains("INTERVAL 7 DAY"));
+        // no search: every row
+        assert!(counts_sql("from", "", 0).ends_with("WHERE 1=1"));
+        // LIKE search on the other fields, quoted
+        assert!(counts_sql("subject", "o'k", 0)
+            .contains(&format!("subject LIKE {}", sql_quote("%o'k%"))));
+    }
 
     #[test]
     fn field_allowlist() {

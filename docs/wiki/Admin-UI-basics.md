@@ -8,15 +8,17 @@ every tab is described on its own wiki page.
 ## The rail
 
 - **Tabs** — Dashboard, Service, Messages, Lists, Rules, Queues, Delivery,
-  Quarantine, Logs, Settings, Config. **Delivery** holds two views, switched by
+  Logs, Settings, Config. **Messages** holds two views, switched at the top of
+  the card: **Log** (the [message log](Messages)) and **Quarantine**
+  ([what is on disk](Quarantine)). **Delivery** holds two views, switched by
   the pills at the top: *Address test* (the
   [delivery test](Delivery-test) for one address) and *Account DNS*
   ([SPF, DKIM and DMARC for every hosted domain](Account-DNS)).
-- **Message ids** (the Exim id shown in a message's title, the Quarantine and
-  Queues lists, the test-message line) are click-to-copy: one click puts the
+- **Message ids** (the Exim id shown in a message's title, the Quarantine view
+  and Queues lists, the test-message line) are click-to-copy: one click puts the
   id on the clipboard, for a log search or a support ticket.
 - **IP and email addresses** in a message's headers and content preview (and
-  in the Quarantine header viewer) are links to their history and actions; the
+  in the Quarantine view's header viewer) are links to their history and actions; the
   small copy icon beside each puts the bare address on the clipboard.
 - **Health dot** (bottom) — mirrors `msfe-ng doctor`, refreshed every minute:
   green *all systems ok*, amber *N notices*, red *N problems*, plus

@@ -467,6 +467,10 @@ pub struct QuarantineListing {
     /// Everything found on disk, filter or not.
     pub disk_total: usize,
     pub disk_bytes: u64,
+    /// Items of each kind matching the filter with its `kind` ignored, so a
+    /// view can show both counts while one kind is selected.
+    pub spam: usize,
+    pub held: usize,
     pub truncated: bool,
     pub entries: Vec<QuarantineEntry>,
 }
@@ -500,6 +504,9 @@ impl ListFilter {
         if self.kind.as_deref().is_some_and(|k| k != e.kind) {
             return false;
         }
+        self.keep_any_kind(e)
+    }
+    fn keep_any_kind(&self, e: &QuarantineEntry) -> bool {
         if !self.date_ok(&e.date) {
             return false;
         }
@@ -533,9 +540,17 @@ pub fn list_quarantine(base: &Path, cap: usize) -> QuarantineListing {
 pub fn list_quarantine_where(base: &Path, cap: usize, filter: &ListFilter) -> QuarantineListing {
     let mut entries: Vec<QuarantineEntry> = Vec::new();
     let (mut disk_total, mut disk_bytes) = (0usize, 0u64);
+    let (mut spam, mut held) = (0usize, 0usize);
     let mut push = |e: QuarantineEntry| {
         disk_total += 1;
         disk_bytes += e.size;
+        if filter.keep_any_kind(&e) {
+            if e.kind == "spam" {
+                spam += 1;
+            } else {
+                held += 1;
+            }
+        }
         if filter.is_empty() || filter.keep(&e) {
             entries.push(e);
         }
@@ -575,6 +590,8 @@ pub fn list_quarantine_where(base: &Path, cap: usize, filter: &ListFilter) -> Qu
         bytes,
         disk_total,
         disk_bytes,
+        spam,
+        held,
         truncated,
         entries,
     }
@@ -871,6 +888,8 @@ mod tests {
         });
         assert_eq!((spam.total, spam.bytes, spam.disk_total), (2, 13, 3));
         assert!(spam.truncated && spam.entries.len() == 1);
+        // per-kind counts ignore the kind asked for
+        assert_eq!((spam.spam, spam.held), (2, 1));
         // date window, inclusive
         let old = by(ListFilter {
             to: Some("20260801".into()),
@@ -878,6 +897,7 @@ mod tests {
         });
         assert_eq!(old.total, 1);
         assert_eq!(old.entries[0].id, "1waaaa-000000000001-aaaa");
+        assert_eq!((old.spam, old.held), (1, 0));
         let none = by(ListFilter {
             from: Some("20260805".into()),
             ..Default::default()
