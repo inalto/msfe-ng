@@ -515,6 +515,7 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                     match read_full_message(cfg, id) {
                         None => "body no longer available (past the retention window)".into(),
                         Some(bytes) => {
+                            let from = original_sender(cfg, id, &bytes);
                             let r = quarantine::send_message(
                                 &bytes,
                                 if to.is_empty() {
@@ -522,6 +523,7 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                                 } else {
                                     Some(to.as_str())
                                 },
+                                &from,
                             );
                             match r {
                                 Ok(()) => {
@@ -573,7 +575,9 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                         &cfg.release_from,
                         &cfg.forward_body,
                     );
-                    quarantine::send_message(&msg, Some(&to))
+                    // the forwarded copy is From the release address, so it
+                    // goes out as the daemon's own user too
+                    quarantine::send_message(&msg, Some(&to), &quarantine::EnvelopeSender::Unknown)
                 }
                 _ => quarantine::send_message(
                     &bytes,
@@ -582,6 +586,7 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                     } else {
                         Some(to.as_str())
                     },
+                    &original_sender(cfg, &id, &bytes),
                 ),
             };
             match result {
@@ -607,7 +612,11 @@ pub fn handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                     r#"{"error":"the message body is no longer available"}"#,
                 );
             };
-            match quarantine::send_message(&bytes, Some(cfg.spamcop_address.trim())) {
+            match quarantine::send_message(
+                &bytes,
+                Some(cfg.spamcop_address.trim()),
+                &quarantine::EnvelopeSender::Unknown,
+            ) {
                 Ok(()) => Response::json(200, r#"{"ok":true}"#),
                 Err(e) => Response::json(500, &format!("{{\"error\":\"report failed: {e}\"}}")),
             }
@@ -1420,6 +1429,13 @@ fn body_of(cfg: &Config, id: &str) -> Option<std::path::PathBuf> {
 
 /// Resolve the body and read it as a complete RFC822 message (headers + body),
 /// reconstructing from the logged headers when the store is an Exim `-D` file.
+/// The envelope sender a re-sent message keeps: the message log's
+/// `from_address` when the row exists, else the stored copy's `Return-Path:`.
+fn original_sender(cfg: &Config, id: &str, bytes: &[u8]) -> quarantine::EnvelopeSender {
+    let logged = stats::from_address_of(cfg, id).ok().flatten();
+    quarantine::envelope_sender(logged.as_deref(), bytes)
+}
+
 fn read_full_message(cfg: &Config, id: &str) -> Option<Vec<u8>> {
     let (stored, headers) = stats::body_ref_of(cfg, id).unwrap_or_default();
     let p = quarantine::resolve_body(cfg, id, &stored)?;
@@ -3636,12 +3652,15 @@ fn user_handle(req: &Request, cfg: &Config, config_file: &Path) -> Response {
                 return forbidden();
             }
             match read_full_message(cfg, &id) {
-                Some(bytes) => match quarantine::send_message(&bytes, None) {
-                    Ok(()) => Response::json(200, r#"{"ok":true}"#),
-                    Err(e) => {
-                        Response::json(500, &format!("{{\"error\":\"release failed: {e}\"}}"))
+                Some(bytes) => {
+                    match quarantine::send_message(&bytes, None, &original_sender(cfg, &id, &bytes))
+                    {
+                        Ok(()) => Response::json(200, r#"{"ok":true}"#),
+                        Err(e) => {
+                            Response::json(500, &format!("{{\"error\":\"release failed: {e}\"}}"))
+                        }
                     }
-                },
+                }
                 None => Response::json(404, r#"{"error":"message not found"}"#),
             }
         }

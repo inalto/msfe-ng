@@ -3,8 +3,9 @@
 //! MailScanner stores held messages under a dated tree
 //! (`<base>/<YYYYMMDD>/<message-id>/…`). We locate a message by id (validated to
 //! a safe charset so it can never escape `base`), read its raw bytes for the
-//! viewer, and re-inject it via `sendmail -t` on release. The filesystem/MTA
-//! parts only do real work on a live mail host; the path logic is unit-tested.
+//! viewer, and re-inject it via `sendmail -t -f <original sender>` on
+//! release. The filesystem/MTA parts only do real work on a live mail host;
+//! the path logic and the envelope-sender choice are unit-tested.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -338,13 +339,90 @@ pub fn deliver_inbox(bytes: &[u8], lda: &str, account: &str) -> io::Result<()> {
     }))
 }
 
+/// The envelope sender a released message is re-injected with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnvelopeSender {
+    /// The original sender: Exim gets `-f <address>`.
+    Address(String),
+    /// A bounce / notification (empty Return-Path): Exim gets `-f <>`.
+    Null,
+    /// Nothing trustworthy was found: inject without `-f`, so the message
+    /// goes out as the daemon's own user (the pre-1.0.100 behaviour).
+    Unknown,
+}
+
+impl EnvelopeSender {
+    /// Classify one candidate sender string: `Some(Address)` for a safe
+    /// address, `Some(Null)` for an empty one or `<>`, `None` when it is not
+    /// usable on a command line.
+    fn classify(raw: &str) -> Option<Self> {
+        let s = raw.trim();
+        let s = s
+            .strip_prefix('<')
+            .and_then(|s| s.strip_suffix('>'))
+            .unwrap_or(s)
+            .trim();
+        if s.is_empty() {
+            Some(Self::Null)
+        } else if valid_recipient(s) {
+            Some(Self::Address(s.to_string()))
+        } else {
+            None
+        }
+    }
+
+    /// Arguments to add to the sendmail command line (none for `Unknown`).
+    fn args(&self) -> Vec<&str> {
+        match self {
+            Self::Address(a) => vec!["-f", a.as_str()],
+            Self::Null => vec!["-f", "<>"],
+            Self::Unknown => vec![],
+        }
+    }
+}
+
+/// Pick the envelope sender for a release: the message log's `from_address`
+/// (MailScanner records the envelope sender there, empty for a bounce) when
+/// the log row exists, otherwise the stored copy's `Return-Path:` header.
+/// A value that fails the address check is skipped; with nothing usable the
+/// choice is `Unknown`, and the message is injected as before (as root).
+pub fn envelope_sender(logged_from: Option<&str>, bytes: &[u8]) -> EnvelopeSender {
+    let return_path = {
+        let (headers, _) = crate::mime::split_headers(bytes);
+        headers.iter().find_map(|h| {
+            let (name, value) = h.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("Return-Path")
+                .then(|| value.trim().to_string())
+        })
+    };
+    let mut saw_null = false;
+    for cand in [logged_from.map(str::to_string), return_path]
+        .into_iter()
+        .flatten()
+    {
+        match EnvelopeSender::classify(&cand) {
+            Some(EnvelopeSender::Address(a)) => return EnvelopeSender::Address(a),
+            Some(EnvelopeSender::Null) => saw_null = true,
+            _ => {}
+        }
+    }
+    if saw_null {
+        EnvelopeSender::Null
+    } else {
+        EnvelopeSender::Unknown
+    }
+}
+
 /// Send an already-assembled RFC822 message: to its own recipients (`to` None)
-/// or to an explicit address (`to` Some). Shared by every release path so an
-/// Exim `-D` body reconstructed with its headers is what actually goes out.
-pub fn send_message(bytes: &[u8], to: Option<&str>) -> io::Result<()> {
+/// or to an explicit address (`to` Some), with the given envelope sender.
+/// Shared by every release path so an Exim `-D` body reconstructed with its
+/// headers is what actually goes out.
+pub fn send_message(bytes: &[u8], to: Option<&str>, from: &EnvelopeSender) -> io::Result<()> {
     use std::io::Write;
     use std::process::{Command, Stdio};
     let mut cmd = Command::new("sendmail");
+    cmd.args(from.args());
     match to {
         Some(addr) => {
             if !valid_recipient(addr) {
@@ -365,43 +443,24 @@ pub fn send_message(bytes: &[u8], to: Option<&str>) -> io::Result<()> {
     }
 }
 
-/// Re-inject a released message into the MTA via `sendmail -t`.
+/// Re-inject a released message file into the MTA via `sendmail -t`, with the
+/// envelope sender taken from its `Return-Path:` header.
 pub fn release(path: &Path) -> io::Result<()> {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
     let bytes = read_message(path)?;
-    let mut child = Command::new("sendmail")
-        .arg("-t")
-        .stdin(Stdio::piped())
-        .spawn()?;
-    child.stdin.take().expect("stdin piped").write_all(&bytes)?;
-    if child.wait()?.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other("sendmail failed"))
-    }
+    let from = envelope_sender(None, &bytes);
+    send_message(&bytes, None, &from)
 }
 
-/// Forward a quarantined message to an explicit recipient (envelope-to that
-/// address, original message unchanged) — the legacy "Release (forward)".
+/// Forward a quarantined message file to an explicit recipient (envelope-to
+/// that address, original message and envelope sender unchanged) — the legacy
+/// "Release (forward)".
 pub fn release_to(path: &Path, recipient: &str) -> io::Result<()> {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
     if !valid_recipient(recipient) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "bad recipient"));
     }
     let bytes = read_message(path)?;
-    let mut child = Command::new("sendmail")
-        .arg("--")
-        .arg(recipient)
-        .stdin(Stdio::piped())
-        .spawn()?;
-    child.stdin.take().expect("stdin piped").write_all(&bytes)?;
-    if child.wait()?.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other("sendmail failed"))
-    }
+    let from = envelope_sender(None, &bytes);
+    send_message(&bytes, Some(recipient), &from)
 }
 
 /// A single safe email address (no spaces, no option injection).
@@ -1162,6 +1221,86 @@ Hello world body
         assert!(!valid_recipient("two words@x.com"));
         assert!(!valid_recipient("noat.example.com"));
         assert!(!valid_recipient(""));
+    }
+
+    #[test]
+    fn envelope_sender_prefers_the_logged_address() {
+        let msg = b"Return-Path: <other@example.net>\nFrom: a@b.c\n\nbody";
+        assert_eq!(
+            envelope_sender(Some("sender@example.com"), msg),
+            EnvelopeSender::Address("sender@example.com".into())
+        );
+        // angle brackets and whitespace around the logged value are tolerated
+        assert_eq!(
+            envelope_sender(Some(" <sender@example.com> "), msg),
+            EnvelopeSender::Address("sender@example.com".into())
+        );
+    }
+
+    #[test]
+    fn envelope_sender_falls_back_to_return_path() {
+        let msg = b"Received: from x\nReturn-Path: <rp@example.net>\nSubject: hi\n\nbody";
+        assert_eq!(
+            envelope_sender(None, msg),
+            EnvelopeSender::Address("rp@example.net".into())
+        );
+        // a folded header is unfolded first
+        let folded = b"Return-Path:\n <rp@example.net>\n\nbody";
+        assert_eq!(
+            envelope_sender(None, folded),
+            EnvelopeSender::Address("rp@example.net".into())
+        );
+    }
+
+    #[test]
+    fn envelope_sender_bounce_is_the_null_sender() {
+        // MailScanner logs an empty from_address for a bounce
+        assert_eq!(
+            envelope_sender(Some(""), b"From: x\n\n"),
+            EnvelopeSender::Null
+        );
+        assert_eq!(
+            envelope_sender(Some("<>"), b"From: x\n\n"),
+            EnvelopeSender::Null
+        );
+        assert_eq!(
+            envelope_sender(None, b"Return-Path: <>\n\nbody"),
+            EnvelopeSender::Null
+        );
+        // an empty log value but a real Return-Path: the header wins
+        assert_eq!(
+            envelope_sender(Some(""), b"Return-Path: <rp@example.net>\n\n"),
+            EnvelopeSender::Address("rp@example.net".into())
+        );
+        assert_eq!(EnvelopeSender::Null.args(), vec!["-f", "<>"]);
+    }
+
+    #[test]
+    fn envelope_sender_invalid_values_fall_back_to_the_old_behaviour() {
+        // option injection or a malformed address never reaches the command
+        // line: with nothing else usable the message is injected without -f
+        assert_eq!(
+            envelope_sender(Some("-oMr smtp@x.com"), b"Subject: s\n\n"),
+            EnvelopeSender::Unknown
+        );
+        assert_eq!(
+            envelope_sender(Some("two words@x.com"), b"Return-Path: <bad addr@x>\n\n"),
+            EnvelopeSender::Unknown
+        );
+        assert_eq!(
+            envelope_sender(None, b"Subject: s\n\n"),
+            EnvelopeSender::Unknown
+        );
+        assert!(EnvelopeSender::Unknown.args().is_empty());
+        // an invalid log value still lets a good Return-Path through
+        assert_eq!(
+            envelope_sender(Some("-x"), b"Return-Path: <rp@example.net>\n\n"),
+            EnvelopeSender::Address("rp@example.net".into())
+        );
+        assert_eq!(
+            EnvelopeSender::Address("a@b.c".into()).args(),
+            vec!["-f", "a@b.c"]
+        );
     }
 
     #[test]

@@ -407,6 +407,20 @@ pub fn body_ref_of(cfg: &Config, message_id: &str) -> io::Result<(String, String
     ))
 }
 
+/// The logged envelope sender of a message: `None` when the message has no
+/// log row, `Some("")` for a bounce (MailScanner records an empty sender).
+pub fn from_address_of(cfg: &Config, message_id: &str) -> io::Result<Option<String>> {
+    if !crate::service::valid_exim_id(message_id) {
+        return Ok(None);
+    }
+    let sql = format!(
+        "SELECT from_address FROM maillog WHERE message_id = {} ORDER BY msg_ts DESC LIMIT 1",
+        sql_quote(message_id)
+    );
+    let rows = db::query(cfg, &sql)?;
+    Ok(rows.first().map(|r| r.first().cloned().unwrap_or_default()))
+}
+
 /// The recorded body location for a message (empty when unknown/pruned).
 pub fn body_path_of(cfg: &Config, message_id: &str) -> io::Result<Option<String>> {
     Ok(Some(body_ref_of(cfg, message_id)?.0).filter(|s| !s.is_empty()))
