@@ -129,38 +129,135 @@ fn render_with<T>(t: &Table<T>, mut row: impl FnMut(&T) -> String) -> String {
     out
 }
 
-/// A table with its rows replaced by the editor's, comments and blanks kept
-/// in place: a submitted row carrying the 1-based line it came from replaces
-/// that line, original rows nobody submitted are deleted, rows without a line
-/// are appended after the last row (or at the end). Unparsed lines stay —
-/// removing them is the raw editor's job.
+/// A table with its rows replaced by the editor's, in the editor's order.
+///
+/// The original lines are grouped into chunks: a row, the comment lines
+/// directly above it (up to a blank line or another row) and the blank lines
+/// directly above those comments, so a rule moves together with its
+/// explanation and spacing. Anything else between two rows (unparsed lines,
+/// a blank not followed by comments) travels with the chunk below it. Lines
+/// before the first chunk — and a comment block that opens the file right
+/// above the first row — are the file header and stay at the top; lines after
+/// the last row stay at the bottom.
+///
+/// The output follows the submitted order: a row carrying the 1-based line it
+/// came from brings its chunk along (with the row's new content); a row
+/// without a line is fresh and lands where it sits in the submitted list.
+/// Original rows nobody submitted are deleted together with their attached
+/// comments — a comment about a rule that is gone is noise. Unparsed lines
+/// are never dropped (removing them is the raw editor's job): a deleted
+/// chunk's unparsed lines move on to the next chunk. Submitting the rows in
+/// their original order reproduces the file byte-for-byte.
 pub fn rebuild<T: Clone>(orig: &Table<T>, rows: Vec<(Option<usize>, T)>) -> Table<T> {
-    let mut out: Vec<Line<T>> = Vec::with_capacity(orig.lines.len() + rows.len());
-    let mut last_row_at: Option<usize> = None;
+    struct Chunk<T> {
+        /// 1-based line of the row
+        line: usize,
+        /// loose lines (unparsed, unattached blanks) that precede the chunk
+        loose: Vec<Line<T>>,
+        /// blanks above the comments, then the comments
+        attached: Vec<Line<T>>,
+    }
+    let mut header: Vec<Line<T>> = Vec::new();
+    let mut chunks: Vec<Chunk<T>> = Vec::new();
+    let mut pending: Vec<Line<T>> = Vec::new();
     for (i, l) in orig.lines.iter().enumerate() {
-        match l {
-            Line::Row(_) => {
-                if let Some((_, r)) = rows.iter().find(|(at, _)| *at == Some(i + 1)) {
-                    out.push(Line::Row(r.clone()));
-                    last_row_at = Some(out.len());
+        if !matches!(l, Line::Row(_)) {
+            pending.push(l.clone());
+            continue;
+        }
+        let mut cut = pending.len();
+        while cut > 0 && matches!(pending[cut - 1], Line::Comment(_)) {
+            cut -= 1;
+        }
+        let has_comments = cut < pending.len();
+        if has_comments {
+            while cut > 0 && matches!(pending[cut - 1], Line::Blank) {
+                cut -= 1;
+            }
+        }
+        let attached = pending.split_off(cut);
+        let loose = std::mem::take(&mut pending);
+        if chunks.is_empty() {
+            header = loose;
+            // a comment block opening the file is its header, not the
+            // first rule's comment; blanks above the first rule's comment
+            // separate it from the header and stay there too
+            let first_comment = attached
+                .iter()
+                .position(|l| matches!(l, Line::Comment(_)))
+                .unwrap_or(attached.len());
+            if header.is_empty() && first_comment == 0 {
+                header = attached;
+                chunks.push(Chunk {
+                    line: i + 1,
+                    loose: Vec::new(),
+                    attached: Vec::new(),
+                });
+            } else {
+                let mut attached = attached;
+                let rest = attached.split_off(first_comment);
+                header.extend(attached);
+                chunks.push(Chunk {
+                    line: i + 1,
+                    loose: Vec::new(),
+                    attached: rest,
+                });
+            }
+        } else {
+            chunks.push(Chunk {
+                line: i + 1,
+                loose,
+                attached,
+            });
+        }
+    }
+    let mut trailing = pending;
+    if chunks.is_empty() {
+        header = std::mem::take(&mut trailing);
+    }
+
+    // unparsed lines of a deleted chunk move on to the next one
+    let wanted = |line: usize| rows.iter().any(|(at, _)| *at == Some(line));
+    let mut carry: Vec<Line<T>> = Vec::new();
+    for c in chunks.iter_mut() {
+        if wanted(c.line) {
+            if !carry.is_empty() {
+                carry.append(&mut c.loose);
+                c.loose = std::mem::take(&mut carry);
+            }
+        } else {
+            carry.append(&mut c.loose);
+            carry.retain(|l| matches!(l, Line::Unparsed(_)));
+        }
+    }
+    if !carry.is_empty() {
+        carry.append(&mut trailing);
+        trailing = carry;
+    }
+
+    let mut out: Vec<Line<T>> = header;
+    let mut used: Vec<usize> = Vec::new();
+    for (at, r) in rows {
+        let chunk = at
+            .filter(|n| !used.contains(n))
+            .and_then(|n| chunks.iter_mut().find(|c| c.line == n));
+        if let Some(c) = chunk {
+            used.push(c.line);
+            // no doubled spacing when a chunk moves right under the header
+            let skip_blanks = out.is_empty() || matches!(out.last(), Some(Line::Blank));
+            let mut lead: Vec<Line<T>> = std::mem::take(&mut c.loose);
+            lead.append(&mut c.attached);
+            let mut it = lead.into_iter().peekable();
+            if skip_blanks {
+                while matches!(it.peek(), Some(Line::Blank)) {
+                    it.next();
                 }
             }
-            other => out.push(other.clone()),
+            out.extend(it);
         }
+        out.push(Line::Row(r));
     }
-    let fresh: Vec<Line<T>> = rows
-        .into_iter()
-        .filter(|(at, _)| at.is_none())
-        .map(|(_, r)| Line::Row(r))
-        .collect();
-    match last_row_at {
-        Some(at) => {
-            let tail = out.split_off(at);
-            out.extend(fresh);
-            out.extend(tail);
-        }
-        None => out.extend(fresh),
-    }
+    out.extend(trailing);
     Table {
         lines: out,
         normalized: false,
@@ -570,15 +667,80 @@ garbage line without tabs\n";
             (None, "new.example".to_string()),
         ];
         let out = render_host_list(&rebuild(&t, rows));
+        // b.example is deleted together with the comment right above it
         assert_eq!(
             out,
-            "# head\na2.example\n# between\nbad host\nc.example\nnew.example\n"
+            "# head\na2.example\nbad host\nc.example\nnew.example\n"
         );
         // no rows at all: everything appended at the end
         let t = parse_host_list("# only comments\n");
         assert_eq!(
             render_host_list(&rebuild(&t, vec![(None, "x.example".into())])),
             "# only comments\nx.example\n"
+        );
+    }
+
+    const ORDERED: &str = "# header\n# more header\n\nallow\t\\.txt$\t-\t-\n\n# hiding\ndeny\t\\.[a-z]+\\.[a-z]+$\t-\t-\n# docx\nallow\t\\.doc\\.docx$\t-\t-\ndeny\t\\.exe$\t-\t-\n\n# trailing\n";
+
+    fn submitted(t: &Table<FilenameRule>, order: &[usize]) -> Vec<(Option<usize>, FilenameRule)> {
+        let rows: Vec<(usize, FilenameRule)> = t
+            .lines
+            .iter()
+            .enumerate()
+            .filter_map(|(i, l)| match l {
+                Line::Row(r) => Some((i + 1, r.clone())),
+                _ => None,
+            })
+            .collect();
+        order
+            .iter()
+            .map(|&k| (Some(rows[k].0), rows[k].1.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn rebuild_in_original_order_is_byte_identical() {
+        let t = parse_filename_rules(ORDERED);
+        let out = render_filename_rules(&rebuild(&t, submitted(&t, &[0, 1, 2, 3])));
+        assert_eq!(out, ORDERED);
+    }
+
+    #[test]
+    fn rebuild_move_keeps_comment_with_its_rule() {
+        let t = parse_filename_rules(ORDERED);
+        // the docx allow moves above the hiding deny
+        let out = render_filename_rules(&rebuild(&t, submitted(&t, &[0, 2, 1, 3])));
+        assert_eq!(
+            out,
+            "# header\n# more header\n\nallow\t\\.txt$\t-\t-\n# docx\nallow\t\\.doc\\.docx$\t-\t-\n\n# hiding\ndeny\t\\.[a-z]+\\.[a-z]+$\t-\t-\ndeny\t\\.exe$\t-\t-\n\n# trailing\n"
+        );
+        // moving the last rule to the top: the header stays first, the
+        // trailing comment stays last
+        let out = render_filename_rules(&rebuild(&t, submitted(&t, &[3, 0, 1, 2])));
+        assert!(out.starts_with("# header\n# more header\n\ndeny\t\\.exe$"));
+        assert!(out.ends_with("allow\t\\.doc\\.docx$\t-\t-\n\n# trailing\n"));
+    }
+
+    #[test]
+    fn rebuild_fresh_row_lands_where_submitted() {
+        let t = parse_filename_rules(ORDERED);
+        let mut rows = submitted(&t, &[0, 1, 2, 3]);
+        rows.insert(
+            1,
+            (
+                None,
+                FilenameRule {
+                    action: Action::Allow,
+                    pattern: "\\.p7m$".into(),
+                    log_text: "-".into(),
+                    user_text: "-".into(),
+                },
+            ),
+        );
+        let out = render_filename_rules(&rebuild(&t, rows));
+        assert_eq!(
+            out,
+            "# header\n# more header\n\nallow\t\\.txt$\t-\t-\nallow\t\\.p7m$\t-\t-\n\n# hiding\ndeny\t\\.[a-z]+\\.[a-z]+$\t-\t-\n# docx\nallow\t\\.doc\\.docx$\t-\t-\ndeny\t\\.exe$\t-\t-\n\n# trailing\n"
         );
     }
 

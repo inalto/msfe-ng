@@ -83,6 +83,7 @@ pub mod queueview;
 pub mod repchecks;
 pub mod report;
 pub mod resolver;
+pub mod rulecheck;
 pub mod rulefile;
 pub mod rules;
 pub mod sa;

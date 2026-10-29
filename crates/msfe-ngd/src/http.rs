@@ -288,6 +288,7 @@ mod tests {
             ("GET", "/"),
             ("GET", "/whm"),
             ("POST", "/api/config"),
+            ("POST", "/api/conf/check-rows"),
             ("GET", "/api/userx"),
             ("GET", "/api/delivery/osint/monitors"),
             ("POST", "/api/delivery/osint/monitors"),

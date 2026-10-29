@@ -57,6 +57,7 @@ pub fn handle(
         }
         ("GET", "/api/conf/file") => file(req, cfg, config_file),
         ("PUT", "/api/conf/file") => save(req, cfg, config_file),
+        ("POST", "/api/conf/check-rows") => check_rows(req, cfg, config_file),
         ("POST", "/api/conf/create") => create(req, cfg, config_file),
         ("GET", "/api/conf/history") => history(req, cfg, config_file),
         ("GET", "/api/conf/history/view") => history_view(req, cfg, config_file),
@@ -322,6 +323,12 @@ fn file(req: &Request, cfg: &Config, config_file: &Path) -> Response {
     let mut obj = entry_json(&e);
     obj.push(("content".into(), Json::str(&text)));
     obj.push(("parsed".into(), parsed_json(e.kind, &text)));
+    if e.kind == Kind::FilenameRules {
+        let perl = msfe_core::layout::resolve(cfg).perl;
+        if let Some(sh) = shadows_json(&perl, &text) {
+            obj.push(("shadows".into(), sh));
+        }
+    }
     if e.root == Root::Ms && matches!(e.kind, Kind::KeyValue(conffile::Style::Plain)) {
         let cat = confcatalog::scan(cfg, config_file);
         obj.push(("schema".into(), schema_json(cfg, &text)));
@@ -344,6 +351,59 @@ fn file(req: &Request, cfg: &Config, config_file: &Path) -> Response {
         Json::Int(confsave::history(cfg, &e).len() as i64),
     ));
     Response::json(200, &Json::Object(obj).to_string())
+}
+
+/// Filename rules an earlier rule always beats, as
+/// `[{row, by, example}]` with indexes into the parsed rows; `None` when the
+/// engine's perl cannot be run.
+fn shadows_json(perl: &[String], text: &str) -> Option<Json> {
+    let t = msgrammar::parse_filename_rules(text);
+    let rules: Vec<msgrammar::FilenameRule> = t.rows().into_iter().cloned().collect();
+    let found = msfe_core::rulecheck::shadowed_filename_rules(perl, &rules)?;
+    Some(Json::Array(
+        found
+            .iter()
+            .map(|sh| {
+                Json::Object(vec![
+                    ("row".into(), Json::Int(sh.index as i64)),
+                    ("by".into(), Json::Int(sh.by as i64)),
+                    s("example", &sh.example),
+                ])
+            })
+            .collect(),
+    ))
+}
+
+/// `POST /api/conf/check-rows` `{id, rows}`: the shadowed-rule check over
+/// rows the editor holds, without saving. The rows go through the same
+/// rebuild as a save, so row `i` of the answer is the `i`-th submitted row.
+fn check_rows(req: &Request, cfg: &Config, config_file: &Path) -> Response {
+    let v = match body(req) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let e = match resolve(&v.str_field("id"), cfg, config_file) {
+        Ok(e) => e,
+        Err(r) => return r,
+    };
+    let Some(rows) = v.get("rows").and_then(Json::as_array) else {
+        return err(400, "rows missing");
+    };
+    let current = std::fs::read_to_string(&e.path).unwrap_or_default();
+    let text = match rows_to_text(e.kind, &current, rows) {
+        Ok(t) => t,
+        Err(m) => return err(400, &m),
+    };
+    let shadows = if e.kind == Kind::FilenameRules {
+        let perl = msfe_core::layout::resolve(cfg).perl;
+        shadows_json(&perl, &text).unwrap_or(Json::Array(Vec::new()))
+    } else {
+        Json::Array(Vec::new())
+    };
+    Response::json(
+        200,
+        &Json::Object(vec![("shadows".into(), shadows)]).to_string(),
+    )
 }
 
 /// `rows` → file text for the table kinds, comments kept through `rebuild`.
@@ -1054,6 +1114,41 @@ mod tests {
             "clamd\t/bin/false\t/usr\n"
         );
         assert!(rows_to_text(Kind::PlainText, "", &[]).is_err());
+    }
+
+    #[test]
+    fn shadows_follow_the_submitted_row_order() {
+        let Some(perl) = ["/usr/bin/perl", "/usr/local/bin/perl"]
+            .iter()
+            .find(|p| Path::new(p).exists())
+        else {
+            return;
+        };
+        let perl = vec![perl.to_string()];
+        let cur = "# f\nallow\t\\.doc\\.docx$\t-\t-\ndeny\t\\.[a-z][a-z0-9]{2,3}\\s*\\.[a-z0-9]{3,4}$\thiding\t-\n";
+        let sh = shadows_json(&perl, cur).unwrap();
+        assert_eq!(sh.as_array().unwrap().len(), 0);
+        // the same rows with the deny dragged above the allow
+        let rows = vec![
+            Json::Object(vec![
+                ("line".into(), Json::Int(3)),
+                s("action", "deny"),
+                s("pattern", "\\.[a-z][a-z0-9]{2,3}\\s*\\.[a-z0-9]{3,4}$"),
+                s("log_text", "hiding"),
+            ]),
+            Json::Object(vec![
+                ("line".into(), Json::Int(2)),
+                s("action", "allow"),
+                s("pattern", "\\.doc\\.docx$"),
+            ]),
+        ];
+        let text = rows_to_text(Kind::FilenameRules, cur, &rows).unwrap();
+        let sh = shadows_json(&perl, &text).unwrap();
+        let sh = sh.as_array().unwrap();
+        assert_eq!(sh.len(), 1);
+        assert_eq!(sh[0].get("row").and_then(Json::as_i64), Some(1));
+        assert_eq!(sh[0].get("by").and_then(Json::as_i64), Some(0));
+        assert_eq!(sh[0].str_field("example"), "file.doc.docx");
     }
 
     #[test]

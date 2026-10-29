@@ -418,6 +418,24 @@ fn check_filename_rules(tree: &Tree, perl: &[String], out: &mut Vec<Finding>) {
             }
             None => perl_missing = true,
         }
+        // first match wins: a rule an earlier one always beats never fires
+        let plain: Vec<msgrammar::FilenameRule> = rows.iter().map(|(_, r)| (*r).clone()).collect();
+        for sh in crate::rulecheck::shadowed_filename_rules(perl, &plain).unwrap_or_default() {
+            let (line, _) = rows[sh.index];
+            let (by_line, by) = rows[sh.by];
+            out.push(
+                finding(
+                    Level::Warn,
+                    format!(
+                        "line {line} is never reached for names like '{}': line {by_line} ({}) matches first",
+                        sh.example,
+                        by.action.as_string()
+                    ),
+                )
+                .file(id.clone())
+                .line(line as u32),
+            );
+        }
     }
     if perl_missing {
         out.push(finding(
@@ -640,7 +658,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             etc.join("filename.rules.conf"),
-            "deny\t\\.exe$\ta\tb\ndeny\t(unclosed\tc\td\nnot a rule at all\n",
+            "deny\t\\.exe$\ta\tb\ndeny\t(unclosed\tc\td\nnot a rule at all\ndeny\t\\.[a-z]+\\.[a-z]+$\te\tf\nallow\t\\.doc\\.docx$\tg\th\n",
         )
         .unwrap();
         std::fs::write(
@@ -731,6 +749,13 @@ mod tests {
         if !perl().is_empty() {
             assert!(
                 has(Level::Fail, "pattern '(unclosed' does not compile"),
+                "{out:#?}"
+            );
+            assert!(
+                has(
+                    Level::Warn,
+                    "line 5 is never reached for names like 'file.doc.docx': line 4 (deny) matches first"
+                ),
                 "{out:#?}"
             );
         }

@@ -114,7 +114,8 @@ named `<original name>.p7m`. The stock rule in `filename.rules.conf`, *Found
 possible filename hiding* (`deny \.[a-z][a-z0-9]{2,3}\s*\.[a-z0-9]{3,4}$`),
 reads `file.pdf.p7m` as a hidden double extension. Rules are read top to
 bottom and the first match wins, so an `allow \.pdf\.p7m$` appended at the end
-of the file never fires.
+of the file never fires. The Config tab's file-rules editor marks such a rule
+with ⚠ — drag it above the rule that wins.
 
 **The check.** The doctor check *signed documents (.p7m) blocked* (Warn)
 fires when that stock rule would refuse `x.pdf.p7m`, `x.xbrl.p7m` or

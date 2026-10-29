@@ -23,13 +23,22 @@ CLI: `msfe-ng conf grep <text>` prints `id:line: text` for the same search.
 | Badge | Files | Editor |
 |---|---|---|
 | settings | `MailScanner.conf`, `conf.d/*.conf`, `config.toml` | form: one field per setting, comments shown in between |
-| ruleset | `rules/*.rules` that sync does not generate | table: direction, pattern, value |
-| file rules | `filename.rules.conf`, `filetype.rules.conf`, `archives.*` | table: action, pattern, log text, user text |
+| ruleset | `rules/*.rules` that sync does not generate | table: direction, pattern, value; drag rows (⋮⋮) or ↑ ↓ to reorder |
+| file rules | `filename.rules.conf`, `filetype.rules.conf`, `archives.*` | table: action, pattern, log text, user text; drag rows (⋮⋮) or ↑ ↓ to reorder |
 | RBL list | `spam.lists.conf` | table: name, DNS zone |
 | scanners | `virus.scanners.conf` | table: name, wrapper, install dir |
 | hosts | `phishing.*.custom` | one hostname per row (paste many at once) |
 | text | `spamassassin.conf`, `mcp/*`, `country.domains.conf`, `reports/*` | raw text |
 | 🔒 | the ten rulesets sync generates, `phishing.*.conf` (ms-update-phishing), `custom/*.pm`, `defaults`, `*.rpmnew` | view only — the lock's tooltip says who owns the file |
+
+**Order matters.** Rulesets and file rules are read top to bottom and the
+first match wins, so a rule placed below a broader one may never fire. Drag a
+row by its ⋮⋮ handle (or use ↑ ↓) to move it; its comment moves with it and
+the file's header stays on top. In file rules, ⚠ marks a rule that an earlier
+one hides — the earlier rule matches every example name of it first and has a
+different action (same-action duplicates are not flagged); hover the ⚠ for an
+example name, click it to jump to the rule that wins. The tester and
+`msfe-ng conf test` report the same as a warning.
 
 **Form ⇄ Raw text** switches any editor to the plain file. **+ New** creates a
 `conf.d/<name>.conf` fragment (read after `MailScanner.conf`, so it overrides

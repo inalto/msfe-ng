@@ -692,6 +692,39 @@
   .tbl td {
     padding: 0.25rem 0.3rem;
   }
+  .tbl td.grip {
+    width: 1%;
+    white-space: nowrap;
+    color: var(--muted);
+    user-select: none;
+  }
+  .tbl .gripdots {
+    cursor: grab;
+    padding: 0 0.15rem;
+    letter-spacing: -0.15em;
+  }
+  .tbl .shadowmark {
+    margin-left: 0.3rem;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--warning);
+    cursor: pointer;
+    font-size: 0.85rem;
+  }
+  .tbl td.rowacts {
+    width: 1%;
+    white-space: nowrap;
+  }
+  .tbl tr.dragging {
+    opacity: 0.4;
+  }
+  .tbl tr.drop-before td {
+    box-shadow: inset 0 2px 0 var(--accent);
+  }
+  .tbl tr.drop-after td {
+    box-shadow: inset 0 -2px 0 var(--accent);
+  }
   .mono {
     font-family: var(--font-mono);
   }

@@ -4572,8 +4572,8 @@ function kvEditor(d){
 // Table editor for the row-shaped files. Rows remember the line they came
 // from so the server can keep comments in place; new rows carry no line.
 const TABLE_SPECS={
-  'rules':{cols:[{f:'direction',label:'Direction',type:'select',options:['To:','From:','FromOrTo:','FromAndTo:']},{f:'pattern',label:'Pattern',mono:true,ph:'*@domain.example'},{f:'and_direction',label:'and',type:'select',options:['','To:','From:','FromOrTo:','FromAndTo:']},{f:'and_pattern',label:'and-pattern',mono:true,ph:'(pattern)'},{f:'value',label:'Value',ph:'yes / no / deliver …'}],blank:{direction:'To:'},hint:'First match wins. Patterns are single tokens (*@domain, user@domain, default); the value is what the directive expects.'},
-  'filename-rules':{cols:[{f:'action',label:'Action',type:'select',options:['allow','deny','deny+delete','rename'],free:true},{f:'pattern',label:'Pattern (perl regex)',mono:true,ph:'\\.exe$'},{f:'log_text',label:'Log text',ph:'Windows executable'},{f:'user_text',label:'Text shown to the user',ph:'Executables are not allowed'}],blank:{action:'deny'},hint:'Checked top to bottom; the first matching pattern decides. "rename" keeps the file with a safe name; "rename to .txt" also changes the extension.'},
+  'rules':{cols:[{f:'direction',label:'Direction',type:'select',options:['To:','From:','FromOrTo:','FromAndTo:']},{f:'pattern',label:'Pattern',mono:true,ph:'*@domain.example'},{f:'and_direction',label:'and',type:'select',options:['','To:','From:','FromOrTo:','FromAndTo:']},{f:'and_pattern',label:'and-pattern',mono:true,ph:'(pattern)'},{f:'value',label:'Value',ph:'yes / no / deliver …'}],blank:{direction:'To:'},hint:'First match wins — drag rows (⋮⋮) or use ↑ ↓ to reorder. Patterns are single tokens (*@domain, user@domain, default); the value is what the directive expects.'},
+  'filename-rules':{cols:[{f:'action',label:'Action',type:'select',options:['allow','deny','deny+delete','rename'],free:true},{f:'pattern',label:'Pattern (perl regex)',mono:true,ph:'\\.exe$'},{f:'log_text',label:'Log text',ph:'Windows executable'},{f:'user_text',label:'Text shown to the user',ph:'Executables are not allowed'}],blank:{action:'deny'},hint:'Checked top to bottom; the first matching pattern decides — drag rows (⋮⋮) to reorder. "rename" keeps the file with a safe name; "rename to .txt" also changes the extension.'},
   'spam-lists':{cols:[{f:'name',label:'Name',mono:true,ph:'SPAMHAUS-ZEN'},{f:'domain',label:'DNS zone',mono:true,ph:'zen.spamhaus.org.'}],blank:{},hint:'Names are what "Spam List" in MailScanner.conf refers to.'},
   'virus-scanners':{cols:[{f:'name',label:'Name',mono:true,ph:'clamd'},{f:'wrapper',label:'Wrapper',mono:true,ph:'/usr/lib/MailScanner/wrapper/clamav-wrapper'},{f:'dir',label:'Install dir',mono:true,ph:'/usr'}],blank:{},hint:'Names are what "Virus Scanners" in MailScanner.conf refers to.'},
   'host-list':{cols:[{f:'host',label:'Hostname',mono:true,ph:'phish.example'}],blank:{},hint:'One hostname per line; *.example covers subdomains. Paste several at once into a new row.'},
@@ -4586,9 +4586,55 @@ function tableEditor(d){
   const table=el('table');root.append(table);
   const ROWS=(d.parsed&&d.parsed.rows)||[];
   const UN=(d.parsed&&d.parsed.unparsed)||[];
-  let dirty=false;
+  // filename rules are first-match-wins: rows an earlier rule always beats get ⚠
+  const SHADOWS=d.kind==='filename-rules';
+  const shadowNote=el('div',{class:'muted',style:'font-size:.78rem;margin-top:.3rem;display:none'});
+  let dirty=false,checkSeq=0,checkTimer=null,dragSrc=null;
+  const crows=()=>[...table.querySelectorAll('tr.crow')];
+  const rowOf=tr=>{const o={};if(tr.dataset.line)o.line=+tr.dataset.line;spec.cols.forEach(c=>{o[c.f]=tr.querySelector(`[data-f="${c.f}"]`).value.trim();});return o;};
+  function flashRow(tr){tr.scrollIntoView({block:'center'});tr.classList.add('flash');setTimeout(()=>tr.classList.remove('flash'),1600);}
+  function showShadows(list){
+    const trs=crows();
+    trs.forEach(tr=>{const s=tr.querySelector('.shadowmark');if(s)s.remove();});
+    let n=0;
+    (list||[]).forEach(sh=>{
+      const tr=trs[sh.row],by=trs[sh.by];if(!tr||!by)return;
+      const b=rowOf(by);
+      const msg=`Never reached for names like '${sh.example}' — row ${sh.by+1} (${b.action} ${b.pattern}) matches first. Drag it above that row.`;
+      const mark=el('button',{class:'shadowmark',type:'button',title:msg,'aria-label':msg},'⚠');
+      mark.onclick=()=>flashRow(by);
+      tr.querySelector('td.grip').append(mark);n++;
+    });
+    shadowNote.textContent=n?`${n} rule(s) can never be reached — see ⚠`:'';
+    shadowNote.style.display=n?'':'none';
+  }
+  function scheduleCheck(){
+    if(!SHADOWS)return;
+    const my=++checkSeq;clearTimeout(checkTimer);
+    checkTimer=setTimeout(async()=>{
+      // half-typed rows (no pattern yet) would be refused: leave them out
+      const idx=[],rows=[];
+      crows().forEach((tr,i)=>{const o=rowOf(tr);if(o.pattern){idx.push(i);rows.push(o);}});
+      const r=await api('/api/conf/check-rows',{method:'POST',body:{id:d.id,rows}});
+      if(my!==checkSeq)return; // the table changed meanwhile
+      if(!r||r.error||!Array.isArray(r.shadows)){showShadows([]);return;}
+      showShadows(r.shadows.map(s=>({...s,row:idx[s.row],by:idx[s.by]})));
+    },400);
+  }
+  function changed(){dirty=true;scheduleCheck();}
+  function move(tr,dir){
+    const sib=dir<0?tr.previousElementSibling:tr.nextElementSibling;
+    if(!sib||!sib.classList.contains('crow'))return;
+    if(dir<0)sib.before(tr);else sib.after(tr);
+    changed();
+  }
   function rowFor(r){
     const tr=el('tr',{class:'crow'});if(r.line)tr.dataset.line=r.line;
+    // the row is only draggable while the handle is held, so text in the
+    // inputs stays selectable
+    const grip=el('span',{class:'gripdots',title:'Drag to reorder'},'⋮⋮');
+    grip.onmousedown=()=>{tr.draggable=true;document.addEventListener('mouseup',()=>{if(!dragSrc)tr.draggable=false;},{once:true});};
+    tr.append(el('td',{class:'grip'},grip));
     spec.cols.forEach(c=>{
       let inp;
       const val=r[c.f]==null?'':String(r[c.f]);
@@ -4600,25 +4646,57 @@ function tableEditor(d){
         inp=el('input',{'data-f':c.f,value:val,placeholder:c.ph||''});
         if(c.mono)inp.classList.add('mono');
       }
-      inp.oninput=()=>{dirty=true;};inp.onchange=()=>{dirty=true;};
+      const rechecks=c.f==='action'||c.f==='pattern';
+      inp.oninput=()=>{if(rechecks)changed();else dirty=true;};inp.onchange=inp.oninput;
       tr.append(el('td',{},inp));
     });
-    tr.append(el('td',{},Object.assign(el('button',{class:'act plain',title:'Remove'},'✕'),{onclick:()=>{tr.remove();dirty=true;}})));
+    const up=Object.assign(el('button',{class:'act plain',title:'Move up','aria-label':'Move up'},'↑'),{onclick:()=>{move(tr,-1);up.focus();}});
+    const down=Object.assign(el('button',{class:'act plain',title:'Move down','aria-label':'Move down'},'↓'),{onclick:()=>{move(tr,1);down.focus();}});
+    const del=Object.assign(el('button',{class:'act plain',title:'Remove'},'✕'),{onclick:()=>{tr.remove();changed();}});
+    tr.append(el('td',{class:'rowacts'},up,down,del));
     return tr;
   }
   function draw(){
     table.innerHTML='';
-    table.append(el('tr',{},...spec.cols.map(c=>el('th',{},c.label)),el('th',{})));
+    table.append(el('tr',{},el('th',{}),...spec.cols.map(c=>el('th',{},c.label)),el('th',{})));
     ROWS.forEach(r=>table.append(rowFor(r)));
-    UN.forEach(u=>table.append(el('tr',{class:'unparsed'},el('td',{colspan:String(spec.cols.length+1)},
+    UN.forEach(u=>table.append(el('tr',{class:'unparsed'},el('td',{colspan:String(spec.cols.length+2)},
       el('span',{class:'badge',style:'background:var(--critical);margin-right:.5rem'},'line '+u.line),
       el('span',{class:'mono muted'},u.text),
       el('span',{class:'muted',style:'margin-left:.5rem;font-size:.75rem'},'— not understood; kept as is (fix it in Raw mode)')))));
   }
   draw();
+  // drag and drop: a line shows where the row lands (above or below the
+  // target, by which half of it the pointer is over)
+  const clearMarks=()=>table.querySelectorAll('.drop-before,.drop-after').forEach(x=>x.classList.remove('drop-before','drop-after'));
+  table.addEventListener('dragstart',e=>{
+    const tr=e.target.closest&&e.target.closest('tr.crow');if(!tr)return;
+    dragSrc=tr;tr.classList.add('dragging');
+    e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('text/plain','');
+  });
+  table.addEventListener('dragover',e=>{
+    if(!dragSrc)return;
+    const tr=e.target.closest&&e.target.closest('tr.crow');
+    if(!tr)return;
+    e.preventDefault();e.dataTransfer.dropEffect='move';
+    clearMarks();if(tr===dragSrc)return;
+    const r=tr.getBoundingClientRect();
+    tr.classList.add(e.clientY<r.top+r.height/2?'drop-before':'drop-after');
+  });
+  table.addEventListener('drop',e=>{
+    if(!dragSrc)return;
+    const tr=e.target.closest&&e.target.closest('tr.crow');
+    e.preventDefault();clearMarks();
+    if(!tr||tr===dragSrc)return;
+    const r=tr.getBoundingClientRect();
+    if(e.clientY<r.top+r.height/2)tr.before(dragSrc);else tr.after(dragSrc);
+    flashRow(dragSrc);changed();
+  });
+  table.addEventListener('dragend',()=>{clearMarks();if(dragSrc){dragSrc.classList.remove('dragging');dragSrc.draggable=false;}dragSrc=null;});
   const add=el('button',{class:'act plain'},'+ Add row');
-  add.onclick=()=>{const tr=rowFor(spec.blank);table.append(tr);dirty=true;const f=tr.querySelector('input');if(f)f.focus();};
-  root.append(el('div',{class:'ctl',style:'margin-top:.5rem'},add));
+  add.onclick=()=>{const tr=rowFor(spec.blank);table.append(tr);changed();const f=tr.querySelector('input');if(f)f.focus();};
+  root.append(shadowNote,el('div',{class:'ctl',style:'margin-top:.5rem'},add));
+  if(SHADOWS&&Array.isArray(d.shadows))showShadows(d.shadows);
   // host lists: paste many hosts into one field → one row each
   if(d.kind==='host-list')table.addEventListener('paste',e=>{
     const t=(e.clipboardData||window.clipboardData).getData('text');
@@ -4631,15 +4709,10 @@ function tableEditor(d){
   });
   return {root,focusLine(n){
     const tr=table.querySelector(`tr[data-line="${n}"]`)||[...table.querySelectorAll('tr.unparsed')].find(r=>r.textContent.includes('line '+n));
-    if(!tr)return;tr.scrollIntoView({block:'center'});tr.classList.add('flash');setTimeout(()=>tr.classList.remove('flash'),1600);const f=tr.querySelector('input,select');if(f)f.focus();
+    if(!tr)return;flashRow(tr);const f=tr.querySelector('input,select');if(f)f.focus();
   },body(){
     if(!dirty)return null;
-    const rows=[...table.querySelectorAll('tr.crow')].map(tr=>{
-      const o={};if(tr.dataset.line)o.line=+tr.dataset.line;
-      spec.cols.forEach(c=>{o[c.f]=tr.querySelector(`[data-f="${c.f}"]`).value.trim();});
-      return o;
-    });
-    return {rows};
+    return {rows:crows().map(rowOf)};
   },describe(){const b=this.body();return b?`${b.rows.length} row(s)`:'';}};
 }
 
