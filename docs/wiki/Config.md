@@ -285,7 +285,8 @@ empty to keep it.
 ## OSINT settings
 
 The [OSINT](OSINT) view is off until **OSINT lookups** is switched on in the
-**OSINT providers** card (it writes `osint_enabled`). The same card holds the
+**OSINT providers** card (it writes `osint_enabled`); the OSINT view itself
+offers a **Switch OSINT on** button and a link to this card. The same card holds the
 optional **Have I Been Pwned API key** (`osint_hibp_key`) and the lookup mode
 (`osint_hibp_mode`): *direct* sends the full address to HIBP, *range* sends only a
 6-character hash prefix and needs the Pro/High RPM plan. The key is a secret: it is

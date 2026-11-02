@@ -3278,7 +3278,24 @@ async function renderOsint(v){
   v.append(card);
   const prov=await api('/api/delivery/osint/providers');
   if(!prov||prov.error){card.append(el('div',{class:'note warn'},(prov&&prov.error)||'no response'));return;}
-  if(!prov.enabled){card.append(el('div',{class:'note warn'},'OSINT is switched off. Tick "OSINT lookups" in the OSINT providers card of the Config tab to use it.'));}
+  if(!prov.enabled){
+    // Switch it on from here (same setting as the Config tab's OSINT providers
+    // card); the daemon reads config.toml per request, so no restart is needed.
+    const onBtn=el('button',{class:'act'},'Switch OSINT on');
+    onBtn.onclick=async()=>{
+      onBtn.disabled=true;
+      const r=await api('/api/service/conf/apply',{method:'POST',body:{which:'msfe',changes:{osint_enabled:'true'}}});
+      if(r&&r.ok){toast('OSINT lookups switched on');v.innerHTML='';renderOsint(v);}
+      else{onBtn.disabled=false;toast((r&&r.error)||'Could not switch OSINT on');}
+    };
+    const cfgLink=Object.assign(el('a',{class:'iplink'},'OSINT providers card of the Config tab'),{onclick:()=>{
+      document.querySelector('#tabs button[data-tab="config"]').click();
+      setTimeout(()=>{const c=document.getElementById('osint-providers-card');if(c)c.scrollIntoView({behavior:'smooth'});},400);
+    }});
+    card.append(el('div',{class:'note warn'},
+      el('div',{},'OSINT is switched off. Nothing is looked up until it is on; the API keys (optional) live in the ',cfgLink,'.'),
+      el('div',{class:'ctl',style:'margin-top:.4rem'},onBtn)));
+  }
   const pre=OSINT_PREFILL;OSINT_PREFILL=null;
   const addr=el('input',{type:'text',placeholder:'user@example.org',style:'min-width:18rem',value:pre?pre.address:''});
   const force=el('input',{type:'checkbox'});

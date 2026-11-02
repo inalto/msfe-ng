@@ -51,9 +51,11 @@ data).
 
 ## Switching it on
 
-OSINT is off by default. Tick **OSINT lookups** in the **OSINT providers** card
-of the Config tab (it writes `osint_enabled = true`; the key can also be set in
-`config.toml`). The keyless sources then work at once; HIBP, Web search and Hunter each need their own key, see
+OSINT is off by default. The OSINT view then shows a notice with a **Switch
+OSINT on** button, and a link that opens the **OSINT providers** card of the
+Config tab, where the same **OSINT lookups** tick box lives next to the API
+keys. Either writes `osint_enabled = true` (the key can also be set in
+`config.toml`) and takes effect at once. The keyless sources then work at once; HIBP, Web search and Hunter each need their own key, see
 [Sources and keys](#sources-and-keys).
 
 With it off, the view still opens and lists the sources, but a run is refused.
