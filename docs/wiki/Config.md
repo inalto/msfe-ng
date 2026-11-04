@@ -120,8 +120,11 @@ Under *Maintenance & tools*: pick a sample (clean, the GTUBE spam string, the
 EICAR test file as an attachment) or upload a `.eml`, and **Run simulation**
 asks each stage directly — SpamAssassin with MailScanner's `spamassassin.conf`
 as the scanning user (*offline* skips DNS, Razor and Pyzor), the virus scanner
-through `clamdscan`, the filename/filetype rules over the attachments — then
-predicts MailScanner's actions for that sender and recipient from your
+through `clamdscan`, the filename/filetype rules over the attachments (and,
+for a zip, the `Archives:` filename rules over each member's stored path, with
+an encrypted member refused unless *Allow Password-Protected Archives* is on;
+members are not unpacked, so the archive filetype rules and nested archives
+stay with the engine) — then predicts MailScanner's actions for that sender and recipient from your
 rulesets (spam checks, scores, spam/high/non-spam actions, virus handling).
 It is a simulation: nothing is delivered. **Send real test mail** submits the
 three test messages through the MTA instead; their real verdicts appear on the

@@ -12,7 +12,7 @@
 //! end-to-end run.
 
 use crate::json::Json;
-use crate::{engine, jobs, mailscanner, mime, msgrammar, rulefile, service, Config};
+use crate::{engine, jobs, mailscanner, mime, msgrammar, rulefile, service, zipdir, Config};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -673,6 +673,80 @@ pub(crate) fn first_match_perl(
     Some(t.trim().parse::<usize>().ok())
 }
 
+/// Reads the rule file a `MailScanner.conf` directive names and returns its
+/// catalog id (`ms:<file>`) and parsed rows, or `None` when unset/unreadable.
+fn rule_table(
+    conf: &str,
+    etc: &Path,
+    key: &str,
+) -> Option<(String, msgrammar::Table<msgrammar::FilenameRule>)> {
+    let v = mailscanner::get_directive(conf, key)?;
+    let file = mailscanner::expand_variables(conf, v);
+    let text = std::fs::read_to_string(&file).ok()?;
+    let id = Path::new(&file)
+        .strip_prefix(etc)
+        .map(|r| format!("ms:{}", r.display()))
+        .unwrap_or_else(|_| file.clone());
+    Some((id, msgrammar::parse_filename_rules(&text)))
+}
+
+/// `file -b` over the bytes, as MailScanner's filetype rules see them.
+fn file_description(bytes: &[u8]) -> Option<String> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let desc = Command::new("file")
+        .args(["-b", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()
+        .and_then(|mut ch| {
+            ch.stdin.take()?.write_all(bytes).ok()?;
+            ch.wait_with_output().ok()
+        })
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())?;
+    (!desc.is_empty()).then_some(desc)
+}
+
+/// First-match test of `subject` against one rule table; `label` is how the
+/// attachment is named in the report (a member of an archive is
+/// `path/in/zip (in archive.zip)`).
+#[allow(clippy::too_many_arguments)]
+fn check_subject(
+    perl: &[String],
+    key: &str,
+    id: &str,
+    table: &msgrammar::Table<msgrammar::FilenameRule>,
+    label: &str,
+    subject: &str,
+    transcript: &mut Vec<String>,
+    out: &mut Vec<ContentMatch>,
+) {
+    let rows = table.rows();
+    let patterns: Vec<String> = rows.iter().map(|r| r.pattern.clone()).collect();
+    match first_match_perl(perl, &patterns, subject) {
+        Some(Some(i)) => {
+            let r = rows[i];
+            transcript.push(format!(
+                "{key}: '{subject}' matches {} → {}",
+                r.pattern,
+                r.action.as_string()
+            ));
+            out.push(ContentMatch {
+                filename: label.to_string(),
+                rule_file: id.to_string(),
+                pattern: r.pattern.clone(),
+                action: r.action.as_string(),
+                log_text: r.log_text.clone(),
+                subject: subject.to_string(),
+            });
+        }
+        Some(None) => transcript.push(format!("{key}: '{subject}' matches no rule")),
+        None => transcript.push(format!("{key}: not checked (no perl)")),
+    }
+}
+
 fn content_matches(
     cfg: &Config,
     perl: &[String],
@@ -689,65 +763,72 @@ fn content_matches(
         transcript.push("no attachments".into());
         return Vec::new();
     }
+    let allow_passworded = mailscanner::get_directive(&conf, "Allow Password-Protected Archives")
+        .map(|v| v.trim().eq_ignore_ascii_case("yes"))
+        .unwrap_or(false);
     let mut out = Vec::new();
     for (name, bytes) in &atts {
         for (key, by_type) in [("Filename Rules", false), ("Filetype Rules", true)] {
-            let Some(v) = mailscanner::get_directive(&conf, key) else {
+            let Some((id, table)) = rule_table(&conf, &etc, key) else {
                 continue;
             };
-            let file = mailscanner::expand_variables(&conf, v);
-            let Ok(text) = std::fs::read_to_string(&file) else {
-                continue;
-            };
-            let table = msgrammar::parse_filename_rules(&text);
-            let rows = table.rows();
-            let patterns: Vec<String> = rows.iter().map(|r| r.pattern.clone()).collect();
             let subject = if by_type {
-                let mut c = Command::new("file");
-                c.args(["-b", "-"]);
-                use std::io::Write;
-                use std::process::Stdio;
-                let desc = c
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::null())
-                    .spawn()
-                    .ok()
-                    .and_then(|mut ch| {
-                        ch.stdin.take()?.write_all(bytes).ok()?;
-                        ch.wait_with_output().ok()
-                    })
-                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-                match desc {
-                    Some(d) if !d.is_empty() => d,
-                    _ => continue,
+                match file_description(bytes) {
+                    Some(d) => d,
+                    None => continue,
                 }
             } else {
                 name.clone()
             };
-            let id = Path::new(&file)
-                .strip_prefix(&etc)
-                .map(|r| format!("ms:{}", r.display()))
-                .unwrap_or_else(|_| file.clone());
-            match first_match_perl(perl, &patterns, &subject) {
-                Some(Some(i)) => {
-                    let r = rows[i];
-                    transcript.push(format!(
-                        "{key}: '{subject}' matches {} → {}",
-                        r.pattern,
-                        r.action.as_string()
-                    ));
-                    out.push(ContentMatch {
-                        filename: name.clone(),
-                        rule_file: id,
-                        pattern: r.pattern.clone(),
-                        action: r.action.as_string(),
-                        log_text: r.log_text.clone(),
-                        subject,
-                    });
+            check_subject(perl, key, &id, &table, name, &subject, transcript, &mut out);
+        }
+        // Inside a zip MailScanner tests each member's stored path (folders
+        // included) against the `Archives:` rule files, and refuses encrypted
+        // members unless `Allow Password-Protected Archives = yes`. The table
+        // of contents is enough for that; members are not unpacked, so the
+        // archive filetype rules and nested archives are left to the engine.
+        if !zipdir::looks_like_zip(bytes) {
+            continue;
+        }
+        match zipdir::members(bytes) {
+            Err(e) => transcript.push(format!("archive '{name}': {e}")),
+            Ok(members) => {
+                let files: Vec<_> = members.iter().filter(|m| !m.dir).collect();
+                transcript.push(format!(
+                    "archive '{name}': {} member(s); Archives: Filetype Rules and nested archives are not checked here",
+                    files.len()
+                ));
+                let table = rule_table(&conf, &etc, "Archives: Filename Rules");
+                for m in files {
+                    let label = format!("{} (in {name})", m.name);
+                    if m.encrypted && !allow_passworded {
+                        transcript.push(format!(
+                            "Allow Password-Protected Archives = no: '{}' is encrypted",
+                            m.name
+                        ));
+                        out.push(ContentMatch {
+                            filename: label,
+                            rule_file: "ms:MailScanner.conf [Allow Password-Protected Archives]".into(),
+                            pattern: "-".into(),
+                            action: "deny".into(),
+                            log_text: "password-protected archive".into(),
+                            subject: m.name.clone(),
+                        });
+                        continue;
+                    }
+                    if let Some((id, table)) = &table {
+                        check_subject(
+                            perl,
+                            "Archives: Filename Rules",
+                            id,
+                            table,
+                            &label,
+                            &m.name,
+                            transcript,
+                            &mut out,
+                        );
+                    }
                 }
-                Some(None) => transcript.push(format!("{key}: '{subject}' matches no rule")),
-                None => transcript.push(format!("{key}: not checked (no perl)")),
             }
         }
     }
@@ -1002,6 +1083,60 @@ mod tests {
             .iter()
             .any(|(k, v)| k == "Spam Actions" && v == "store"));
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn zip_members_are_tested_against_the_archive_rules() {
+        if Command::new("perl").arg("-e").arg("1").output().is_err() {
+            eprintln!("skipped: no perl");
+            return;
+        }
+        let base = std::env::temp_dir().join(format!("msfe-zipcheck-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("filename.rules.conf"), "deny\t.{255,}\tVery long filename\tlong\nallow\t\\.zip$\t-\t-\n").unwrap();
+        std::fs::write(base.join("archives.filename.rules.conf"), "deny\t.{150,}\tVery long filename\tlong\nallow\t\\.jpg$\t-\t-\n").unwrap();
+        std::fs::write(
+            base.join("MailScanner.conf"),
+            format!(
+                "%etc-dir% = {d}\nFilename Rules = %etc-dir%/filename.rules.conf\nArchives: Filename Rules = %etc-dir%/archives.filename.rules.conf\nAllow Password-Protected Archives = no\n",
+                d = base.display()
+            ),
+        )
+        .unwrap();
+        let long = format!("2-EVENTI/{}/photo.jpg", "x".repeat(170));
+        let zip = zipdir::build(&[
+            ("2-EVENTI/", b"", false),
+            (long.as_str(), b"jpeg", false),
+            ("2-EVENTI/short.jpg", b"jpeg", false),
+            ("2-EVENTI/locked.jpg", b"jpeg", true),
+        ]);
+        let eml = format!(
+            "From: a@x\r\nTo: b@y\r\nSubject: zip\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"b\"\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nhi\r\n--b\r\nContent-Type: application/zip; name=\"photos.zip\"\r\nContent-Disposition: attachment; filename=\"photos.zip\"\r\nContent-Transfer-Encoding: base64\r\n\r\n{}\r\n--b--\r\n",
+            crate::b64::encode(&zip)
+        );
+        let cfg = Config {
+            mailscanner_conf: base.join("MailScanner.conf").display().to_string(),
+            ..Default::default()
+        };
+        let mut t = Vec::new();
+        let c = content_matches(&cfg, &["perl".to_string()], eml.as_bytes(), &mut t);
+        let _ = std::fs::remove_dir_all(&base);
+        let by_name = |n: &str| c.iter().find(|m| m.filename.starts_with(n)).cloned();
+        let zipm = by_name("photos.zip").expect("the zip itself is checked");
+        assert_eq!(zipm.action, "allow");
+        assert_eq!(zipm.rule_file, "ms:filename.rules.conf");
+        let l = by_name(&long).expect("the long member path is tested");
+        assert_eq!(l.action, "deny");
+        assert_eq!(l.rule_file, "ms:archives.filename.rules.conf");
+        assert_eq!(l.pattern, ".{150,}");
+        assert!(l.filename.ends_with("(in photos.zip)"));
+        assert_eq!(by_name("2-EVENTI/short.jpg").unwrap().action, "allow");
+        let locked = by_name("2-EVENTI/locked.jpg").unwrap();
+        assert_eq!(locked.action, "deny");
+        assert!(locked.rule_file.contains("Allow Password-Protected Archives"));
+        assert!(c.iter().all(|m| !m.filename.starts_with("2-EVENTI/ ")), "directory entries are skipped");
+        assert!(t.iter().any(|l| l.contains("3 member(s)")), "{t:?}");
     }
 
     #[test]

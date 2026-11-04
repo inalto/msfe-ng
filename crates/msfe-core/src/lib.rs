@@ -106,6 +106,7 @@ pub mod units;
 pub mod upgrade;
 pub mod users;
 pub mod xml;
+pub mod zipdir;
 
 pub use config::Config;
 pub use json::Json;
