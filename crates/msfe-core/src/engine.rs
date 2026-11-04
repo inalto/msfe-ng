@@ -1122,6 +1122,53 @@ pub fn named_queue_hooked(cfg: &Config) -> bool {
         .unwrap_or(false)
 }
 
+/// cPanel's built `exim.conf` carries our include line: `/scripts/buildeximconf`
+/// copies the hook's text in verbatim. Until it has, Exim never sees the
+/// fragment and delivers mail unscanned while every file on disk looks wired
+/// (issue #17: "no errors, dashboard shows 0").
+pub fn named_queue_built(cfg: &Config) -> bool {
+    read_exim_conf()
+        .lines()
+        .any(|l| l.trim() == include_line(cfg))
+}
+
+/// When the Exim daemon started, as epoch seconds: systemd's main pid (or
+/// cPanel's pid file) and that process's start time from `/proc`. `None`
+/// when Exim is not running here or the kernel will not say.
+pub fn exim_daemon_started() -> Option<u64> {
+    let pid = std::process::Command::new("systemctl")
+        .args(["show", "-p", "MainPID", "--value", "exim"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .parse::<u32>()
+                .ok()
+        })
+        .filter(|p| *p > 0)
+        .or_else(|| {
+            let pid_file = std::env::var("MSFE_NG_EXIM_PID_FILE")
+                .unwrap_or_else(|_| "/var/spool/exim/exim-daemon.pid".into());
+            std::fs::read_to_string(pid_file).ok()?.trim().parse().ok()
+        })?;
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let btime = std::fs::read_to_string("/proc/stat")
+        .ok()?
+        .lines()
+        .find_map(|l| l.strip_prefix("btime ")?.trim().parse::<u64>().ok())?;
+    process_start_epoch(&stat, btime)
+}
+
+/// A process's start time in epoch seconds from its `/proc/<pid>/stat` line
+/// (field 22, clock ticks since boot at USER_HZ = 100) and the boot time.
+pub fn process_start_epoch(stat: &str, btime: u64) -> Option<u64> {
+    // the command name in parentheses may hold spaces: split after it
+    let (_, rest) = stat.rsplit_once(')')?;
+    let ticks: u64 = rest.split_whitespace().nth(19)?.parse().ok()?;
+    Some(btime + ticks / 100)
+}
+
 /// Our named-queue wiring is in place: the hook includes the fragment and
 /// the fragment exists — live, or renamed `.disabled` by the kill switch
 /// (still wired, just switched off; `mailflow::scanning_state` tells).
@@ -1157,7 +1204,7 @@ pub struct WireReport {
     pub dry_run: bool,
 }
 
-fn exim_rebuild(actions: &mut Vec<String>, dry: bool) {
+pub(crate) fn exim_rebuild(actions: &mut Vec<String>, dry: bool) {
     for cmd in ["/scripts/buildeximconf", "/scripts/restartsrv_exim"] {
         if dry || std::env::var("MSFE_NG_SKIP_EXIM_CMDS").is_ok() {
             actions.push(format!("would run: {cmd}"));
@@ -1292,8 +1339,18 @@ pub fn wire(cfg: &Config, dry: bool) -> io::Result<WireReport> {
         }
     }
 
-    // 4. rebuild + restart Exim so the ACL takes effect
+    // 4. rebuild + restart Exim so the ACL takes effect — and make sure the
+    // build really took the hook in: without the include in exim.conf, Exim
+    // keeps delivering unscanned while every file looks wired
     exim_rebuild(&mut actions, dry);
+    if !dry && std::env::var("MSFE_NG_SKIP_EXIM_CMDS").is_err() && !named_queue_built(cfg) {
+        actions.push(format!(
+            "WARNING: {} does not include {} after the rebuild — Exim still delivers mail unscanned; check /scripts/buildeximconf's output and that cPanel reads {}",
+            exim_conf_path().display(),
+            cfg.mailscannerq_conf,
+            hook.display()
+        ));
+    }
 
     // 5. restart MailScanner so it re-reads its queue dirs (only if allowed),
     // and make sure it comes back after a reboot: with Exim routing mail
@@ -1437,6 +1494,17 @@ pub(crate) mod tests {
         // empty/garbage output: `$ver` undef → 0 >= 4.97 is false
         assert!(!mailscanner_probe_long_ids(""));
         assert!(!mailscanner_probe_long_ids("Something unexpected"));
+    }
+
+    #[test]
+    fn process_start_time_comes_from_proc_stat_field_22() {
+        // a real line: comm with a space, start time 123456 ticks = 1234 s
+        let stat = "4242 (exim -bd) S 1 4242 4242 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 123456 1000 10 18446744073709551615 1 1 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0";
+        assert_eq!(
+            process_start_epoch(stat, 1_700_000_000),
+            Some(1_700_001_234)
+        );
+        assert_eq!(process_start_epoch("garbage", 1), None);
     }
 
     #[test]
@@ -1753,6 +1821,18 @@ pub(crate) mod tests {
         assert!(exim_queue_args(None).is_empty());
         let hook = std::fs::read_to_string(base.join("hook")).unwrap();
         assert_eq!(hook.matches(".include_if_exists").count(), 1);
+        // wired on disk is not built: only cPanel's rebuilt exim.conf
+        // carrying the include line means Exim actually routes mail
+        assert!(!named_queue_built(&cfg));
+        std::fs::write(
+            base.join("exim.conf"),
+            format!(
+                "split_spool_directory = true\n  .include_if_exists {}\n",
+                cfg.mailscannerq_conf
+            ),
+        )
+        .unwrap();
+        assert!(named_queue_built(&cfg));
         let frag = std::fs::read_to_string(&cfg.mailscannerq_conf).unwrap();
         assert!(frag.contains("queue         = mailscanner"));
         assert!(frag.contains("control       = queue_only"));

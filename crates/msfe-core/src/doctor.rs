@@ -316,6 +316,58 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
             detail,
             fix,
         ));
+        // Wired on disk is not wired in Exim: the hook and the fragment are
+        // files MSFE-NG writes, but only cPanel's rebuilt exim.conf carrying
+        // the include line makes Exim route mail (issue #17: a host where
+        // every check passed while mail was delivered unscanned).
+        if m == engine::EximMethod::NamedQueue {
+            let built = engine::named_queue_built(cfg);
+            let conf = engine::exim_conf_path();
+            let c = check(
+                "named-queue include built into exim.conf",
+                built,
+                Level::Fail,
+                if built {
+                    format!("{} includes {}", conf.display(), cfg.mailscannerq_conf)
+                } else {
+                    format!(
+                        "{} does not include {} — the hook is on disk but Exim's configuration was not rebuilt from it, so mail is delivered unscanned (and never recorded) while the wiring looks complete",
+                        conf.display(),
+                        cfg.mailscannerq_conf
+                    )
+                },
+                "msfe-ng doctor --fix (runs /scripts/buildeximconf && /scripts/restartsrv_exim)",
+            );
+            out.push(if built {
+                c
+            } else {
+                c.propose(
+                    "rebuild Exim's configuration from the cPanel ACL hooks and restart Exim",
+                    Proposal::Commands(vec![
+                        vec!["/scripts/buildeximconf".into()],
+                        vec!["/scripts/restartsrv_exim".into()],
+                    ]),
+                )
+            });
+        }
+    }
+    // Every Exim-side change (wiring, local-submission privacy, SMTP-time
+    // rejects) is in effect only once the daemon restarted after the build.
+    if cfg.panel == "cpanel" {
+        let conf = engine::exim_conf_path();
+        let mtime = std::fs::metadata(&conf)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+        let (ok, detail) = exim_config_current_verdict(mtime, engine::exim_daemon_started());
+        out.push(check(
+            "Exim running its current configuration",
+            ok,
+            Level::Warn,
+            detail,
+            "msfe-ng doctor --fix (runs /scripts/restartsrv_exim)",
+        ));
     }
     // The quarantine must be writable by the scanning children: spam-store and
     // the max-attempts archive create per-day subdirs from inside a child, and
@@ -2376,6 +2428,28 @@ pub fn phishing_lists_verdict(s: &PhishingListState) -> (bool, String, String) {
     }
 }
 
+/// Has the Exim daemon started after the last change to its built
+/// configuration? Unknown times (Exim not running, no /proc) pass: nothing
+/// to say. Same-second ties pass too: buildeximconf restarts right after
+/// writing.
+pub fn exim_config_current_verdict(
+    conf_mtime: Option<u64>,
+    started: Option<u64>,
+) -> (bool, String) {
+    match (conf_mtime, started) {
+        (Some(m), Some(s)) if m > s + 1 => (
+            false,
+            format!(
+                "exim.conf changed {} min after the running Exim started — it still uses the previous configuration",
+                (m - s) / 60
+            ),
+        ),
+        (Some(_), Some(_)) => (true, "the running Exim has read exim.conf as it is on disk".into()),
+        (_, None) => (true, "Exim's start time is not known here".into()),
+        (None, _) => (true, "no exim.conf here".into()),
+    }
+}
+
 /// Does `Incoming Queue Dir` point where the active Exim method queues mail?
 pub fn queue_dirs_verdict(method: engine::EximMethod, inc: &Path) -> (bool, &'static str) {
     let s = inc.to_string_lossy();
@@ -2424,6 +2498,10 @@ pub enum Fix {
     /// turn off cPanel SA plugins the engine's perl cannot load — only
     /// while cPanel's own spamd is disabled (nothing else uses them).
     CpanelSaPlugins,
+    /// `buildeximconf` + restart: the hook is on disk but not in exim.conf.
+    EximRebuild,
+    /// restart Exim: exim.conf changed after the daemon started.
+    EximRestart,
     /// `snapshot export` — none taken yet.
     Snapshot,
 }
@@ -2491,6 +2569,8 @@ pub fn plan(checks: &[Check], engine_targets_exim: bool) -> Vec<Fix> {
             {
                 Some(Fix::CpanelSaPlugins)
             }
+            "named-queue include built into exim.conf" => Some(Fix::EximRebuild),
+            "Exim running its current configuration" => Some(Fix::EximRestart),
             "configuration snapshot" => Some(Fix::Snapshot),
             _ => None,
         };
@@ -2502,6 +2582,10 @@ pub fn plan(checks: &[Check], engine_targets_exim: bool) -> Vec<Fix> {
     }
     // configure before the updater it patches; modules before the restart
     fixes.sort();
+    // the rebuild restarts Exim itself
+    if fixes.contains(&Fix::EximRebuild) {
+        fixes.retain(|f| *f != Fix::EximRestart);
+    }
     fixes
 }
 
@@ -2630,6 +2714,29 @@ pub fn fix(cfg: &Config, config_file: &Path) -> Vec<String> {
                 let broken =
                     crate::sa::broken_cpanel_plugins(&layout::resolve(cfg).perl, Path::new(site));
                 done.extend(crate::sa::disable_cpanel_plugins(&broken));
+            }
+            Fix::EximRebuild => {
+                let mut lines = Vec::new();
+                engine::exim_rebuild(&mut lines, false);
+                done.extend(lines);
+                if !engine::named_queue_built(cfg) {
+                    done.push(format!(
+                        "{} still lacks the include for {} — Exim keeps delivering unscanned; check /scripts/buildeximconf's output",
+                        engine::exim_conf_path().display(),
+                        cfg.mailscannerq_conf
+                    ));
+                }
+            }
+            Fix::EximRestart => {
+                let ok = Command::new("/scripts/restartsrv_exim")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .is_ok_and(|s| s.success());
+                done.push(format!(
+                    "restarted Exim: {}",
+                    if ok { "ok" } else { "FAILED" }
+                ));
             }
             Fix::Snapshot => {
                 match crate::snapshot::export(cfg, config_file, crate::snapshot::Only::All, None) {
@@ -3515,6 +3622,35 @@ mod tests {
         assert_eq!(c.url, Some("https://w/x"));
         let c = check("x", true, Level::Warn, String::new(), "f").url("https://w/x");
         assert_eq!(c.url, None, "an ok check has no procedure to follow");
+    }
+
+    #[test]
+    fn exim_side_findings_rebuild_or_restart_exim() {
+        let built = chk("named-queue include built into exim.conf", Level::Fail);
+        let stale = chk("Exim running its current configuration", Level::Warn);
+        assert_eq!(
+            plan(std::slice::from_ref(&stale), true),
+            vec![Fix::EximRestart]
+        );
+        // the rebuild restarts Exim: no second restart
+        assert_eq!(plan(&[built, stale], true), vec![Fix::EximRebuild]);
+    }
+
+    #[test]
+    fn exim_config_current_verdict_wants_a_restart_after_the_build() {
+        assert!(exim_config_current_verdict(Some(1000), Some(2000)).0);
+        assert!(
+            exim_config_current_verdict(Some(1000), Some(1000)).0,
+            "same second"
+        );
+        assert!(
+            exim_config_current_verdict(Some(1001), Some(1000)).0,
+            "one-second tie"
+        );
+        let (ok, detail) = exim_config_current_verdict(Some(1000 + 600), Some(1000));
+        assert!(!ok && detail.contains("10 min"), "{detail}");
+        assert!(exim_config_current_verdict(None, Some(1)).0);
+        assert!(exim_config_current_verdict(Some(1), None).0);
     }
 
     #[test]

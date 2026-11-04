@@ -808,7 +808,8 @@ fn content_matches(
                         ));
                         out.push(ContentMatch {
                             filename: label,
-                            rule_file: "ms:MailScanner.conf [Allow Password-Protected Archives]".into(),
+                            rule_file: "ms:MailScanner.conf [Allow Password-Protected Archives]"
+                                .into(),
                             pattern: "-".into(),
                             action: "deny".into(),
                             log_text: "password-protected archive".into(),
@@ -1094,8 +1095,16 @@ mod tests {
         let base = std::env::temp_dir().join(format!("msfe-zipcheck-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
-        std::fs::write(base.join("filename.rules.conf"), "deny\t.{255,}\tVery long filename\tlong\nallow\t\\.zip$\t-\t-\n").unwrap();
-        std::fs::write(base.join("archives.filename.rules.conf"), "deny\t.{150,}\tVery long filename\tlong\nallow\t\\.jpg$\t-\t-\n").unwrap();
+        std::fs::write(
+            base.join("filename.rules.conf"),
+            "deny\t.{255,}\tVery long filename\tlong\nallow\t\\.zip$\t-\t-\n",
+        )
+        .unwrap();
+        std::fs::write(
+            base.join("archives.filename.rules.conf"),
+            "deny\t.{150,}\tVery long filename\tlong\nallow\t\\.jpg$\t-\t-\n",
+        )
+        .unwrap();
         std::fs::write(
             base.join("MailScanner.conf"),
             format!(
@@ -1134,8 +1143,13 @@ mod tests {
         assert_eq!(by_name("2-EVENTI/short.jpg").unwrap().action, "allow");
         let locked = by_name("2-EVENTI/locked.jpg").unwrap();
         assert_eq!(locked.action, "deny");
-        assert!(locked.rule_file.contains("Allow Password-Protected Archives"));
-        assert!(c.iter().all(|m| !m.filename.starts_with("2-EVENTI/ ")), "directory entries are skipped");
+        assert!(locked
+            .rule_file
+            .contains("Allow Password-Protected Archives"));
+        assert!(
+            c.iter().all(|m| !m.filename.starts_with("2-EVENTI/ ")),
+            "directory entries are skipped"
+        );
         assert!(t.iter().any(|l| l.contains("3 member(s)")), "{t:?}");
     }
 

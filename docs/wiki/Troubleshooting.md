@@ -297,6 +297,34 @@ MSFE-NG. It also has no support for Exim ≥ 4.97 long message ids at all; the
 doctor warns about that and the monitor keeps re-filing misplaced spool
 files, but the real fix is the 5.5 engine.
 
+## Wired, no errors — but mail is delivered unscanned and the Dashboard stays at 0
+
+The named-queue wiring is two files MSFE-NG writes (the ACL fragment
+`/etc/msfe-ng/mailscannerq.conf` and its include line in the cPanel hook
+`ACL_MAIL_PRE_BLOCK/custom_begin_mail_pre`) plus one thing cPanel does:
+`/scripts/buildeximconf` copies the hook into `/etc/exim.conf`, and
+`/scripts/restartsrv_exim` makes Exim read it. When that last step did not
+happen — the build failed, or something rebuilt `exim.conf` without the
+hook — every file looks wired, MailScanner runs idle, Exim delivers every
+message straight away, and nothing is ever recorded. The doctor tells the two
+apart:
+
+- *named-queue include built into exim.conf* (Fail) — `/etc/exim.conf` lacks
+  the include line. `msfe-ng doctor --fix` (or the banner's **Fix what can be
+  fixed**) runs `/scripts/buildeximconf && /scripts/restartsrv_exim`; if the
+  line is still missing afterwards, read the build's output, and check that
+  `ls /usr/local/cpanel/etc/exim/acls/` lists `ACL_MAIL_PRE_BLOCK` on your
+  cPanel version.
+- *Exim running its current configuration* (Warn) — `exim.conf` changed
+  after the Exim daemon started, so the running Exim still uses the previous
+  one. `msfe-ng doctor --fix` restarts it.
+
+**Wire Exim → MailScanner** checks the same thing right after its rebuild and
+prints a `WARNING:` line in the activity console when the include did not
+land. To confirm by hand that a message went through the scanner, look for
+its id in `/var/log/maillog` (`MailScanner[…]: … Logging message <id>`) and
+for its `X-…-MailScanner` headers in the delivered copy.
+
 ## Exim already wired the ConfigServer way (`exim_outgoing.conf`)
 
 The original MSFE's "old method" routes mail with two Exim configurations:

@@ -68,7 +68,11 @@ pub fn members(bytes: &[u8]) -> Result<Vec<Member>, String> {
     if count == 0xFFFF || cd_size == 0xFFFF_FFFF || cd_off == 0xFFFF_FFFF {
         return Err("zip64 archive: member list not read".into());
     }
-    if cd_off.checked_add(cd_size).map(|end| end > bytes.len()).unwrap_or(true) {
+    if cd_off
+        .checked_add(cd_size)
+        .map(|end| end > bytes.len())
+        .unwrap_or(true)
+    {
         return Err("central directory lies outside the file (truncated archive)".into());
     }
     let mut out = Vec::with_capacity(count);
@@ -177,14 +181,21 @@ mod tests {
     fn lists_members_with_paths_and_encryption_flag() {
         let z = build(&[
             ("2-EVENTI/", b"", false),
-            ("2-EVENTI/3 Un’estate di incontri/2 Notte Bianca.jpg", b"jpeg", false),
+            (
+                "2-EVENTI/3 Un’estate di incontri/2 Notte Bianca.jpg",
+                b"jpeg",
+                false,
+            ),
             ("secret.docx", b"x", true),
         ]);
         assert!(looks_like_zip(&z));
         let m = members(&z).unwrap();
         assert_eq!(m.len(), 3);
         assert!(m[0].dir && !m[0].encrypted);
-        assert_eq!(m[1].name, "2-EVENTI/3 Un’estate di incontri/2 Notte Bianca.jpg");
+        assert_eq!(
+            m[1].name,
+            "2-EVENTI/3 Un’estate di incontri/2 Notte Bianca.jpg"
+        );
         assert!(!m[1].encrypted && !m[1].dir);
         assert!(m[2].encrypted);
     }
