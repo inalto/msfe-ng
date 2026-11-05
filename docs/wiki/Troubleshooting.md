@@ -310,11 +310,20 @@ message straight away, and nothing is ever recorded. The doctor tells the two
 apart:
 
 - *named-queue include built into exim.conf* (Fail) — `/etc/exim.conf` lacks
-  the include line. `msfe-ng doctor --fix` (or the banner's **Fix what can be
-  fixed**) runs `/scripts/buildeximconf && /scripts/restartsrv_exim`; if the
-  line is still missing afterwards, read the build's output, and check that
-  `ls /usr/local/cpanel/etc/exim/acls/` lists `ACL_MAIL_PRE_BLOCK` on your
-  cPanel version.
+  the include line. The usual cause on a freshly set-up server: WHM's *Exim
+  Configuration Manager* writes `acl_<hook name>=0` into
+  `/etc/exim.conf.localopts` for every custom ACL hook that was empty when
+  the configuration was last saved, and `buildeximconf` then leaves that hook
+  out however often it runs — the build reports success. The check names the
+  file when `acl_custom_begin_mail_pre=0` is there. `msfe-ng doctor --fix`
+  (or the banner's **Fix what can be fixed**) sets it to `1` and runs
+  `/scripts/buildeximconf && /scripts/restartsrv_exim`; **Wire Exim →
+  MailScanner** does the same. By hand:
+  `sed -i 's/^acl_custom_begin_mail_pre=.*/acl_custom_begin_mail_pre=1/' /etc/exim.conf.localopts`,
+  then the two scripts. If the line is still missing afterwards, check that
+  `ls /usr/local/cpanel/etc/exim/acls/` lists `ACL_MAIL_PRE_BLOCK`, and that
+  `/etc/exim.conf.local` has no `%ACLBLOCK%` section of its own (a replaced
+  ACL template has no place for cPanel's hooks).
 - *Exim running its current configuration* (Warn) — `exim.conf` changed
   after the Exim daemon started, so the running Exim still uses the previous
   one. `msfe-ng doctor --fix` restarts it.

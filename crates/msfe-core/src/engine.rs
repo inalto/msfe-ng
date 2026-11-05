@@ -1132,6 +1132,99 @@ pub fn named_queue_built(cfg: &Config) -> bool {
         .any(|l| l.trim() == include_line(cfg))
 }
 
+/// cPanel's per-server Exim options. `acl_<hook file name>=0` there makes
+/// `buildeximconf` leave that hook file out of `exim.conf`, and WHM's Exim
+/// Configuration Manager writes exactly that line for every custom hook
+/// that was empty the last time it was saved — so a hook MSFE-NG fills in
+/// later is silently ignored (issue #17).
+pub fn exim_localopts_paths() -> Vec<std::path::PathBuf> {
+    let base = std::env::var("MSFE_NG_EXIM_LOCALOPTS")
+        .unwrap_or_else(|_| "/etc/exim.conf.localopts".to_string());
+    // cPanel reads the shadow file after the main one: it wins
+    vec![format!("{base}.shadow").into(), base.into()]
+}
+
+fn acl_opt_of(line: &str, hook_name: &str) -> Option<bool> {
+    let (opt, value) = match line.split_once('=') {
+        Some((o, v)) => (o, v.trim()),
+        None => (line, ""),
+    };
+    if opt.strip_prefix("acl_") != Some(hook_name) {
+        return None;
+    }
+    // cPanel: a missing value counts as 0; anything else is int($value)
+    Some(value.parse::<i64>().unwrap_or(0) != 0)
+}
+
+/// Does this localopts text switch the hook file `hook_name` off?
+pub fn acl_hook_switched_off(localopts: &str, hook_name: &str) -> bool {
+    localopts
+        .lines()
+        .rev()
+        .find_map(|l| acl_opt_of(l, hook_name))
+        == Some(false)
+}
+
+/// The text with every `acl_<hook_name>` line set to 1; `None` when the
+/// hook is not switched off there (absent means on: nothing to add).
+pub fn acl_hook_switch_on(localopts: &str, hook_name: &str) -> Option<String> {
+    if !acl_hook_switched_off(localopts, hook_name) {
+        return None;
+    }
+    let mut out: String = localopts
+        .lines()
+        .map(|l| match acl_opt_of(l, hook_name) {
+            Some(_) => format!("acl_{hook_name}=1\n"),
+            None => format!("{l}\n"),
+        })
+        .collect();
+    if !localopts.ends_with('\n') && !localopts.is_empty() {
+        out.pop();
+    }
+    Some(out)
+}
+
+/// The localopts files that switch this hook file off.
+pub fn acl_hook_disabled_in(hook: &Path) -> Vec<std::path::PathBuf> {
+    let Some(name) = hook.file_name().and_then(|n| n.to_str()) else {
+        return vec![];
+    };
+    exim_localopts_paths()
+        .into_iter()
+        .filter(|p| std::fs::read_to_string(p).is_ok_and(|t| acl_hook_switched_off(&t, name)))
+        .collect()
+}
+
+/// Switch the hook file on wherever cPanel's options switch it off. One
+/// line per file changed; the caller rebuilds Exim.
+pub fn enable_acl_hook(hook: &Path, dry: bool) -> io::Result<Vec<String>> {
+    let Some(name) = hook.file_name().and_then(|n| n.to_str()) else {
+        return Ok(vec![]);
+    };
+    let mut done = Vec::new();
+    for p in exim_localopts_paths() {
+        let Ok(text) = std::fs::read_to_string(&p) else {
+            continue;
+        };
+        if let Some(new) = acl_hook_switch_on(&text, name) {
+            if !dry {
+                crate::sync::atomic_write(&p, new.as_bytes())?;
+            }
+            done.push(format!(
+                "{} acl_{name}=1 in {} (it was switched off there, so cPanel left the hook out of exim.conf)",
+                if dry { "would set" } else { "set" },
+                p.display()
+            ));
+        }
+    }
+    Ok(done)
+}
+
+/// The cPanel hook file the named-queue include lives in.
+pub fn named_queue_hook_path() -> std::path::PathBuf {
+    acl_hook_path()
+}
+
 /// When the Exim daemon started, as epoch seconds: systemd's main pid (or
 /// cPanel's pid file) and that process's start time from `/proc`. `None`
 /// when Exim is not running here or the kernel will not say.
@@ -1339,6 +1432,10 @@ pub fn wire(cfg: &Config, dry: bool) -> io::Result<WireReport> {
         }
     }
 
+    // 3b. cPanel's options may switch the hook file off (WHM writes
+    // acl_<name>=0 for a hook that was empty when it was last saved)
+    actions.extend(enable_acl_hook(&hook, dry)?);
+
     // 4. rebuild + restart Exim so the ACL takes effect — and make sure the
     // build really took the hook in: without the include in exim.conf, Exim
     // keeps delivering unscanned while every file looks wired
@@ -1494,6 +1591,35 @@ pub(crate) mod tests {
         // empty/garbage output: `$ver` undef → 0 >= 4.97 is false
         assert!(!mailscanner_probe_long_ids(""));
         assert!(!mailscanner_probe_long_ids("Something unexpected"));
+    }
+
+    #[test]
+    fn acl_hook_switch_follows_cpanels_reading_of_localopts() {
+        let name = "custom_begin_mail_pre";
+        // absent = on; =1 = on; a neighbour with a longer name is not it
+        assert!(!acl_hook_switched_off("senderverify=1\n", name));
+        assert!(!acl_hook_switched_off(
+            "acl_custom_begin_mail_pre=1\n",
+            name
+        ));
+        assert!(!acl_hook_switched_off(
+            "acl_custom_begin_mail_pre_x=0\n",
+            name
+        ));
+        assert!(!acl_hook_switched_off("acl_custom_begin_mail=0\n", name));
+        // =0, an empty value and a bare name all read as off
+        for off in [
+            "acl_custom_begin_mail_pre=0\n",
+            "acl_custom_begin_mail_pre=\n",
+            "acl_custom_begin_mail_pre",
+        ] {
+            assert!(acl_hook_switched_off(off, name), "{off:?}");
+        }
+        assert_eq!(acl_hook_switch_on("a=1\n", name), None);
+        assert_eq!(
+            acl_hook_switch_on("a=1\nacl_custom_begin_mail_pre=0\nb=2", name).as_deref(),
+            Some("a=1\nacl_custom_begin_mail_pre=1\nb=2")
+        );
     }
 
     #[test]
@@ -1821,6 +1947,26 @@ pub(crate) mod tests {
         assert!(exim_queue_args(None).is_empty());
         let hook = std::fs::read_to_string(base.join("hook")).unwrap();
         assert_eq!(hook.matches(".include_if_exists").count(), 1);
+        // a hook cPanel's options switch off is switched on by the next wire
+        let opts = base.join("localopts");
+        std::env::set_var("MSFE_NG_EXIM_LOCALOPTS", &opts);
+        std::fs::write(&opts, "acl_custom_end_mail=0\nacl_hook=0\nsenderverify=1\n").unwrap();
+        assert_eq!(acl_hook_disabled_in(&base.join("hook")), vec![opts.clone()]);
+        let again = wire(&cfg, false).unwrap();
+        assert!(
+            again
+                .actions
+                .iter()
+                .any(|a| a.starts_with("set acl_hook=1 in ")),
+            "{:?}",
+            again.actions
+        );
+        assert_eq!(
+            std::fs::read_to_string(&opts).unwrap(),
+            "acl_custom_end_mail=0\nacl_hook=1\nsenderverify=1\n"
+        );
+        assert!(acl_hook_disabled_in(&base.join("hook")).is_empty());
+        std::env::remove_var("MSFE_NG_EXIM_LOCALOPTS");
         // wired on disk is not built: only cPanel's rebuilt exim.conf
         // carrying the include line means Exim actually routes mail
         assert!(!named_queue_built(&cfg));

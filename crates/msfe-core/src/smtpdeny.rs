@@ -913,6 +913,13 @@ pub fn refresh_with(
         }
         rep.actions
             .push(format!("added the include line to {}", hook.display()));
+        // WHM writes acl_<hook>=0 for a hook that was empty at its last save
+        match crate::engine::enable_acl_hook(&hook, false) {
+            Ok(lines) => rep.actions.extend(lines),
+            Err(e) => rep.actions.push(format!(
+                "✗ cannot switch the hook on in cPanel's options: {e}"
+            )),
+        }
         if skip_cmds() {
             rep.actions.push(format!("would run: {BUILDEXIMCONF}"));
         } else {

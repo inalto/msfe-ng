@@ -323,12 +323,24 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
         if m == engine::EximMethod::NamedQueue {
             let built = engine::named_queue_built(cfg);
             let conf = engine::exim_conf_path();
+            let off_in = engine::acl_hook_disabled_in(&engine::named_queue_hook_path());
             let c = check(
                 "named-queue include built into exim.conf",
                 built,
                 Level::Fail,
                 if built {
                     format!("{} includes {}", conf.display(), cfg.mailscannerq_conf)
+                } else if let Some(opts) = off_in.first() {
+                    format!(
+                        "{} does not include {} — {} switches the cPanel hook off (acl_{}=0, written by WHM's Exim Configuration Manager while the hook was still empty), so buildeximconf leaves it out and mail is delivered unscanned (and never recorded)",
+                        conf.display(),
+                        cfg.mailscannerq_conf,
+                        opts.display(),
+                        engine::named_queue_hook_path()
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("custom_begin_mail_pre")
+                    )
                 } else {
                     format!(
                         "{} does not include {} — the hook is on disk but Exim's configuration was not rebuilt from it, so mail is delivered unscanned (and never recorded) while the wiring looks complete",
@@ -336,9 +348,11 @@ pub fn run(cfg: &Config, config_file: &Path) -> Vec<Check> {
                         cfg.mailscannerq_conf
                     )
                 },
-                "msfe-ng doctor --fix (runs /scripts/buildeximconf && /scripts/restartsrv_exim)",
+                "msfe-ng doctor --fix (switches the hook on in /etc/exim.conf.localopts when it is off there, then runs /scripts/buildeximconf && /scripts/restartsrv_exim)",
             );
-            out.push(if built {
+            // the one-click proposal can only run commands: it is offered
+            // when the rebuild alone is what is missing
+            out.push(if built || !off_in.is_empty() {
                 c
             } else {
                 c.propose(
@@ -2716,12 +2730,16 @@ pub fn fix(cfg: &Config, config_file: &Path) -> Vec<String> {
                 done.extend(crate::sa::disable_cpanel_plugins(&broken));
             }
             Fix::EximRebuild => {
+                match engine::enable_acl_hook(&engine::named_queue_hook_path(), false) {
+                    Ok(lines) => done.extend(lines),
+                    Err(e) => done.push(format!("cannot switch the cPanel hook on: {e}")),
+                }
                 let mut lines = Vec::new();
                 engine::exim_rebuild(&mut lines, false);
                 done.extend(lines);
                 if !engine::named_queue_built(cfg) {
                     done.push(format!(
-                        "{} still lacks the include for {} — Exim keeps delivering unscanned; check /scripts/buildeximconf's output",
+                        "{} still lacks the include for {} — Exim keeps delivering unscanned; see the wiki (Troubleshooting → Wired, no errors) for what else makes cPanel skip the hook",
                         engine::exim_conf_path().display(),
                         cfg.mailscannerq_conf
                     ));
